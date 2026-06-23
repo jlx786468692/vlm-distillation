@@ -1,0 +1,27 @@
+# Core dependencies
+torch>=2.0.0
+transformers>=4.40.0
+accelerate>=0.27.0
+datasets
+qwen-vl-utils
+
+# COCO dataset utilities
+pycocotools
+Pillow
+
+# Data processing
+numpy
+pandas
+
+# Configuration and utilities
+pyyaml
+tqdm
+python-dotenv
+
+# Optional: For visualization and analysis
+matplotlib
+seaborn
+
+# Optional: For advanced features
+scikit-learn
+scipy
