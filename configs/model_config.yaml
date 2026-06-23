@@ -1,0 +1,68 @@
+# Qwen2.5-VL-7B-Instruct Model Configuration
+
+model:
+  name: "Qwen/Qwen2.5-VL-7B-Instruct"
+  type: "vlm"
+  family: "qwen"
+
+  # Model architecture
+  vision_encoder: "ViT"
+  text_encoder: "Qwen2"
+  multimodal_fusion: "cross-attention"
+
+  # Inference settings
+  max_new_tokens: 512
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  repetition_penalty: 1.1
+
+  # Vision processing
+  vision_config:
+    image_size: 224
+    patch_size: 14
+    max_pixels: 1003520  # ~1024x1024
+    min_pixels: 3136  # 56x56
+
+  # Memory optimization
+  use_gradient_checkpointing: false
+  use_flash_attention: true  # Enable if supported
+  device_map: "auto"  # Automatic device mapping
+
+  # Precision settings
+  torch_dtype: "bfloat16"
+  load_in_8bit: false  # Use 8-bit quantization if needed
+  load_in_4bit: false  # Use 4-bit quantization if needed
+
+# Task-specific prompts
+prompts:
+  vqa:
+    template: "Look at the image and answer the following question. Think step by step.\nQuestion: {question}\nProvide your reasoning and then give the final answer."
+    reasoning_trigger: "Let me analyze this image step by step."
+
+  captioning:
+    template: "Describe this image in detail. Think about what you see and provide a comprehensive description."
+    reasoning_trigger: "Let me describe this image systematically."
+    max_caption_length: 100
+
+  detection:
+    template: "Detect and locate all objects in this image. For each object, provide the bounding box coordinates in [x_min, y_min, x_max, y_max] format and the object category."
+    reasoning_trigger: "Let me scan this image for objects."
+    detection_format: "json"
+
+# Output post-processing
+postprocessing:
+  vqa:
+    extract_answer: true
+    confidence_threshold: 0.5
+    max_answer_length: 50
+
+  captioning:
+    clean_caption: true
+    remove_duplicates: true
+
+  detection:
+    bbox_normalization: true  # Normalize to [0, 1] range
+    confidence_threshold: 0.5
+    nms_threshold: 0.5  # Non-maximum suppression
