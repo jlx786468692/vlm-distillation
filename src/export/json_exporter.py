@@ -8,6 +8,8 @@ Handles exporting and merging distillation results in JSON format.
 import json
 import shutil
 from typing import Dict, Any, List, Optional
+import torch
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 import glob
@@ -15,6 +17,19 @@ import glob
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
 
+class CustomEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, torch.Tensor):
+            return obj.tolist()
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if hasattr(obj, 'item'):
+            return obj.item()
+        if hasattr(obj, '__dict__'):
+            return str(obj)
+        return super().default(obj)
 
 class JSONExporter:
     """
@@ -94,7 +109,7 @@ class JSONExporter:
                 result['timestamp'] = datetime.now().isoformat()
 
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump(result, f, indent=2, ensure_ascii=False)
+                json.dump(result, f, indent=2, ensure_ascii=False, cls=CustomEncoder)
 
             self.logger.debug(f"Result saved to {path}")
             return True
@@ -217,7 +232,7 @@ class JSONExporter:
         }
 
         with open(summary_file, 'w') as f:
-            json.dump(summary, f, indent=2)
+            json.dump(summary, f, indent=2, cls=CustomEncoder)
 
         # Clean up batch files if successful
         if merged_count > 0:
@@ -313,7 +328,7 @@ class JSONExporter:
         }
 
         with open(report_path, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
+            json.dump(report, f, indent=2, ensure_ascii=False, cls=CustomEncoder)
 
         self.logger.info(f"Summary report saved to {report_path}")
         return str(report_path)

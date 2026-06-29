@@ -21,6 +21,16 @@ from .hard_label_gen import HardLabelGenerator
 from .soft_label_gen import SoftLabelGenerator
 from .cot_generator import CoTGenerator
 
+# 添加这个类
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, torch.Tensor):
+            return obj.tolist()
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 class Distiller:
     """
@@ -405,7 +415,7 @@ class Distiller:
         checkpoint_file = self.output_dir / "checkpoint_latest.json"
 
         with open(checkpoint_file, 'w') as f:
-            json.dump(checkpoint_data, f, indent=2)
+            json.dump(checkpoint_data, f, indent=2, cls=DateTimeEncoder)
 
         self.logger.info(f"Checkpoint saved: {len(processed_ids)} images processed")
 

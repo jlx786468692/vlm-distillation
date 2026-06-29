@@ -8,9 +8,49 @@ Provides logging configuration and utilities for the distillation pipeline.
 import os
 import logging
 import sys
+import traceback
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+
+
+# ANSI 颜色代码
+class LogColors:
+    """ANSI color codes for terminal output."""
+    RED = '\033[91m'      # ERROR - 红色
+    YELLOW = '\033[93m'   # DEBUG - 黄色
+    ORANGE = '\033[33m'   # WARNING - 橙色
+    WHITE = '\033[97m'    # INFO/其他 - 白色
+    GREEN = '\033[92m'    # SUCCESS - 绿色
+    CYAN = '\033[96m'     # 其他颜色
+    RESET = '\033[0m'     # 重置颜色
+    BOLD = '\033[1m'      # 加粗
+
+
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter with colored output based on log level."""
+    
+    # 日志级别对应的颜色
+    LEVEL_COLORS = {
+        logging.DEBUG: LogColors.YELLOW,
+        logging.INFO: LogColors.WHITE,
+        logging.WARNING: LogColors.ORANGE,
+        logging.ERROR: LogColors.RED,
+        logging.CRITICAL: LogColors.BOLD + LogColors.RED,
+    }
+    
+    def format(self, record):
+        # 获取对应级别的颜色
+        color = self.LEVEL_COLORS.get(record.levelno, LogColors.WHITE)
+        reset = LogColors.RESET
+        
+        # 给消息添加颜色
+        record.msg = f"{color}{record.msg}{reset}"
+        
+        # 给级别名称添加颜色
+        record.levelname = f"{color}{record.levelname}{reset}"
+        
+        return super().format(record)
 
 
 def setup_logger(
@@ -18,7 +58,8 @@ def setup_logger(
     level: str = "INFO",
     log_file: Optional[str] = None,
     console_output: bool = True,
-    format_string: Optional[str] = None
+    format_string: Optional[str] = None,
+    use_colors: bool = True
 ) -> logging.Logger:
     """
     Set up a logger with configurable handlers.
@@ -29,6 +70,7 @@ def setup_logger(
         log_file: Path to log file. If None, no file logging.
         console_output: Whether to output to console
         format_string: Custom format string. If None, uses default.
+        use_colors: Whether to use colored output for console.
 
     Returns:
         Configured logger instance
@@ -40,20 +82,23 @@ def setup_logger(
     # Remove existing handlers
     logger.handlers.clear()
 
-    # Default format
+    # Default format - 添加详细位置信息
     if format_string is None:
-        format_string = "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"
+        format_string = "[%(asctime)s] [%(levelname)s] [%(name)s] [%(filename)s:%(lineno)d:%(funcName)s] %(message)s"
 
-    formatter = logging.Formatter(format_string, datefmt="%Y-%m-%d %H:%M:%S")
-
-    # Console handler
+    # Console handler - 使用彩色格式
     if console_output:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(getattr(logging, level.upper()))
-        console_handler.setFormatter(formatter)
+        
+        if use_colors:
+            console_handler.setFormatter(ColoredFormatter(format_string, datefmt="%Y-%m-%d %H:%M:%S"))
+        else:
+            console_handler.setFormatter(logging.Formatter(format_string, datefmt="%Y-%m-%d %H:%M:%S"))
+        
         logger.addHandler(console_handler)
 
-    # File handler
+    # File handler - 不使用颜色（文件中不需要ANSI代码）
     if log_file:
         # Ensure log directory exists
         log_dir = Path(log_file).parent
@@ -61,7 +106,7 @@ def setup_logger(
 
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setLevel(getattr(logging, level.upper()))
-        file_handler.setFormatter(formatter)
+        file_handler.setFormatter(logging.Formatter(format_string, datefmt="%Y-%m-%d %H:%M:%S"))
         logger.addHandler(file_handler)
 
     return logger
@@ -97,7 +142,8 @@ class DistillationLogger:
             name=name,
             level=level,
             log_file=log_file,
-            console_output=True
+            console_output=True,
+            use_colors=True
         )
 
         # Progress tracking
@@ -173,7 +219,7 @@ class DistillationLogger:
 
     def log_error(self, error: Exception, context: Optional[str] = None) -> None:
         """
-        Log error with context.
+        Log error with context and full traceback.
 
         Args:
             error: Exception object
@@ -183,7 +229,11 @@ class DistillationLogger:
         if context:
             message = f"{context} - {message}"
 
+        # 使用 exc_info=True 显示完整 traceback
         self.logger.error(message, exc_info=True)
+        
+        # 额外打印完整的 traceback
+        self.logger.debug(f"Full traceback:\n{traceback.format_exc()}")
 
     def end_process(self, description: str = "Distillation completed") -> None:
         """
@@ -218,6 +268,7 @@ def get_logger() -> logging.Logger:
     Returns:
         Default logger
     """
+    global _default_logger
     if _default_logger is None:
         _default_logger = setup_logger()
     return _default_logger

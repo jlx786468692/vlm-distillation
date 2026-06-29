@@ -6,7 +6,7 @@ Wraps Qwen2.5-VL-7B-Instruct for multi-task distillation.
 """
 
 import torch
-from transformers import AutoModelForVision2Seq, AutoTokenizer, AutoProcessor
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
 from PIL import Image
@@ -92,7 +92,7 @@ class TeacherModel:
 
             # Load model
             self.logger.info(f"Loading model on {self.device} with {self.precision} precision...")
-            self.model = AutoModelForVision2Seq.from_pretrained(
+            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.model_name,
                 torch_dtype=torch_dtype,
                 device_map=self.device,
