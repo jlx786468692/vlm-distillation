@@ -127,6 +127,40 @@ python scripts/run_distillation.py --resume outputs/checkpoint_500.json
 python scripts/validate_data.py --input outputs/merged/
 ```
 
+### 4. Clean Generated Data ✨ New
+
+Clean the distilled data to improve quality before student model training:
+
+```bash
+# Basic cleaning
+python scripts/clean_data.py --input outputs/merged
+
+# Custom thresholds
+python scripts/clean_data.py \
+    --input outputs/merged \
+    --min-confidence 0.6 \
+    --min-quality 40
+
+# Preview without saving (dry run)
+python scripts/clean_data.py --input outputs/merged --dry-run
+
+# Keep invalid data (mark only, don't remove)
+python scripts/clean_data.py --input outputs/merged --keep-invalid
+```
+
+The cleaning process performs:
+- **Anomaly Detection**: Identifies low confidence, invalid answers, empty results, etc.
+- **Quality Scoring**: Computes comprehensive quality scores (0-100)
+- **Data Filtering**: Removes low-quality data based on thresholds
+- **Data Repair**: Fixes anomalous bounding boxes automatically
+- **Deduplication**: Marks duplicate answers for review
+- **Report Generation**: Provides detailed cleaning statistics and recommendations
+
+Cleaned data is saved to `outputs/cleaned/` with:
+- `cleaned/`: High-quality data ready for training
+- `removed/`: Low-quality data for analysis
+- `cleaning_report.json`: Comprehensive cleaning report
+
 ## 📊 Output Format
 
 Generated data is saved in JSON format. Here's an example:
@@ -191,7 +225,7 @@ Generated data is saved in JSON format. Here's an example:
 ```
 vlm-distillation/
 ├── configs/              # Configuration files
-│   ├── default.yaml
+│   ├── default.yaml      # Main config (includes cleaning params)
 │   ├── model_config.yaml
 │   └── distillation.yaml
 │
@@ -212,6 +246,10 @@ vlm-distillation/
 │   │   ├── cot_generator.py
 │   │   └── distiller.py
 │   │
+│   ├── cleaning/        # Data cleaning ✨ New
+│   │   ├── data_cleaner.py
+│   │   └── __init__.py
+│   │
 │   ├── utils/           # Utilities
 │   │   ├── config.py
 │   │   ├── logger.py
@@ -222,14 +260,17 @@ vlm-distillation/
 │
 ├── scripts/             # Executable scripts
 │   ├── run_distillation.py
+│   ├── clean_data.py     ✨ New
 │   ├── download_coco.py
 │   └── validate_data.py
 │
 ├── outputs/             # Generated outputs
-│   ├── hard_labels/
-│   ├── soft_labels/
-│   ├── cot_reasoning/
-│   └── merged/
+│   ├── merged/          # Raw distilled data
+│   ├── cleaned/         ✨ New - Cleaned data
+│   │   ├── cleaned/     # High-quality data
+│   │   ├── removed/     # Low-quality data
+│   │   └── cleaning_report.json
+│   └── archive/
 │
 ├── tests/               # Unit tests
 │   └── test_distillation.py
