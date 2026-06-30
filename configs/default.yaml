@@ -93,3 +93,42 @@ validation:
   validate_schema: true
   check_image_paths: true
   min_samples_per_task: 10
+
+# ============================================================
+# 数据清洗配置 (Data Cleaning Configuration)
+# ============================================================
+cleaning:
+  # 是否启用数据清洗
+  enabled: true
+
+  # 异常检测阈值
+  min_confidence: 0.5            # 最低置信度阈值（低于此值标记为异常）
+  max_confidence: 0.95           # 最高置信度阈值（高于此值可能过于自信）
+  min_quality_score: 30.0        # 最低质量分数阈值（0-100，低于此值移除）
+  min_cot_quality: 0.5           # 最低CoT逻辑流畅度分数
+
+  # 答案长度限制
+  min_answer_length: 3           # 最短答案长度（字符）
+  max_answer_length: 100         # 最长答案长度（字符）
+
+  # 清洗策略
+  auto_remove_invalid: true      # 自动移除无效数据（invalid_answer/empty_result）
+  auto_repair_bbox: true         # 自动修复异常检测框
+  deduplicate_answers: true      # 答案去重（标记但不移除）
+
+  # 报告设置
+  save_removed_data: true        # 保存被移除的数据供分析
+  max_removed_samples_display: 20  # 报告中最多展示的被移除样本数
+
+  # 无效答案列表（会被自动移除）
+  invalid_answers:
+    - "unknown"
+    - "n/a"
+    - "none"
+    - "null"
+    - "nothing"
+    - "i don't know"
+    - "cannot determine"
+    - "unclear"
+    - "no answer"
+    - "not sure"
