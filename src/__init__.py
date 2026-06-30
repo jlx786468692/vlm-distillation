@@ -15,6 +15,13 @@ Supported tasks:
 - Image Captioning
 - Object Detection
 
+Data cleaning features:
+- Anomaly detection (7 types)
+- Quality scoring (0-100)
+- Data filtering and repair
+- Deduplication
+- Comprehensive cleaning reports
+
 Author: VLM-Distillation Team
 Version: 1.0.0
 """
@@ -27,6 +34,7 @@ from .models import TeacherModel
 from .distillation import Distiller
 from .utils import ConfigManager, setup_logger
 from .export import JSONExporter
+from .cleaning import DataCleaner
 
 __all__ = [
     "COCODataLoader",
@@ -36,4 +44,5 @@ __all__ = [
     "ConfigManager",
     "setup_logger",
     "JSONExporter",
+    "DataCleaner",
 ]
