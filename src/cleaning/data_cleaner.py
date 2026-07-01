@@ -863,6 +863,7 @@ class DataCleaner:
             max_quality = max(qualities)
             median_quality = sorted(qualities)[len(qualities)//2]
         else:
+            qualities = []  # 定义空列表，防止后续引用报错
             avg_quality = min_quality = max_quality = median_quality = 0
 
         report = {

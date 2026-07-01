@@ -11,8 +11,15 @@ import json
 from pathlib import Path
 from typing import Dict, Any, List
 
-from src import ConfigManager, setup_logger
-
+# 兼容两种导入方式：安装后和未安装
+try:
+    # 安装后的导入方式
+    from src import ConfigManager, setup_logger
+except ImportError:
+    # 未安装时的导入方式（开发模式）
+    project_root = Path(__file__).parent.parent
+    sys.path.insert(0, str(project_root))
+    from src import ConfigManager, setup_logger
 
 def validate_json_schema(data: Dict) -> bool:
     """

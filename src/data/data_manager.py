@@ -127,14 +127,31 @@ class DataManager:
         all_ids = set(self.coco_loader.get_image_ids())
 
         if self.tasks:
-            # Find images that have at least one task annotation
-            task_ids = vqa_ids | caption_ids | instance_ids
-            valid_ids = [id for id in all_ids if id in task_ids]
+            # STRICT MODE: Only select images that have ALL requested task annotations
+            # This prevents empty results during distillation
+            if 'vqa' in self.tasks and 'captioning' in self.tasks and 'detection' in self.tasks:
+                # All three tasks: require all three annotations
+                valid_ids = list(all_ids & vqa_ids & caption_ids & instance_ids)
+                self.logger.info(f"Strict sampling: requiring all task annotations")
+            else:
+                # Subset of tasks: require intersection of requested tasks
+                task_sets = []
+                if 'vqa' in self.tasks:
+                    task_sets.append(vqa_ids)
+                if 'captioning' in self.tasks:
+                    task_sets.append(caption_ids)
+                if 'detection' in self.tasks:
+                    task_sets.append(instance_ids)
+
+                # Intersection of all requested tasks
+                valid_ids = list(all_ids)
+                for task_set in task_sets:
+                    valid_ids = [id for id in valid_ids if id in task_set]
         else:
             valid_ids = list(all_ids)
 
         self.logger.info(
-            f"Found {len(valid_ids)} images with task annotations "
+            f"Found {len(valid_ids)} images with all requested task annotations "
             f"(VQA: {len(vqa_ids)}, Caption: {len(caption_ids)}, Instance: {len(instance_ids)})"
         )
 

@@ -9,12 +9,17 @@ import argparse
 import sys
 from pathlib import Path
 
-# 将项目根目录添加到 sys.path
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
-
-from src import ConfigManager, TeacherModel, Distiller, COCODataLoader, setup_logger
-from src.distillation import HardLabelGenerator, SoftLabelGenerator, CoTGenerator
+# 兼容两种导入方式：安装后和未安装
+try:
+    # 安装后的导入方式
+    from src import ConfigManager, TeacherModel, Distiller, COCODataLoader, setup_logger
+    from src.distillation import HardLabelGenerator, SoftLabelGenerator, CoTGenerator
+except ImportError:
+    # 未安装时的导入方式（开发模式）
+    project_root = Path(__file__).parent.parent
+    sys.path.insert(0, str(project_root))
+    from src import ConfigManager, TeacherModel, Distiller, COCODataLoader, setup_logger
+    from src.distillation import HardLabelGenerator, SoftLabelGenerator, CoTGenerator
 
 
 def main():
@@ -42,7 +47,7 @@ def main():
         type=str,
         nargs='+',
         choices=['vqa', 'captioning', 'detection'],
-        default=None,
+        default=['vqa', 'captioning', 'detection'],
         help='Tasks to run (overrides config)'
     )
 
@@ -89,7 +94,7 @@ def main():
     )
 
     logger.info("="*60)
-    logger.info("VLM Data Distillation Pipeline")
+    logger.info("VLM Data Distillation Pipeline!!!")
     logger.info("="*60)
 
     # Load configuration

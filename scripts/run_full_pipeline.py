@@ -35,14 +35,15 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
-from src import (
-    ConfigManager,
-    TeacherModel,
-    Distiller,
-    COCODataLoader,
-    DataCleaner,
-    setup_logger
-)
+# 兼容两种导入方式：安装后和未安装
+try:
+    # 安装后的导入方式
+    from src import ConfigManager, TeacherModel, Distiller, COCODataLoader, setup_logger, DataCleaner
+except ImportError:
+    # 未安装时的导入方式（开发模式）
+    project_root = Path(__file__).parent.parent
+    sys.path.insert(0, str(project_root))
+    from src import ConfigManager, TeacherModel, Distiller, COCODataLoader, setup_logger, DataCleaner
 
 
 class FullPipelineRunner:
@@ -301,7 +302,7 @@ class FullPipelineRunner:
             # 初始化数据加载器
             self.logger.info("\n[1/3] Initializing COCO dataset loader...")
             coco_loader = COCODataLoader(self.config)
-            coco_loader.initialize(self.config.get('data.val_split', 'val2017'))
+            coco_loader.initialize(self.config.get('data.val_split', 'val2014'))
 
             dataset_summary = coco_loader.get_annotation_summary()
             self.logger.info(f"Dataset loaded successfully")
@@ -685,7 +686,7 @@ Output:
         type=str,
         nargs='+',
         choices=['vqa', 'captioning', 'detection'],
-        default=None,
+        default=['vqa', 'captioning', 'detection'],
         help='Tasks to run: vqa, captioning, detection'
     )
 
@@ -695,7 +696,7 @@ Output:
         type=str,
         nargs='+',
         choices=['distillation', 'cleaning', 'validation'],
-        default=None,
+        default=['distillation', 'cleaning', 'validation'],
         help='Steps to run (default: all three steps)'
     )
 
@@ -717,6 +718,7 @@ Output:
     parser.add_argument(
         '--keep-invalid',
         action='store_true',
+        default=True,
         help='Keep invalid data instead of removing (mark only)'
     )
 
@@ -724,6 +726,7 @@ Output:
     parser.add_argument(
         '--skip-validation',
         action='store_true',
+        default=False,
         help='Skip validation step'
     )
 
@@ -738,12 +741,14 @@ Output:
     parser.add_argument(
         '--dry-run',
         action='store_true',
+        default=False,
         help='Test configuration without actual processing'
     )
 
     parser.add_argument(
         '--verbose',
         action='store_true',
+        default=True,
         help='Show detailed logging'
     )
 

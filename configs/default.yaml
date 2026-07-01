@@ -21,8 +21,8 @@ data:
   images_root: "./data/coco/images"
 
   # Dataset splits
-  train_split: "train2017"
-  val_split: "val2017"
+  train_split: "train2014"
+  val_split: "val2014"
 
   # Processing parameters
   batch_size: 4
