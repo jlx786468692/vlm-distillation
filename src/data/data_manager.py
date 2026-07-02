@@ -122,6 +122,7 @@ class DataManager:
         vqa_ids = set(self.coco_loader.get_image_ids('vqa')) if 'vqa' in self.tasks else set()
         caption_ids = set(self.coco_loader.get_image_ids('caption')) if 'captioning' in self.tasks else set()
         instance_ids = set(self.coco_loader.get_image_ids('instance')) if 'detection' in self.tasks else set()
+        keypoints_ids = set(self.coco_loader.get_image_ids('keypoints')) if 'keypoints' in self.tasks else set()
 
         # Find intersection (images with all required annotations)
         all_ids = set(self.coco_loader.get_image_ids())
@@ -129,30 +130,27 @@ class DataManager:
         if self.tasks:
             # STRICT MODE: Only select images that have ALL requested task annotations
             # This prevents empty results during distillation
-            if 'vqa' in self.tasks and 'captioning' in self.tasks and 'detection' in self.tasks:
-                # All three tasks: require all three annotations
-                valid_ids = list(all_ids & vqa_ids & caption_ids & instance_ids)
-                self.logger.info(f"Strict sampling: requiring all task annotations")
-            else:
-                # Subset of tasks: require intersection of requested tasks
-                task_sets = []
-                if 'vqa' in self.tasks:
-                    task_sets.append(vqa_ids)
-                if 'captioning' in self.tasks:
-                    task_sets.append(caption_ids)
-                if 'detection' in self.tasks:
-                    task_sets.append(instance_ids)
+            task_sets = []
+            if 'vqa' in self.tasks:
+                task_sets.append(vqa_ids)
+            if 'captioning' in self.tasks:
+                task_sets.append(caption_ids)
+            if 'detection' in self.tasks:
+                task_sets.append(instance_ids)
+            if 'keypoints' in self.tasks:
+                task_sets.append(keypoints_ids)
 
-                # Intersection of all requested tasks
-                valid_ids = list(all_ids)
-                for task_set in task_sets:
-                    valid_ids = [id for id in valid_ids if id in task_set]
+            # Intersection of all requested tasks
+            valid_ids = list(all_ids)
+            for task_set in task_sets:
+                valid_ids = [id for id in valid_ids if id in task_set]
         else:
             valid_ids = list(all_ids)
 
         self.logger.info(
             f"Found {len(valid_ids)} images with all requested task annotations "
-            f"(VQA: {len(vqa_ids)}, Caption: {len(caption_ids)}, Instance: {len(instance_ids)})"
+            f"(VQA: {len(vqa_ids)}, Caption: {len(caption_ids)}, "
+            f"Instance: {len(instance_ids)}, Keypoints: {len(keypoints_ids)})"
         )
 
         return valid_ids
@@ -367,6 +365,10 @@ class DataManager:
             if 'detection' in self.tasks:
                 instances = self.coco_loader.get_instances(img_id)
                 batch_data['annotations']['detection'][img_id] = instances
+
+            if 'keypoints' in self.tasks:
+                keypoints = self.coco_loader.get_keypoints(img_id)
+                batch_data['annotations']['keypoints'][img_id] = keypoints
 
         return batch_data
 

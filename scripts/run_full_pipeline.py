@@ -118,6 +118,11 @@ class FullPipelineRunner:
             steps = self.STEPS.copy()
             if skip_validation and 'validation' in steps:
                 steps.remove('validation')
+        
+        # 确定运行任务（优先使用YAML配置，命令行可覆盖）
+        if tasks is None:
+            # 从配置文件读取任务列表
+            tasks = self.config.get('distillation.tasks', ['vqa', 'captioning', 'detection', 'keypoints'])
 
         # 验证步骤名称
         for step in steps:
@@ -685,9 +690,9 @@ Output:
         '--tasks',
         type=str,
         nargs='+',
-        choices=['vqa', 'captioning', 'detection'],
-        default=['vqa', 'captioning', 'detection'],
-        help='Tasks to run: vqa, captioning, detection'
+        choices=['vqa', 'captioning', 'detection', 'keypoints'],
+        default=None,
+        help='Tasks to run: vqa, captioning, detection, keypoints'
     )
 
     # 步骤选择
@@ -696,7 +701,7 @@ Output:
         type=str,
         nargs='+',
         choices=['distillation', 'cleaning', 'validation'],
-        default=['distillation', 'cleaning', 'validation'],
+        default=None,
         help='Steps to run (default: all three steps)'
     )
 

@@ -232,13 +232,47 @@ class TeacherModel:
 
         return result
 
+    def inference_keypoints(
+        self,
+        image: Union[Image.Image, str, Path],
+        return_logits: bool = False,
+        generate_cot: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Perform human pose estimation (keypoints) inference.
+
+        Args:
+            image: PIL Image or image path
+            return_logits: Whether to return logits for soft labels
+            generate_cot: Whether to generate Chain-of-Thought reasoning
+
+        Returns:
+            Dictionary with detected persons and their keypoints
+        """
+        # Construct prompt
+        if generate_cot:
+            prompt = self._construct_cot_prompt("", task="keypoints")
+        else:
+            prompt = self._construct_prompt("", task="keypoints")
+
+        # Prepare inputs
+        inputs = self._prepare_inputs(image, prompt)
+
+        # Generate
+        outputs = self._generate(inputs, return_logits=return_logits)
+
+        # Process outputs
+        result = self._process_keypoints_outputs(outputs, return_logits)
+
+        return result
+
     def _construct_prompt(self, question: str, task: str) -> str:
         """
         Construct task-specific prompt.
 
         Args:
             question: Question for VQA (empty for other tasks)
-            task: Task type (vqa/captioning/detection)
+            task: Task type (vqa/captioning/detection/keypoints)
 
         Returns:
             Formatted prompt string
@@ -247,6 +281,7 @@ class TeacherModel:
             'vqa': f"Look at the image and answer the following question:\nQuestion: {question}\nAnswer:",
             'captioning': "Describe this image in detail, including all objects, their attributes, and the overall scene.",
             'detection': "Detect all objects in this image. For each object, provide the bounding box coordinates in format [x_min, y_min, x_max, y_max] and the object category. Format your response as JSON.",
+            'keypoints': "Detect all persons in this image and estimate their body pose. For each person, provide: 1) a bounding box [x, y, width, height], and 2) 17 body keypoints with coordinates [x, y] and visibility (0=not visible, 1=occluded, 2=visible). Keypoints: nose, left_eye, right_eye, left_ear, right_ear, left_shoulder, right_shoulder, left_elbow, right_elbow, left_wrist, right_wrist, left_hip, right_hip, left_knee, right_knee, left_ankle, right_ankle. Format your response as JSON.",
         }
 
         return prompts.get(task, "Analyze this image.")
@@ -266,6 +301,7 @@ class TeacherModel:
             'vqa': f"Analyze this image step by step to answer the following question.\nQuestion: {question}\n\nPlease think through this systematically:\n1. First, identify all visual elements in the image.\n2. Next, analyze their attributes and relationships.\n3. Then, consider the context and scene.\n4. Finally, based on your analysis, provide the answer.\n\nLet's start:",
             'captioning': "Describe this image systematically. Think through the following steps:\n1. Identify the main subjects and objects.\n2. Describe their attributes and positions.\n3. Note the scene and setting.\n4. Describe any actions or activities.\n5. Combine everything into a comprehensive caption.\n\nLet's analyze:",
             'detection': "Detect objects in this image methodically:\n1. Scan the image systematically.\n2. Identify each object and its location.\n3. Determine the bounding box coordinates.\n4. Classify each object.\n\nProvide results in JSON format with bounding boxes as [x_min, y_min, x_max, y_max].\n\nLet's start the detection:",
+            'keypoints': "Estimate human poses in this image systematically:\n1. Identify all persons in the image and their approximate locations.\n2. For each person, locate head and face keypoints (nose, eyes, ears).\n3. Identify upper body keypoints (shoulders, elbows, wrists).\n4. Locate lower body keypoints (hips, knees, ankles).\n5. For each keypoint, provide coordinates [x, y] and visibility (0/1/2).\n\nFormat as JSON with person bounding boxes [x, y, width, height] and 17 keypoints per person.\n\nLet's start the pose estimation:",
         }
 
         return cot_prompts.get(task, "Analyze this image step by step.")
@@ -461,6 +497,40 @@ class TeacherModel:
 
         return result
 
+    def _process_keypoints_outputs(
+        self,
+        outputs: Dict[str, Any],
+        return_logits: bool
+    ) -> Dict[str, Any]:
+        """
+        Process keypoints (pose estimation) outputs.
+
+        Args:
+            outputs: Model outputs
+            return_logits: Whether logits are included
+
+        Returns:
+            Processed keypoints result with persons and their keypoint coordinates
+        """
+        # Decode
+        generated_ids = outputs.sequences
+        generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+        # Parse keypoints from response
+        persons = self._parse_keypoints_response(generated_text)
+
+        result = {
+            'full_response': generated_text,
+            'persons': persons,
+            'num_persons': len(persons),
+        }
+
+        if return_logits:
+            logits = self._process_logits(outputs.scores)
+            result['logits'] = logits
+
+        return result
+
     def _extract_answer(self, text: str) -> str:
         """Extract final answer from VQA response."""
         # Simple extraction - last sentence or after "Answer:"
@@ -499,12 +569,69 @@ class TeacherModel:
                     objects = parsed
                 elif isinstance(parsed, dict) and 'objects' in parsed:
                     objects = parsed['objects']
-        except:
+                self.logger.debug(f"Successfully parsed {len(objects)} objects from detection response (method 2)")
+            else:
+                self.logger.warning(f"No JSON found in detection response: {text[:200]}...")
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"Failed to parse JSON from detection response: {e}")
+            self.logger.debug(f"Raw response text: {text[:500]}")
             # Fallback: parse manually
             # Look for patterns like [x, y, x, y] or bbox descriptions
             pass
+        except Exception as e:
+            self.logger.error(f"Unexpected error parsing detection response: {e}")
+            self.logger.debug(f"Raw response text: {text[:500]}")
 
         return objects
+
+    def _parse_keypoints_response(self, text: str) -> List[Dict]:
+        """
+        Parse keypoints from model response.
+
+        Expected format: JSON with persons and their 17 keypoints.
+        Each keypoint has name, x, y coordinates and visibility.
+        """
+        persons = []
+
+        # Try to parse JSON if present
+        try:
+            import json
+            # Find JSON-like content
+            if "{" in text or "[" in text:
+                start = text.find("{")
+                if start == -1:
+                    start = text.find("[")
+                json_str = text[start:]
+
+                # Try to find complete JSON
+                parsed = json.loads(json_str)
+
+                if isinstance(parsed, list):
+                    # List of persons
+                    persons = parsed
+                elif isinstance(parsed, dict):
+                    if 'persons' in parsed:
+                        persons = parsed['persons']
+                    elif 'people' in parsed:
+                        persons = parsed['people']
+                    elif 'keypoints' in parsed:
+                        # Single person response
+                        persons = [parsed]
+                self.logger.debug(f"Successfully parsed {len(persons)} persons from keypoints response (method 2)")
+            else:
+                self.logger.warning(f"No JSON found in keypoints response: {text[:200]}...")
+
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"Failed to parse JSON from keypoints response: {e}")
+            self.logger.debug(f"Raw response text: {text[:500]}")
+            # Fallback: parse manually from text
+            # Look for coordinate patterns like [x, y] or "nose: (123, 456)"
+            pass
+        except Exception as e:
+            self.logger.error(f"Unexpected error parsing keypoints response: {e}")
+            self.logger.debug(f"Raw response text: {text[:500]}")
+
+        return persons
 
     def _process_logits(self, scores: tuple) -> Dict[str, torch.Tensor]:
         """
@@ -599,6 +726,11 @@ class TeacherModel:
 
             elif task == 'detection':
                 result = self.inference_detection(image, return_logits=True, generate_cot=True)
+                result['image_id'] = image_id
+                results.append(result)
+
+            elif task == 'keypoints':
+                result = self.inference_keypoints(image, return_logits=True, generate_cot=True)
                 result['image_id'] = image_id
                 results.append(result)
 

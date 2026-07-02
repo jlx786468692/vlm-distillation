@@ -202,6 +202,95 @@ class CoTGenerator:
 
         return cot_data
 
+    def generate_keypoints_cot(
+        self,
+        image_path: str,
+        image_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate CoT reasoning for human pose estimation (keypoints).
+
+        Args:
+            image_path: Path to image
+            image_id: Image identifier
+
+        Returns:
+            CoT reasoning dictionary
+        """
+        self.logger.debug(f"Generating keypoints CoT for image {image_id}")
+
+        # Get teacher inference with CoT
+        result = self.teacher.inference_keypoints(
+            image=image_path,
+            return_logits=False,
+            generate_cot=True
+        )
+
+        full_response = result.get('full_response', '')
+
+        cot_data = {
+            'image_id': image_id,
+            'task': 'keypoints',
+            'raw_reasoning': full_response,
+            'timestamp': datetime.now().isoformat(),
+        }
+
+        # Structure reasoning
+        if self.structured_output:
+            structured = self._structure_keypoints_reasoning(full_response)
+            cot_data['structured_reasoning'] = structured
+
+        # Extract steps
+        if self.include_intermediate_steps:
+            steps = self._extract_reasoning_steps(full_response)
+            cot_data['reasoning_steps'] = steps
+
+        # Quality metrics
+        cot_data['quality_metrics'] = self._validate_reasoning_quality(full_response)
+
+        return cot_data
+
+    def _structure_keypoints_reasoning(
+        self,
+        raw_reasoning: str
+    ) -> Dict[str, Any]:
+        """
+        Structure keypoints reasoning.
+
+        Args:
+            raw_reasoning: Raw reasoning text
+
+        Returns:
+            Structured reasoning
+        """
+        structured = {
+            'person_detection': '',
+            'head_face_keypoints': '',
+            'upper_body_keypoints': '',
+            'lower_body_keypoints': '',
+            'pose_summary': '',
+        }
+
+        sections = {
+            'person_detection': ['person', 'people', 'detect', 'identify', 'first'],
+            'head_face_keypoints': ['head', 'face', 'nose', 'eye', 'ear'],
+            'upper_body_keypoints': ['shoulder', 'elbow', 'wrist', 'arm', 'upper'],
+            'lower_body_keypoints': ['hip', 'knee', 'ankle', 'leg', 'lower'],
+            'pose_summary': ['pose', 'complete', 'final', 'summary', 'finally'],
+        }
+
+        for section, keywords in sections.items():
+            for keyword in keywords:
+                if keyword in raw_reasoning.lower():
+                    sentences = raw_reasoning.split('.')
+                    for sentence in sentences:
+                        if keyword in sentence.lower():
+                            structured[section] = sentence.strip()
+                            break
+                    break
+
+        return structured
+
     def _structure_vqa_reasoning(
         self,
         raw_reasoning: str
@@ -469,6 +558,13 @@ class CoTGenerator:
                     image_id=image_id
                 )
                 results['detection'].append(cot)
+
+            if 'keypoints' in tasks:
+                cot = self.generate_keypoints_cot(
+                    image_path=image_path,
+                    image_id=image_id
+                )
+                results['keypoints'].append(cot)
 
         return results
 

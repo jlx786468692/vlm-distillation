@@ -191,6 +191,82 @@ class SoftLabelGenerator:
 
         return soft_label
 
+    def generate_keypoints_soft_labels(
+        self,
+        image_path: str,
+        image_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate soft labels for human pose estimation (keypoints).
+
+        Args:
+            image_path: Path to image
+            image_id: Image identifier
+
+        Returns:
+            Soft label dictionary with keypoints distributions
+        """
+        self.logger.debug(f"Generating keypoints soft labels for image {image_id}")
+
+        # Get teacher inference with logits
+        result = self.teacher.inference_keypoints(
+            image=image_path,
+            return_logits=True,
+            generate_cot=False
+        )
+
+        soft_label = {
+            'image_id': image_id,
+            'task': 'keypoints',
+            'temperature': self.temperature,
+            'timestamp': datetime.now().isoformat(),
+        }
+
+        # Process keypoints logits
+        if 'logits' in result:
+            keypoints_distributions = self._process_keypoints_logits(result['logits'])
+            soft_label['keypoints_distributions'] = keypoints_distributions
+
+        soft_label['persons'] = result.get('persons', [])
+        soft_label['num_persons'] = len(result.get('persons', []))
+
+        return soft_label
+
+    def _process_keypoints_logits(
+        self,
+        logits_data: Dict[str, torch.Tensor]
+    ) -> List[Dict[str, Any]]:
+        """
+        Process keypoints logits for each person.
+
+        Args:
+            logits_data: Logits dictionary
+
+        Returns:
+            List of keypoints distributions
+        """
+        probs = logits_data.get('probabilities')
+
+        if probs is None:
+            return []
+
+        scaled_probs = self._apply_temperature(probs)
+        top_k_probs = self._get_top_k_probabilities(scaled_probs)
+
+        distributions = []
+
+        # Keypoint logits typically involve coordinate predictions
+        # For each keypoint, we have x, y coordinate distributions
+        distributions.append({
+            'coordinate_probabilities': {
+                f'coord_{i}': float(prob_val)
+                for i, prob_val in enumerate(top_k_probs['values'][:self.top_k])
+                if prob_val >= self.min_probability
+            },
+        })
+
+        return distributions
+
     def _process_vqa_logits(
         self,
         logits_data: Dict[str, torch.Tensor],
@@ -399,6 +475,13 @@ class SoftLabelGenerator:
                     image_id=image_id
                 )
                 results['detection'].append(soft_label)
+
+            if 'keypoints' in tasks:
+                soft_label = self.generate_keypoints_soft_labels(
+                    image_path=image_path,
+                    image_id=image_id
+                )
+                results['keypoints'].append(soft_label)
 
         return results
 

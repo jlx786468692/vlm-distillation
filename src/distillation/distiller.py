@@ -21,16 +21,6 @@ from .hard_label_gen import HardLabelGenerator
 from .soft_label_gen import SoftLabelGenerator
 from .cot_generator import CoTGenerator
 
-# 添加这个类
-class DateTimeEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        if isinstance(obj, torch.Tensor):
-            return obj.tolist()
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super().default(obj)
 
 class Distiller:
     """
@@ -301,6 +291,12 @@ class Distiller:
                 image_id=str(image_id)
             )
 
+        elif task == 'keypoints':
+            return self.hard_label_gen.generate_keypoints_hard_labels(
+                image_path=image_path,
+                image_id=str(image_id)
+            )
+
         return {}
 
     def _generate_task_soft_labels(
@@ -335,6 +331,12 @@ class Distiller:
                 image_id=str(image_id)
             )
 
+        elif task == 'keypoints':
+            return self.soft_label_gen.generate_keypoints_soft_labels(
+                image_path=image_path,
+                image_id=str(image_id)
+            )
+
         return {}
 
     def _generate_task_cot(
@@ -364,6 +366,12 @@ class Distiller:
 
         elif task == 'detection':
             return self.cot_gen.generate_detection_cot(
+                image_path=image_path,
+                image_id=str(image_id)
+            )
+
+        elif task == 'keypoints':
+            return self.cot_gen.generate_keypoints_cot(
                 image_path=image_path,
                 image_id=str(image_id)
             )
@@ -408,14 +416,20 @@ class Distiller:
         """Save processing checkpoint."""
         checkpoint_data = {
             'processed_ids': processed_ids,
-            'stats': self.stats,
+            'stats': {
+                'total_images': self.stats['total_images'],
+                'processed_images': self.stats['processed_images'],
+                'failed_images': self.stats['failed_images'],
+                'start_time': self.stats['start_time'].isoformat() if self.stats['start_time'] else None,
+                'end_time': self.stats['end_time'].isoformat() if self.stats['end_time'] else None,
+            },
             'timestamp': datetime.now().isoformat(),
         }
 
         checkpoint_file = self.output_dir / "checkpoint_latest.json"
 
         with open(checkpoint_file, 'w') as f:
-            json.dump(checkpoint_data, f, indent=2, cls=DateTimeEncoder)
+            json.dump(checkpoint_data, f, indent=2)
 
         self.logger.info(f"Checkpoint saved: {len(processed_ids)} images processed")
 

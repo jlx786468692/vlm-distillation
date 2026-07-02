@@ -178,6 +178,52 @@ class HardLabelGenerator:
 
         return hard_label
 
+    def generate_keypoints_hard_labels(
+        self,
+        image_path: str,
+        image_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate hard labels for human pose estimation (keypoints).
+
+        Args:
+            image_path: Path to image
+            image_id: Image identifier
+
+        Returns:
+            Hard label dictionary with detected persons and their keypoints
+        """
+        self.logger.debug(f"Generating keypoints hard labels for image {image_id}")
+
+        # Get teacher model inference
+        result = self.teacher.inference_keypoints(
+            image=image_path,
+            return_logits=False,
+            generate_cot=False
+        )
+
+        # Extract persons with keypoints
+        persons = result.get('persons', [])
+
+        # Filter persons by minimum visible keypoints
+        filtered_persons = []
+        for person in persons:
+            keypoints = person.get('keypoints', [])
+            visible_count = sum(1 for kp in keypoints if kp.get('visibility', 0) >= 2)
+            if visible_count >= 5:  # Minimum 5 visible keypoints
+                filtered_persons.append(person)
+
+        hard_label = {
+            'image_id': image_id,
+            'task': 'keypoints',
+            'persons': filtered_persons,
+            'num_persons': len(filtered_persons),
+            'total_detected': len(persons),
+            'timestamp': datetime.now().isoformat(),
+        }
+
+        return hard_label
+
     def generate_batch_hard_labels(
         self,
         batch_data: Dict[str, Any],
@@ -227,6 +273,13 @@ class HardLabelGenerator:
                     image_id=image_id
                 )
                 results['detection'].append(hard_label)
+
+            if 'keypoints' in tasks:
+                hard_label = self.generate_keypoints_hard_labels(
+                    image_path=image_path,
+                    image_id=image_id
+                )
+                results['keypoints'].append(hard_label)
 
         return results
 
@@ -316,6 +369,10 @@ class HardLabelGenerator:
 
         elif task == 'detection':
             if 'objects' not in hard_labels:
+                return False
+
+        elif task == 'keypoints':
+            if 'persons' not in hard_labels:
                 return False
 
         return True

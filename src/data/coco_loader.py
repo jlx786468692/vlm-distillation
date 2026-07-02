@@ -52,16 +52,22 @@ class COCODataLoader:
         # COCO API instances
         self.coco_caption = None
         self.coco_instance = None
+        self.coco_keypoints = None  # Person keypoints API
         self.vqa_data = None
 
         # Loaded data
         self.images_data: Dict[int, Dict] = {}
         self.captions_data: Dict[int, List[Dict]] = defaultdict(list)
         self.instances_data: Dict[int, List[Dict]] = defaultdict(list)
+        self.keypoints_data: Dict[int, List[Dict]] = defaultdict(list)  # Person keypoints
         self.vqa_data_by_image: Dict[int, List[Dict]] = defaultdict(list)
 
         # Categories
         self.categories: Dict[int, str] = {}
+
+        # Keypoint metadata
+        self.keypoint_names: List[str] = []  # 17 keypoint names
+        self.skeleton: List[List[int]] = []  # Skeleton connections
 
         self._initialized = False
 
@@ -122,6 +128,29 @@ class COCODataLoader:
             self._load_vqa_json(vqa_ann_file)
             self.logger.info(f"Loaded VQA questions from {vqa_ann_file}")
 
+        # Load person keypoints annotations
+        keypoints_ann_file = self.annotations_root / f"person_keypoints_{split}.json"
+        if keypoints_ann_file.exists():
+            if COCO:
+                self.coco_keypoints = COCO(str(keypoints_ann_file))
+                self.logger.info(f"Loaded keypoints annotations from {keypoints_ann_file}")
+
+                # Load keypoint names and skeleton from categories
+                for cat in self.coco_keypoints.cats.values():
+                    self.keypoint_names = cat.get('keypoints', [])
+                    self.skeleton = cat.get('skeleton', [])
+
+                # Load keypoints per image
+                for ann in self.coco_keypoints.anns.values():
+                    img_id = ann['image_id']
+                    self.keypoints_data[img_id].append(ann)
+
+                self.logger.info(f"Loaded {len(self.keypoint_names)} keypoint definitions")
+                self.logger.info(f"Loaded keypoints for {len(self.keypoints_data)} images")
+            else:
+                self.logger.warning("pycocotools not installed, loading keypoints from JSON directly")
+                self._load_keypoints_json(keypoints_ann_file)
+
         self._initialized = True
         self.logger.info("COCO dataset initialization complete")
 
@@ -160,6 +189,25 @@ class COCODataLoader:
             self.vqa_data_by_image[img_id].append(question)
 
         self.logger.info(f"Loaded {len(data['questions'])} VQA questions")
+
+    def _load_keypoints_json(self, ann_file: Path) -> None:
+        """Load keypoints annotations from JSON directly (fallback)."""
+        with open(ann_file, 'r') as f:
+            data = json.load(f)
+
+        if not self.images_data:
+            self.images_data = {img['id']: img for img in data['images']}
+
+        # Load keypoint metadata from categories
+        for cat in data['categories']:
+            self.keypoint_names = cat.get('keypoints', [])
+            self.skeleton = cat.get('skeleton', [])
+
+        # Load keypoints annotations
+        for ann in data['annotations']:
+            self.keypoints_data[ann['image_id']].append(ann)
+
+        self.logger.info(f"Loaded {len(self.keypoint_names)} keypoint definitions with {len(data['annotations'])} person keypoints")
 
     def get_image_path(self, image_id: int, split: str = "val2017") -> Optional[Path]:
         """
@@ -267,12 +315,55 @@ class COCODataLoader:
         """
         return self.vqa_data_by_image.get(image_id, [])
 
+    def get_keypoints(self, image_id: int) -> List[Dict]:
+        """
+        Get all person keypoints for an image.
+
+        Args:
+            image_id: COCO image ID
+
+        Returns:
+            List of person keypoints dictionaries with:
+            - bbox: person bounding box [x, y, width, height]
+            - keypoints: list of {name, x, y, visibility} dicts (17 keypoints)
+            - num_keypoints: count of visible keypoints
+            - skeleton: skeleton connections for visualization
+        """
+        keypoints_list = []
+        for ann in self.keypoints_data.get(image_id, []):
+            # Parse flat keypoints array [x1,y1,v1, x2,y2,v2, ...]
+            kp_flat = ann.get('keypoints', [])
+            keypoints_parsed = []
+
+            for i, name in enumerate(self.keypoint_names):
+                x = kp_flat[i * 3] if i * 3 < len(kp_flat) else 0
+                y = kp_flat[i * 3 + 1] if i * 3 + 1 < len(kp_flat) else 0
+                v = kp_flat[i * 3 + 2] if i * 3 + 2 < len(kp_flat) else 0
+                keypoints_parsed.append({
+                    'name': name,
+                    'x': float(x),
+                    'y': float(y),
+                    'visibility': int(v)  # 0=not labeled, 1=labeled not visible, 2=visible
+                })
+
+            keypoints_list.append({
+                'bbox': ann.get('bbox', []),  # [x, y, width, height]
+                'keypoints': keypoints_parsed,
+                'num_keypoints': ann.get('num_keypoints', 0),
+                'category_id': ann.get('category_id'),
+                'area': ann.get('area', 0),
+                'is_crowd': ann.get('iscrowd', 0),
+                'skeleton': self.skeleton,
+            })
+
+        return keypoints_list
+
     def get_image_ids(self, task: Optional[str] = None) -> List[int]:
         """
         Get list of all image IDs.
 
         Args:
-            task: Filter by task ('caption', 'instance', 'vqa'). If None, return all.
+            task: Filter by task ('caption', 'instance', 'keypoints', 'vqa'). If None, return all.
 
         Returns:
             List of image IDs
@@ -281,6 +372,8 @@ class COCODataLoader:
             return list(self.captions_data.keys())
         elif task == 'instance':
             return list(self.instances_data.keys())
+        elif task == 'keypoints':
+            return list(self.keypoints_data.keys())
         elif task == 'vqa':
             return list(self.vqa_data_by_image.keys())
         else:
@@ -328,12 +421,17 @@ class COCODataLoader:
             'total_images': len(self.images_data),
             'images_with_captions': len(self.captions_data),
             'images_with_instances': len(self.instances_data),
+            'images_with_keypoints': len(self.keypoints_data),
             'images_with_vqa': len(self.vqa_data_by_image),
             'total_captions': sum(len(caps) for caps in self.captions_data.values()),
             'total_instances': sum(len(insts) for insts in self.instances_data.values()),
+            'total_keypoints_persons': sum(len(kps) for kps in self.keypoints_data.values()),
             'total_vqa_questions': sum(len(qs) for qs in self.vqa_data_by_image.values()),
             'num_categories': len(self.categories),
             'categories': list(self.categories.values()),
+            'keypoint_names': self.keypoint_names,
+            'num_keypoints': len(self.keypoint_names),
+            'skeleton_connections': len(self.skeleton),
         }
         return summary
 
