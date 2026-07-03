@@ -42,7 +42,7 @@ distillation:
   tasks:
     - "vqa"
     # - "captioning"
-    # - "detection"
+    - "detection"
     # - "keypoints"
 
   # Hard label configuration
@@ -103,9 +103,9 @@ cleaning:
   enabled: true
 
   # 异常检测阈值
-  min_confidence: 0.5            # 最低置信度阈值（低于此值标记为异常）
+  min_confidence: 0.6            # 最低置信度阈值（低于此值标记为异常）
   max_confidence: 0.95           # 最高置信度阈值（高于此值可能过于自信）
-  min_quality_score: 30.0        # 最低质量分数阈值（0-100，低于此值移除）
+  min_quality_score: 60.0        # 最低质量分数阈值（0-100，低于此值移除）
   min_cot_quality: 0.5           # 最低CoT逻辑流畅度分数
 
   # 答案长度限制

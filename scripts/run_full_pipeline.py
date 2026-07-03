@@ -2,29 +2,35 @@
 完整数据管道脚本
 ================
 
-一次性运行蒸馏、清洗、验证三个步骤的完整流程。
+一次性运行蒸馏、初步验证、清洗、最终验证四个步骤的完整流程。
+
+参数优先级（命令行 > 配置文件 > 默认值）:
+    - min_quality: 命令行 --min-quality > configs/default.yaml cleaning.min_quality_score > 30.0
+    - min_confidence: 命令行 --min-confidence > configs/default.yaml cleaning.min_confidence > 0.5
+    - tasks: 命令行 --tasks > configs/default.yaml distillation.tasks > ['vqa', 'captioning', 'detection']
 
 Usage:
-    # 运行完整流程
+    # 运行完整流程（使用配置文件参数）
     python scripts/run_full_pipeline.py --samples 5000
 
     # 仅运行特定步骤
     python scripts/run_full_pipeline.py --steps distillation cleaning
 
-    # 自定义参数
+    # 自定义参数（覆盖配置文件）
     python scripts/run_full_pipeline.py \
         --samples 1000 \
         --tasks vqa captioning \
         --min-quality 40 \
-        --skip-validation
+        --min-confidence 0.6
 
     # Dry run（测试配置）
     python scripts/run_full_pipeline.py --dry-run
 
-流程步骤:
+流程步骤（正确顺序）:
     Step 1: 数据蒸馏 - 生成三重标签（硬标签/软标签/CoT）
-    Step 2: 数据清洗 - 异常检测+质量评分+过滤+修复
-    Step 3: 数据验证 - Schema验证+质量检查
+    Step 2: 初步验证 - 发现数据质量问题
+    Step 3: 数据清洗 - 异常检测+质量评分+过滤+修复
+    Step 4: 最终验证 - 确认清洗效果并对比前后差异
 """
 
 import argparse
@@ -50,10 +56,11 @@ class FullPipelineRunner:
     """
     完整数据管道运行器
 
-    整合三个步骤:
+    整合四个步骤（正确顺序）:
     1. 数据蒸馏 (Distillation)
-    2. 数据清洗 (Cleaning)
-    3. 数据验证 (Validation)
+    2. 初步验证 (Initial Validation) - 清洗前
+    3. 数据清洗 (Cleaning) - 解决初步验证发现的问题
+    4. 最终验证 (Final Validation) - 清洗后，对比效果
     """
 
     def __init__(self, config_path: str = 'configs/default.yaml'):
@@ -81,16 +88,19 @@ class FullPipelineRunner:
             'results': {},
         }
 
-        # 步骤名称
-        self.STEPS = ['distillation', 'cleaning', 'validation']
+        # 步骤名称（正确顺序：蒸馏→初步验证→清洗→最终验证）
+        self.STEPS = ['distillation', 'initial_validation', 'cleaning', 'final_validation']
+
+        # 无效答案列表（用于质量评估）
+        self.invalid_answers = ['unknown', 'n/a', 'none', 'unclear', 'cannot determine', '']
 
     def run_full_pipeline(
         self,
         steps: Optional[List[str]] = None,
         max_samples: Optional[int] = None,
         tasks: Optional[List[str]] = None,
-        min_quality: float = 30.0,
-        min_confidence: float = 0.5,
+        min_quality: Optional[float] = None,      # ← 改为None，从配置文件读取
+        min_confidence: Optional[float] = None,   # ← 改为None，从配置文件读取
         skip_validation: bool = False,
         dry_run: bool = False,
         output_dir: Optional[str] = None
@@ -113,16 +123,32 @@ class FullPipelineRunner:
         """
         self.pipeline_status['start_time'] = datetime.now()
 
-        # 确定运行步骤
+        # 确定运行步骤（正确顺序）
         if steps is None:
             steps = self.STEPS.copy()
-            if skip_validation and 'validation' in steps:
-                steps.remove('validation')
-        
-        # 确定运行任务（优先使用YAML配置，命令行可覆盖）
+            # skip_validation 跳过所有验证步骤
+            if skip_validation:
+                steps = [s for s in steps if 'validation' not in s]
+
+        # 确定运行任务（优先级：命令行 > 配置文件 > 默认值）
         if tasks is None:
             # 从配置文件读取任务列表
-            tasks = self.config.get('distillation.tasks', ['vqa', 'captioning', 'detection', 'keypoints'])
+            tasks = self.config.get('distillation.tasks', ['vqa', 'captioning', 'detection'])
+
+        # 确定清洗参数（优先级：命令行 > 配置文件 > 默认值）
+        if min_quality is None:
+            # 从配置文件读取，如果没有则使用默认值30.0
+            min_quality = self.config.get('cleaning.min_quality_score', 30.0)
+            self.logger.info(f"Using min_quality from config: {min_quality}")
+        else:
+            self.logger.info(f"Using min_quality from command line: {min_quality}")
+
+        if min_confidence is None:
+            # 从配置文件读取，如果没有则使用默认值0.5
+            min_confidence = self.config.get('cleaning.min_confidence', 0.5)
+            self.logger.info(f"Using min_confidence from config: {min_confidence}")
+        else:
+            self.logger.info(f"Using min_confidence from command line: {min_confidence}")
 
         # 验证步骤名称
         for step in steps:
@@ -136,6 +162,7 @@ class FullPipelineRunner:
         self.logger.info("="*70)
         self.logger.info(f"Steps to run: {steps}")
         self.logger.info(f"Configuration: {self.config_path}")
+        self.logger.info(f"Dry run mode: {dry_run}")  # 添加调试信息
 
         if dry_run:
             self.logger.info("\n[DRY RUN] Testing configuration...")
@@ -147,7 +174,7 @@ class FullPipelineRunner:
             )
             return {'success': True, 'dry_run': True}
 
-        # 执行各步骤
+        # 执行各步骤（正确顺序：蒸馏→初步验证→清洗→最终验证）
         try:
             # Step 1: 数据蒸馏
             if 'distillation' in steps:
@@ -165,9 +192,42 @@ class FullPipelineRunner:
                     self.logger.error(f"Distillation failed: {distillation_result.get('error')}")
                     return self._finalize_pipeline(success=False)
 
-            # Step 2: 数据清洗
+            # Step 2: 初步验证（清洗前）✅ 关键改进
+            if 'initial_validation' in steps:
+                # 燃定验证目录（蒸馏输出）
+                if 'distillation' in self.pipeline_status['steps_completed']:
+                    input_dir = self.pipeline_status['results']['distillation']['merged_output']
+                else:
+                    input_dir = self.config.get('output.merged_dir', './outputs/merged')
+
+                initial_validation_result = self._run_initial_validation(input_dir)
+
+                if initial_validation_result['success']:
+                    self.pipeline_status['steps_completed'].append('initial_validation')
+                    self.pipeline_status['results']['initial_validation'] = initial_validation_result
+
+                    # ✅ 根据初步验证结果动态调整清洗参数（重要改进）
+                    avg_quality = initial_validation_result.get('average_quality', 50)
+                    invalid_rate = initial_validation_result.get('invalid_rate', 0)
+
+                    if avg_quality < 20:
+                        # 虞量极低 → 更严格清洗
+                        self.logger.warning("⚠️ 数据质量极低，将使用更严格的清洗参数")
+                        min_quality = max(min_quality, 40)
+                        min_confidence = max(min_confidence, 0.6)
+                    elif avg_quality > 80 and invalid_rate < 0.05:
+                        # 虞量很好且无效数据很少 → 可跳过清洗
+                        self.logger.info("✓ 数据质量很好，可以考虑跳过清洗")
+                        if 'cleaning' in steps:
+                            self.logger.info("将继续执行清洗步骤以确保质量")
+                else:
+                    self.pipeline_status['steps_failed'].append('initial_validation')
+                    self.logger.warning(f"Initial validation found issues: {initial_validation_result.get('issues')}")
+                    self.logger.info("将继续执行清洗步骤以解决这些问题")
+
+            # Step 3: 数据清洗
             if 'cleaning' in steps:
-                # 确定输入目录
+                # 燃定输入目录
                 if 'distillation' in self.pipeline_status['steps_completed']:
                     input_dir = self.pipeline_status['results']['distillation']['merged_output']
                 else:
@@ -188,30 +248,33 @@ class FullPipelineRunner:
                     self.logger.error(f"Cleaning failed: {cleaning_result.get('error')}")
                     # 清洗失败不中断流程，继续验证
 
-            # Step 3: 数据验证
-            if 'validation' in steps:
-                # 确定验证目录
-                validation_dirs = []
-                if 'distillation' in self.pipeline_status['steps_completed']:
-                    validation_dirs.append(
-                        self.pipeline_status['results']['distillation']['merged_output']
-                    )
+            # Step 4: 最终验证（清洗后）✅ 关键改进
+            if 'final_validation' in steps:
+                # 燃定验证目录（清洗输出）
                 if 'cleaning' in self.pipeline_status['steps_completed']:
-                    validation_dirs.append(
-                        self.pipeline_status['results']['cleaning']['cleaned_output']
-                    )
-
-                if not validation_dirs:
-                    validation_dirs = [self.config.get('output.merged_dir', './outputs/merged')]
-
-                validation_result = self._run_validation(validation_dirs)
-
-                if validation_result['success']:
-                    self.pipeline_status['steps_completed'].append('validation')
-                    self.pipeline_status['results']['validation'] = validation_result
+                    input_dir = self.pipeline_status['results']['cleaning']['cleaned_output']
                 else:
-                    self.pipeline_status['steps_failed'].append('validation')
-                    self.logger.warning(f"Validation found issues: {validation_result.get('issues')}")
+                    # 如果没有清洗，验证蒸馏数据
+                    if 'distillation' in self.pipeline_status['steps_completed']:
+                        input_dir = self.pipeline_status['results']['distillation']['merged_output']
+                    else:
+                        input_dir = self.config.get('output.merged_dir', './outputs/merged')
+
+                final_validation_result = self._run_final_validation(input_dir)
+
+                if final_validation_result['success']:
+                    self.pipeline_status['steps_completed'].append('final_validation')
+                    self.pipeline_status['results']['final_validation'] = final_validation_result
+
+                    # ✅ 对比清洗前后效果（重要改进）
+                    if 'initial_validation' in self.pipeline_status['steps_completed']:
+                        self._compare_validation_results(
+                            self.pipeline_status['results']['initial_validation'],
+                            final_validation_result
+                        )
+                else:
+                    self.pipeline_status['steps_failed'].append('final_validation')
+                    self.logger.warning(f"Final validation found issues: {final_validation_result.get('issues')}")
 
             # 生成最终报告
             return self._finalize_pipeline(success=True)
@@ -224,8 +287,8 @@ class FullPipelineRunner:
         self,
         max_samples: Optional[int],
         tasks: Optional[List[str]],
-        min_quality: float,
-        min_confidence: float
+        min_quality: Optional[float],
+        min_confidence: Optional[float]
     ) -> bool:
         """
         测试配置是否正确（Dry Run）
@@ -245,10 +308,22 @@ class FullPipelineRunner:
             test_config.set('distillation.tasks', tasks)
             self.logger.info(f"  ✓ tasks: {tasks}")
 
-        test_config.set('cleaning.min_quality_score', min_quality)
-        test_config.set('cleaning.min_confidence', min_confidence)
-        self.logger.info(f"  ✓ min_quality: {min_quality}")
-        self.logger.info(f"  ✓ min_confidence: {min_confidence}")
+        # 显示清洗参数来源
+        final_min_quality = min_quality if min_quality is not None else test_config.get('cleaning.min_quality_score', 30.0)
+        final_min_confidence = min_confidence if min_confidence is not None else test_config.get('cleaning.min_confidence', 0.5)
+
+        test_config.set('cleaning.min_quality_score', final_min_quality)
+        test_config.set('cleaning.min_confidence', final_min_confidence)
+
+        if min_quality is not None:
+            self.logger.info(f"  ✓ min_quality: {final_min_quality} (from command line)")
+        else:
+            self.logger.info(f"  ✓ min_quality: {final_min_quality} (from config file)")
+
+        if min_confidence is not None:
+            self.logger.info(f"  ✓ min_confidence: {final_min_confidence} (from command line)")
+        else:
+            self.logger.info(f"  ✓ min_confidence: {final_min_confidence} (from config file)")
 
         # 测试配置验证
         if not test_config.validate():
@@ -299,15 +374,15 @@ class FullPipelineRunner:
             # 更新配置
             if max_samples:
                 self.config.set('data.max_samples', max_samples)
-            if tasks:
-                self.config.set('distillation.tasks', tasks)
+            # tasks已经在run_full_pipeline中设置了默认值，直接使用
+            self.config.set('distillation.tasks', tasks)
             if output_dir:
                 self.config.set('output.root_dir', output_dir)
 
             # 初始化数据加载器
             self.logger.info("\n[1/3] Initializing COCO dataset loader...")
             coco_loader = COCODataLoader(self.config)
-            coco_loader.initialize(self.config.get('data.val_split', 'val2014'))
+            coco_loader.initialize(self.config.get('data.val_split', 'val2017'))
 
             dataset_summary = coco_loader.get_annotation_summary()
             self.logger.info(f"Dataset loaded successfully")
@@ -385,7 +460,7 @@ class FullPipelineRunner:
             清洗结果报告
         """
         self.logger.info("\n" + "="*70)
-        self.logger.info("STEP 2: DATA CLEANING")
+        self.logger.info("STEP 3: DATA CLEANING")
         self.logger.info("="*70)
 
         step_start = datetime.now()
@@ -485,82 +560,494 @@ class FullPipelineRunner:
                 'duration_seconds': (datetime.now() - step_start).total_seconds()
             }
 
-    def _run_validation(self, validation_dirs: List[str]) -> Dict[str, Any]:
+    def _run_initial_validation(self, input_dir: str) -> Dict[str, Any]:
         """
-        运行数据验证步骤
+        运行初步验证（清洗前）- 发现数据质量问题
 
         Args:
-            validation_dirs: 要验证的目录列表
+            input_dir: 要验证的输入目录（蒸馏输出）
 
         Returns:
-            验证结果报告
+            初步验证结果报告
         """
         self.logger.info("\n" + "="*70)
-        self.logger.info("STEP 3: DATA VALIDATION")
+        self.logger.info("STEP 2: INITIAL VALIDATION (Before Cleaning)")
         self.logger.info("="*70)
 
         step_start = datetime.now()
 
-        validation_results = []
-        all_valid = True
+        try:
+            # 调用validate_data.py的逻辑
+            from scripts.validate_data import validate_directory
 
-        for data_dir in validation_dirs:
-            self.logger.info(f"\nValidating: {data_dir}")
+            self.logger.info(f"\nValidating: {input_dir}")
+            report = validate_directory(input_dir)
 
-            try:
-                # 调用validate_data.py的逻辑
-                from scripts.validate_data import validate_directory, generate_validation_report
+            # 提取质量统计
+            total_files = report['total_files']
+            valid_files = report['valid_files']
+            invalid_files = report['invalid_files']
+            invalid_rate = invalid_files / total_files if total_files > 0 else 0
 
-                report = validate_directory(data_dir)
+            # 计算平均质量分数（从清洗报告或数据文件中读取）
+            avg_quality = self._calculate_average_quality(input_dir)
 
-                validation_results.append({
-                    'directory': data_dir,
-                    'valid': report['valid'],
-                    'total_files': report['total_files'],
-                    'valid_files': report['valid_files'],
-                    'invalid_files': report['invalid_files'],
-                })
+            self.logger.info(f"  Total: {total_files}")
+            self.logger.info(f"  Valid: {valid_files}")
+            self.logger.info(f"  Invalid: {invalid_files}")
+            self.logger.info(f"  Invalid rate: {invalid_rate*100:.1f}%")
+            self.logger.info(f"  Average quality: {avg_quality:.1f}/100")
 
-                if not report['valid']:
-                    all_valid = False
+            # 保存验证报告
+            validation_report_path = Path('./outputs/validation_initial.json')
+            validation_report_path.parent.mkdir(parents=True, exist_ok=True)
 
-                self.logger.info(f"  Total: {report['total_files']}")
-                self.logger.info(f"  Valid: {report['valid_files']}")
-                self.logger.info(f"  Invalid: {report['invalid_files']}")
+            import json
+            validation_report = {
+                'input_dir': input_dir,
+                'total_files': total_files,
+                'valid_files': valid_files,
+                'invalid_files': invalid_files,
+                'invalid_rate': invalid_rate,
+                'average_quality': avg_quality,
+                'issues': report.get('issues', []),
+                'timestamp': step_start.isoformat()
+            }
 
-            except Exception as e:
-                self.logger.warning(f"  Validation error: {e}")
-                validation_results.append({
-                    'directory': data_dir,
-                    'valid': False,
-                    'error': str(e)
-                })
-                all_valid = False
+            with open(validation_report_path, 'w', encoding='utf-8') as f:
+                json.dump(validation_report, f, indent=2, ensure_ascii=False)
 
-        step_end = datetime.now()
-        duration = (step_end - step_start).total_seconds()
+            step_end = datetime.now()
+            duration = (step_end - step_start).total_seconds()
 
-        result_report = {
-            'success': all_valid,
-            'validation_results': validation_results,
-            'total_directories': len(validation_dirs),
-            'duration_seconds': duration,
-            'start_time': step_start.isoformat(),
-            'end_time': step_end.isoformat(),
+            result_report = {
+                'success': True,
+                'total_files': total_files,
+                'valid_files': valid_files,
+                'invalid_files': invalid_files,
+                'invalid_rate': invalid_rate,
+                'average_quality': avg_quality,
+                'issues': report.get('issues', []),
+                'report_file': str(validation_report_path),
+                'duration_seconds': duration,
+                'start_time': step_start.isoformat(),
+                'end_time': step_end.isoformat(),
+            }
+
+            # 显示摘要和建议
+            self.logger.info("\n" + "-"*70)
+            self.logger.info("Initial Validation Summary:")
+            self.logger.info("-"*70)
+
+            if invalid_rate > 0.5:
+                self.logger.warning("⚠️ 数据质量极低，建议使用更严格的清洗参数")
+                self.logger.info("  推荐参数: --min-quality 40 --min-confidence 0.6")
+            elif invalid_rate > 0.1:
+                self.logger.info("⚠️ 数据质量中等，建议使用标准清洗参数")
+                self.logger.info("  推荐参数: --min-quality 30 --min-confidence 0.5")
+            else:
+                self.logger.info("✓ 数据质量较好，可以使用宽松的清洗参数")
+                self.logger.info("  推荐参数: --min-quality 25 --min-confidence 0.3")
+
+            self.logger.info(f"\n  Report saved: {validation_report_path}")
+            self.logger.info(f"  Duration: {duration:.1f} seconds")
+
+            return result_report
+
+        except Exception as e:
+            self.logger.warning(f"Initial validation error: {e}")
+            self.logger.info("将继续执行清洗步骤以解决这些问题")
+            return {
+                'success': False,
+                'error': str(e),
+                'issues': [str(e)],
+                'duration_seconds': (datetime.now() - step_start).total_seconds()
+            }
+
+    def _run_final_validation(self, input_dir: str) -> Dict[str, Any]:
+        """
+        运行最终验证（清洗后）- 确认清洗效果
+
+        Args:
+            input_dir: 要验证的输入目录（清洗输出）
+
+        Returns:
+            最终验证结果报告
+        """
+        self.logger.info("\n" + "="*70)
+        self.logger.info("STEP 4: FINAL VALIDATION (After Cleaning)")
+        self.logger.info("="*70)
+
+        step_start = datetime.now()
+
+        try:
+            # 调用validate_data.py的逻辑
+            from scripts.validate_data import validate_directory
+
+            self.logger.info(f"\nValidating: {input_dir}")
+            report = validate_directory(input_dir)
+
+            # 提取质量统计
+            total_files = report['total_files']
+            valid_files = report['valid_files']
+            invalid_files = report['invalid_files']
+            invalid_rate = invalid_files / total_files if total_files > 0 else 0
+
+            # 计算平均质量分数（从清洗报告或数据文件中读取）
+            avg_quality = self._calculate_average_quality(input_dir)
+
+            self.logger.info(f"  Total: {total_files}")
+            self.logger.info(f"  Valid: {valid_files}")
+            self.logger.info(f"  Invalid: {invalid_files}")
+            self.logger.info(f"  Invalid rate: {invalid_rate*100:.1f}%")
+            self.logger.info(f"  Average quality: {avg_quality:.1f}/100")
+
+            # 保存验证报告
+            validation_report_path = Path('./outputs/validation_final.json')
+            validation_report_path.parent.mkdir(parents=True, exist_ok=True)
+
+            import json
+            validation_report = {
+                'input_dir': input_dir,
+                'total_files': total_files,
+                'valid_files': valid_files,
+                'invalid_files': invalid_files,
+                'invalid_rate': invalid_rate,
+                'average_quality': avg_quality,
+                'issues': report.get('issues', []),
+                'timestamp': step_start.isoformat()
+            }
+
+            with open(validation_report_path, 'w', encoding='utf-8') as f:
+                json.dump(validation_report, f, indent=2, ensure_ascii=False)
+
+            step_end = datetime.now()
+            duration = (step_end - step_start).total_seconds()
+
+            result_report = {
+                'success': invalid_rate < 0.05,  # 无效数据少于5%视为成功
+                'total_files': total_files,
+                'valid_files': valid_files,
+                'invalid_files': invalid_files,
+                'invalid_rate': invalid_rate,
+                'average_quality': avg_quality,
+                'issues': report.get('issues', []),
+                'report_file': str(validation_report_path),
+                'duration_seconds': duration,
+                'start_time': step_start.isoformat(),
+                'end_time': step_end.isoformat(),
+            }
+
+            # 显示摘要
+            self.logger.info("\n" + "-"*70)
+            self.logger.info("Final Validation Summary:")
+            self.logger.info("-"*70)
+
+            if result_report['success']:
+                self.logger.info("✓ 数据质量达标！")
+            else:
+                self.logger.warning(f"⚠️ 数据质量仍不达标（无效数据率: {invalid_rate*100:.1f}%）")
+
+            self.logger.info(f"\n  Report saved: {validation_report_path}")
+            self.logger.info(f"  Duration: {duration:.1f} seconds")
+
+            return result_report
+
+        except Exception as e:
+            self.logger.warning(f"Final validation error: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'issues': [str(e)],
+                'duration_seconds': (datetime.now() - step_start).total_seconds()
+            }
+
+    def _compare_validation_results(
+        self,
+        initial_result: Dict[str, Any],
+        final_result: Dict[str, Any]
+    ) -> None:
+        """
+        对比清洗前后验证结果
+
+        Args:
+            initial_result: 初步验证结果
+            final_result: 最终验证结果
+        """
+        self.logger.info("\n" + "="*70)
+        self.logger.info("Comparing Before/After Validation Results")
+        self.logger.info("="*70)
+
+        # 计算改善情况
+        initial_invalid_rate = initial_result.get('invalid_rate', 0)
+        final_invalid_rate = final_result.get('invalid_rate', 0)
+        invalid_rate_reduction = initial_invalid_rate - final_invalid_rate
+
+        initial_quality = initial_result.get('average_quality', 50)
+        final_quality = final_result.get('average_quality', 50)
+        quality_improvement = final_quality - initial_quality
+
+        # 获取移除率（如果有）
+        cleaning_result = self.pipeline_status['results'].get('cleaning', {})
+        removal_rate = cleaning_result.get('removal_rate', 0) if cleaning_result else 0
+
+        # 显示对比结果
+        self.logger.info("\nBefore Cleaning:")
+        self.logger.info(f"  Total files: {initial_result.get('total_files', 0)}")
+        self.logger.info(f"  Valid files: {initial_result.get('valid_files', 0)}")
+        self.logger.info(f"  Invalid files: {initial_result.get('invalid_files', 0)}")
+        self.logger.info(f"  Invalid rate: {initial_invalid_rate*100:.1f}%")
+        self.logger.info(f"  Average quality: {initial_quality:.1f}/100")
+
+        self.logger.info("\nAfter Cleaning:")
+        self.logger.info(f"  Total files: {final_result.get('total_files', 0)}")
+        self.logger.info(f"  Valid files: {final_result.get('valid_files', 0)}")
+        self.logger.info(f"  Invalid files: {final_result.get('invalid_files', 0)}")
+        self.logger.info(f"  Invalid rate: {final_invalid_rate*100:.1f}%")
+        self.logger.info(f"  Average quality: {final_quality:.1f}/100")
+
+        self.logger.info("\nImprovement:")
+        self.logger.info(f"  Invalid rate reduction: {invalid_rate_reduction*100:.1f}%")
+        self.logger.info(f"  Quality score increase: +{quality_improvement:.1f}")
+        if removal_rate > 0:
+            self.logger.info(f"  Data removal rate: {removal_rate*100:.1f}%")
+
+        # 保存对比报告
+        comparison_report_path = Path('./outputs/validation_comparison.json')
+        comparison_report_path.parent.mkdir(parents=True, exist_ok=True)
+
+        import json
+        comparison_report = {
+            'before': {
+                'total_files': initial_result.get('total_files', 0),
+                'valid_files': initial_result.get('valid_files', 0),
+                'invalid_files': initial_result.get('invalid_files', 0),
+                'invalid_rate': initial_invalid_rate,
+                'average_quality': initial_quality,
+            },
+            'after': {
+                'total_files': final_result.get('total_files', 0),
+                'valid_files': final_result.get('valid_files', 0),
+                'invalid_files': final_result.get('invalid_files', 0),
+                'invalid_rate': final_invalid_rate,
+                'average_quality': final_quality,
+            },
+            'improvement': {
+                'invalid_rate_reduction': invalid_rate_reduction,
+                'quality_score_increase': quality_improvement,
+                'removal_rate': removal_rate,
+            },
+            'timestamp': datetime.now().isoformat()
         }
 
-        # 显示摘要
-        self.logger.info("\n" + "-"*70)
-        self.logger.info("Validation Summary:")
-        self.logger.info("-"*70)
+        with open(comparison_report_path, 'w', encoding='utf-8') as f:
+            json.dump(comparison_report, f, indent=2, ensure_ascii=False)
 
-        for v_result in validation_results:
-            status = "✓ VALID" if v_result['valid'] else "✗ ISSUES FOUND"
-            self.logger.info(f"  {v_result['directory']}: {status}")
+        self.logger.info(f"\n  Comparison report saved: {comparison_report_path}")
 
-        self.logger.info(f"  Duration: {duration:.1f} seconds")
+        # 综合评估清洗效果（改进判断逻辑）
+        # 评估标准1: 质量分数提升 ≥ 5分
+        quality_improved = quality_improvement >= 5.0
 
-        return result_report
+        # 评估标准2: 无效数据率降低 ≥ 10%
+        invalid_rate_improved = invalid_rate_reduction >= 0.1
+
+        # 评估标准3: 移除了低质量数据（移除率 > 0%）
+        data_removed = removal_rate > 0
+
+        # 评估标准4: 最终质量分数达标（≥ 60分）
+        quality_达标 = final_quality >= 60.0
+
+        # 综合判断
+        if quality_improved or invalid_rate_improved or (data_removed and quality_达标):
+            if quality_improved and invalid_rate_improved:
+                self.logger.info("\n✓ 清洗效果显著，数据质量大幅提升（质量+{}分，无效数据率降低{}%）".format(
+                    quality_improvement, invalid_rate_reduction*100))
+            elif quality_improved:
+                self.logger.info("\n✓ 清洗有效，质量分数提升{}分".format(quality_improvement))
+            elif invalid_rate_improved:
+                self.logger.info("\n✓ 清洗有效，无效数据率降低{}%".format(invalid_rate_reduction*100))
+            elif data_removed and quality_达标:
+                self.logger.info("\n✓ 清洗有效，移除了{}%低质量数据，最终质量达标（{}分）".format(
+                    removal_rate*100, final_quality))
+            else:
+                self.logger.info("\n✓ 清洗效果良好")
+        else:
+            # 判断是否数据本身就很好
+            if initial_invalid_rate < 0.05 and initial_quality >= 60:
+                self.logger.info("\n✓ 数据质量本身已达标，清洗保持了数据质量（{}分）".format(final_quality))
+                self.logger.info("  提示: 这是正常情况，数据质量良好无需大幅改善")
+            else:
+                self.logger.warning("\n⚠️ 清洗效果不明显，建议调整清洗参数或检查数据源")
+                self.logger.info("  当前状态: 质量分数 {}, 移除率 {}%, 无效数据率 {}%".format(
+                    final_quality, removal_rate*100, final_invalid_rate*100))
+                self.logger.info("  建议: 尝试更严格的参数（--min-quality 60 --min-confidence 0.7）")
+
+    def _calculate_average_quality(self, input_dir: str) -> float:
+        """
+        计算目录中数据的平均质量分数
+
+        Args:
+            input_dir: 数据目录路径
+
+        Returns:
+            平均质量分数 (0-100)
+        """
+        input_path = Path(input_dir)
+
+        # 方法1: 尝试读取清洗报告（优先级最高，因为这是最准确的）
+        # 检查多种可能的清洗报告位置
+        possible_report_paths = [
+            input_path.parent / 'cleaning_report.json',  # outputs/cleaned/cleaning_report.json
+            Path('./outputs/cleaned/cleaning_report.json'),  # 固定位置
+            input_path / 'cleaning_report.json',  # 如果报告在数据目录内
+        ]
+
+        for report_path in possible_report_paths:
+            if report_path.exists():
+                try:
+                    with open(report_path, 'r', encoding='utf-8') as f:
+                        cleaning_report = json.load(f)
+                    if 'quality_statistics' in cleaning_report:
+                        avg_quality = cleaning_report['quality_statistics'].get('average_quality_score')
+                        if avg_quality is not None:
+                            self.logger.debug(f"Read average quality from cleaning report: {avg_quality}")
+                            return avg_quality
+                except Exception as e:
+                    self.logger.debug(f"Failed to read cleaning report {report_path}: {e}")
+
+        # 方法2: 从数据文件中读取或计算
+        json_files = list(input_path.glob("*.json"))
+        quality_scores = []
+
+        for json_file in json_files:
+            # 跳过报告文件和摘要文件
+            if json_file.name.startswith(('cleaning_report', 'merged_summary', 'validation', 'checkpoint', 'pipeline')):
+                continue
+
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                # 如果数据已有quality_score字段（清洗后的数据），直接读取
+                if 'quality_score' in data:
+                    quality_scores.append(data['quality_score'])
+                    self.logger.debug(f"Read quality_score from {json_file.name}: {data['quality_score']}")
+                else:
+                    # 如果没有quality_score字段（未清洗的数据），使用估算算法
+                    temp_quality = self._estimate_quality_score(data)
+                    quality_scores.append(temp_quality)
+                    self.logger.debug(f"Estimated quality for {json_file.name}: {temp_quality}")
+
+            except Exception as e:
+                self.logger.debug(f"Failed to process {json_file}: {e}")
+                continue
+
+        if quality_scores:
+            avg_quality = sum(quality_scores) / len(quality_scores)
+            self.logger.debug(f"Calculated average quality from {len(quality_scores)} files: {avg_quality}")
+            return avg_quality
+
+        # 方法3: 如果都无法获取，返回默认值
+        self.logger.warning(f"Unable to calculate average quality for {input_dir}, using default 50.0")
+        return 50.0
+
+    def _estimate_quality_score(self, data: Dict[str, Any]) -> float:
+        """
+        估算单个数据文件的质量分数（用于未清洗的数据）
+
+        ⚠️ 评分标准完全对齐 DataCleaner._compute_task_quality()
+        以确保清洗前后对比的一致性
+
+        Args:
+            data: 数据字典
+
+        Returns:
+            估算的质量分数 (0-100)
+        """
+        score = 0.0
+        min_answer_length = 3
+        max_answer_length = 100
+
+        tasks = data.get('tasks', {})
+
+        # 对每个任务计算质量分数，然后取平均
+        task_scores = []
+
+        for task_name, task_data in tasks.items():
+            task_score = 0.0
+
+            # 1. 硬标签质量 (0-40分) - 完全对齐DataCleaner
+            hard_label = task_data.get('hard_label', {})
+            if hard_label:
+                confidence = hard_label.get('confidence', 0.0)
+
+                # 置信度贡献 (最高30分) - 对齐DataCleaner
+                if confidence >= 0.7:
+                    task_score += 30
+                elif confidence >= 0.5:
+                    task_score += 20
+                elif confidence >= 0.3:
+                    task_score += 10
+
+                # 答案完整性 (最高10分) - 对齐DataCleaner
+                answer = hard_label.get('answer', '')
+                if min_answer_length <= len(answer) <= max_answer_length:
+                    task_score += 10
+
+            # 2. 软标签质量 (0-20分) - 完全对齐DataCleaner
+            soft_label = task_data.get('soft_label', {})
+            if soft_label:
+                # 温度参数合理性 (最高10分) - 对齐DataCleaner
+                temperature = soft_label.get('temperature', 0.0)
+                if 1.5 <= temperature <= 3.0:  # 推荐范围
+                    task_score += 10
+                elif 1.0 <= temperature <= 5.0:  # 可接受范围
+                    task_score += 5
+
+                # 分布完整性 (最高10分) - 对齐DataCleaner
+                distribution = soft_label.get('answer_distribution', {})
+                if distribution and len(distribution) > 0:
+                    task_score += 10
+
+            # 3. CoT质量 (0-30分) - 完全对齐DataCleaner
+            cot = task_data.get('cot_reasoning', {})
+            if cot:
+                quality_metrics = cot.get('quality_metrics', {})
+
+                # 逻辑流畅度 (最高15分) - 对齐DataCleaner
+                logical_flow = quality_metrics.get('logical_flow_score', 0.0)
+                task_score += logical_flow * 15
+
+                # 步骤数量合理性 (最高15分) - 对齐DataCleaner
+                step_count = quality_metrics.get('step_count', 0)
+                if 3 <= step_count <= 5:  # 最佳步骤数
+                    task_score += 15
+                elif 2 <= step_count <= 6:  # 可接受
+                    task_score += 10
+                elif step_count > 0:  # 有步骤但不理想
+                    task_score += step_count * 2
+
+                # 长度合理性 (额外加分) - 对齐DataCleaner
+                reasoning_length = len(cot.get('raw_reasoning', ''))
+                if 50 <= reasoning_length <= 300:  # 合理长度
+                    task_score += 5
+
+            # 4. 任务特定加分 - 对齐DataCleaner
+            if task_name == 'vqa':
+                answer = hard_label.get('answer', '')
+                if answer and answer.lower() not in self.invalid_answers:
+                    task_score += 5  # VQA有效答案加分
+
+            task_scores.append(task_score)
+
+        # 计算平均分数（与DataCleaner一致）
+        if task_scores:
+            avg_score = sum(task_scores) / len(task_scores)
+            return min(avg_score, 100.0)  # 最高100分
+
+        # 如果没有任务，返回默认低分
+        return 10.0
 
     def _finalize_pipeline(
         self,
@@ -658,10 +1145,11 @@ Examples:
   # Specific tasks only
   python scripts/run_full_pipeline.py --tasks vqa captioning
 
-Pipeline Steps:
+Pipeline Steps (正确顺序):
   1. Distillation: Generate hard/soft labels + CoT using teacher model
-  2. Cleaning: Detect anomalies, score quality, filter and repair data
-  3. Validation: Verify schema and data integrity
+  2. Initial Validation: Detect quality issues before cleaning
+  3. Cleaning: Detect anomalies, score quality, filter and repair data
+  4. Final Validation: Verify cleaning results and compare before/after
 
 Output:
   - outputs/merged/*.json          - Raw distilled data
@@ -691,8 +1179,8 @@ Output:
         type=str,
         nargs='+',
         choices=['vqa', 'captioning', 'detection', 'keypoints'],
-        default=None,
-        help='Tasks to run: vqa, captioning, detection, keypoints'
+        default=None,  # None表示使用YAML配置文件的值
+        help='Tasks to run: vqa, captioning, detection, keypoints (default: from config file)'
     )
 
     # 步骤选择
@@ -700,30 +1188,29 @@ Output:
         '--steps',
         type=str,
         nargs='+',
-        choices=['distillation', 'cleaning', 'validation'],
+        choices=['distillation', 'initial_validation', 'cleaning', 'final_validation'],
         default=None,
-        help='Steps to run (default: all three steps)'
+        help='Steps to run (default: all four steps in correct order: distillation → initial_validation → cleaning → final_validation)'
     )
 
     # 清洗参数
     parser.add_argument(
         '--min-quality',
         type=float,
-        default=30.0,
-        help='Minimum quality score for cleaning (0-100, default: 30.0)'
+        default=None,           # ← 改为None，从配置文件读取
+        help='Minimum quality score for cleaning (0-100, default: from config file)'
     )
 
     parser.add_argument(
         '--min-confidence',
         type=float,
-        default=0.5,
-        help='Minimum confidence threshold (default: 0.5)'
+        default=None,           # ← 改为None，从配置文件读取
+        help='Minimum confidence threshold (default: from config file)'
     )
 
     parser.add_argument(
         '--keep-invalid',
         action='store_true',
-        default=True,
         help='Keep invalid data instead of removing (mark only)'
     )
 
@@ -731,7 +1218,6 @@ Output:
     parser.add_argument(
         '--skip-validation',
         action='store_true',
-        default=False,
         help='Skip validation step'
     )
 
@@ -746,14 +1232,20 @@ Output:
     parser.add_argument(
         '--dry-run',
         action='store_true',
-        default=False,
+        default=False,  # 明确设置默认值为False
         help='Test configuration without actual processing'
+    )
+
+    parser.add_argument(
+        '--no-dry-run',
+        action='store_false',
+        dest='dry_run',
+        help='Explicitly disable dry run mode and run actual processing'
     )
 
     parser.add_argument(
         '--verbose',
         action='store_true',
-        default=True,
         help='Show detailed logging'
     )
 
