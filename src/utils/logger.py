@@ -17,40 +17,44 @@ from datetime import datetime
 # ANSI 颜色代码
 class LogColors:
     """ANSI color codes for terminal output."""
-    RED = '\033[91m'      # ERROR - 红色
-    YELLOW = '\033[93m'   # DEBUG - 黄色
-    ORANGE = '\033[33m'   # WARNING - 橙色
-    WHITE = '\033[97m'    # INFO/其他 - 白色
-    GREEN = '\033[92m'    # SUCCESS - 绿色
-    CYAN = '\033[96m'     # 其他颜色
+    # 日志级别颜色（整行统一颜色）
+    RED = '\033[91m'      # ERROR - 红色（整行）
+    YELLOW = '\033[93m'   # DEBUG - 黄色（整行）
+    ORANGE = '\033[33m'   # WARNING - 橙色（整行）
+    WHITE = '\033[97m'    # INFO/其他 - 白色（整行）
+    GREEN = '\033[92m'    # SUCCESS - 绿色（整行）
+    CYAN = '\033[96m'     # 其他颜色（整行）
+
+    # 控制代码
     RESET = '\033[0m'     # 重置颜色
     BOLD = '\033[1m'      # 加粗
 
 
 class ColoredFormatter(logging.Formatter):
-    """Custom formatter with colored output based on log level."""
-    
-    # 日志级别对应的颜色
+    """Custom formatter with colored output - 整行根据日志等级统一颜色."""
+
+    # 日志级别对应的颜色（整行颜色）
     LEVEL_COLORS = {
-        logging.DEBUG: LogColors.YELLOW,
-        logging.INFO: LogColors.WHITE,
-        logging.WARNING: LogColors.ORANGE,
-        logging.ERROR: LogColors.RED,
-        logging.CRITICAL: LogColors.BOLD + LogColors.RED,
+        logging.DEBUG: LogColors.CYAN,      # DEBUG - 青色（整行）
+        logging.INFO: LogColors.WHITE,     # INFO - 白色（整行）
+        logging.WARNING: LogColors.YELLOW,  # WARNING - 黄色（整行）
+        logging.ERROR: LogColors.RED,       # ERROR - 红色（整行）
+        logging.CRITICAL: LogColors.BOLD + LogColors.RED,  # CRITICAL - 粗体红色（整行）
     }
-    
+
     def format(self, record):
-        # 获取对应级别的颜色
-        color = self.LEVEL_COLORS.get(record.levelno, LogColors.WHITE)
+        """格式化日志记录，整行统一颜色"""
+        # 获取对应级别的颜色（整行颜色）
+        line_color = self.LEVEL_COLORS.get(record.levelno, LogColors.WHITE)
         reset = LogColors.RESET
-        
-        # 给消息添加颜色
-        record.msg = f"{color}{record.msg}{reset}"
-        
-        # 给级别名称添加颜色
-        record.levelname = f"{color}{record.levelname}{reset}"
-        
-        return super().format(record)
+
+        # 先调用父类的 format 方法获取格式化的字符串
+        formatted = super().format(record)
+
+        # 给整行添加颜色（包括时间戳、logger名称、模块名、消息等所有部分）
+        colored_formatted = f"{line_color}{formatted}{reset}"
+
+        return colored_formatted
 
 
 def setup_logger(

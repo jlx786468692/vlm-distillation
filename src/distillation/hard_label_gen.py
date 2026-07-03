@@ -63,11 +63,11 @@ class HardLabelGenerator:
         """
         self.logger.debug(f"Generating VQA hard labels for image {image_id}")
 
-        # Get teacher model inference
+        # Get teacher model inference WITH logits to compute confidence
         result = self.teacher.inference_vqa(
             image=image_path,
             question=question,
-            return_logits=False,
+            return_logits=True,  # Changed from False to get confidence scores
             generate_cot=False
         )
 
@@ -108,10 +108,10 @@ class HardLabelGenerator:
         """
         self.logger.debug(f"Generating captioning hard labels for image {image_id}")
 
-        # Get teacher model inference
+        # Get teacher model inference WITH logits to compute confidence
         result = self.teacher.inference_captioning(
             image=image_path,
-            return_logits=False,
+            return_logits=True,  # Changed from False to get confidence scores
             generate_cot=False,
             num_captions=num_captions
         )
@@ -125,6 +125,7 @@ class HardLabelGenerator:
             'captions': captions,
             'num_captions': len(captions),
             'primary_caption': captions[0] if captions else '',
+            'confidence': result.get('confidence', 0.0),  # Add confidence
             'timestamp': datetime.now().isoformat(),
         }
 
@@ -150,10 +151,10 @@ class HardLabelGenerator:
         """
         self.logger.debug(f"Generating detection hard labels for image {image_id}")
 
-        # Get teacher model inference
+        # Get teacher model inference WITH logits to compute overall confidence
         result = self.teacher.inference_detection(
             image=image_path,
-            return_logits=False,
+            return_logits=True,  # Changed from False to get confidence scores
             generate_cot=False
         )
 
@@ -173,6 +174,7 @@ class HardLabelGenerator:
             'objects': filtered_objects,
             'num_objects': len(filtered_objects),
             'total_detected': len(objects),
+            'confidence': result.get('confidence', 0.0),  # Add overall confidence
             'timestamp': datetime.now().isoformat(),
         }
 

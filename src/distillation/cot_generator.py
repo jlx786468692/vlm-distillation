@@ -431,31 +431,15 @@ class CoTGenerator:
         """
         steps = []
 
-        # Split by common delimiters
-        delimiters = ['Step', 'step', 'First', 'Next', 'Then', 'Finally', 'Therefore']
+        # Use regex to find step markers and their content
+        # Pattern: (Marker)(optional comma)(content until next marker or end)
+        pattern = r'(Step \d+|First|Next|Then|Finally|Therefore)[,:]?\s*'
 
-        # Use regex to find step markers
-        pattern = r'(Step \d+|First|Next|Then|Finally|Therefore)'
+        # Find all matches with their positions
+        matches = list(re.finditer(pattern, raw_reasoning))
 
-        parts = re.split(pattern, raw_reasoning)
-
-        # Reconstruct steps
-        step_count = 0
-        for i in range(1, len(parts), 2):
-            if i < len(parts):
-                marker = parts[i]
-                content = parts[i + 1] if i + 1 < len(parts) else ''
-
-                steps.append({
-                    'step_number': step_count + 1,
-                    'marker': marker.strip(),
-                    'content': content.strip(),
-                })
-
-                step_count += 1
-
-        # If no steps found, split by sentences
-        if not steps:
+        if not matches:
+            # If no markers found, split by sentences
             sentences = raw_reasoning.split('.')
             for i, sentence in enumerate(sentences[:5]):  # Limit to 5 steps
                 if sentence.strip():
@@ -464,6 +448,36 @@ class CoTGenerator:
                         'marker': '',
                         'content': sentence.strip(),
                     })
+            return steps
+
+        # Extract content between markers
+        for i, match in enumerate(matches):
+            marker = match.group(1)
+
+            # Get content from current marker to next marker (or end)
+            start_pos = match.end()
+            if i + 1 < len(matches):
+                end_pos = matches[i + 1].start()
+            else:
+                end_pos = len(raw_reasoning)
+
+            content = raw_reasoning[start_pos:end_pos].strip()
+
+            # Clean up content: remove trailing punctuation and next step markers
+            # Remove trailing period, comma, or newline followed by numbers
+            content = re.sub(r'[\.\,]\s*(\n\s*\d+\.?)?\s*$', '', content)
+            content = re.sub(r'\n\s*\d+\.\s*', '', content)  # Remove "1." style markers
+            content = content.strip()
+
+            # Remove leading comma if present (shouldn't happen with new logic, but safety check)
+            if content.startswith(',') or content.startswith(':'):
+                content = content[1:].strip()
+
+            steps.append({
+                'step_number': i + 1,
+                'marker': marker.strip(),
+                'content': content,
+            })
 
         return steps
 

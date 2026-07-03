@@ -2,7 +2,7 @@
 完整数据管道脚本
 ================
 
-一次性运行蒸馏、初步验证、清洗、最终验证四个步骤的完整流程。
+一次性运行蒸馏、初步验证、清洗、最终验证、数据质量分析五个步骤的完整流程。
 
 参数优先级（命令行 > 配置文件 > 默认值）:
     - min_quality: 命令行 --min-quality > configs/default.yaml cleaning.min_quality_score > 30.0
@@ -31,6 +31,7 @@ Usage:
     Step 2: 初步验证 - 发现数据质量问题
     Step 3: 数据清洗 - 异常检测+质量评分+过滤+修复
     Step 4: 最终验证 - 确认清洗效果并对比前后差异
+    Step 5: 数据质量分析 - 深度统计分析和准确性验证
 """
 
 import argparse
@@ -56,11 +57,12 @@ class FullPipelineRunner:
     """
     完整数据管道运行器
 
-    整合四个步骤（正确顺序）:
+    整合五个步骤（正确顺序）:
     1. 数据蒸馏 (Distillation)
     2. 初步验证 (Initial Validation) - 清洗前
     3. 数据清洗 (Cleaning) - 解决初步验证发现的问题
     4. 最终验证 (Final Validation) - 清洗后，对比效果
+    5. 数据质量分析 (Quality Analysis) - 深度统计分析验证准确性
     """
 
     def __init__(self, config_path: str = 'configs/default.yaml'):
@@ -275,6 +277,16 @@ class FullPipelineRunner:
                 else:
                     self.pipeline_status['steps_failed'].append('final_validation')
                     self.logger.warning(f"Final validation found issues: {final_validation_result.get('issues')}")
+
+            # Step 5: 数据质量分析（深度验证）
+            if 'final_validation' in self.pipeline_status['steps_completed']:
+                # 对清洗后的数据进行深度分析
+                cleaned_dir = self.pipeline_status['results']['cleaning']['cleaned_output'] \
+                    if 'cleaning' in self.pipeline_status['steps_completed'] \
+                    else self.pipeline_status['results']['distillation']['merged_output']
+
+                quality_analysis_result = self._analyze_data_quality(cleaned_dir)
+                self.pipeline_status['results']['quality_analysis'] = quality_analysis_result
 
             # 生成最终报告
             return self._finalize_pipeline(success=True)
@@ -1049,6 +1061,343 @@ class FullPipelineRunner:
         # 如果没有任务，返回默认低分
         return 10.0
 
+    def _analyze_data_quality(self, input_dir: str) -> Dict[str, Any]:
+        """
+        分析数据质量（最终验证后的深度分析）
+
+        Args:
+            input_dir: 数据目录路径
+
+        Returns:
+            数据质量分析报告
+        """
+        self.logger.info("\n" + "="*70)
+        self.logger.info("DATA QUALITY ANALYSIS")
+        self.logger.info("="*70)
+
+        input_path = Path(input_dir)
+        json_files = list(input_path.glob("*.json"))
+
+        # 过滤掉报告文件
+        data_files = [
+            f for f in json_files
+            if not f.name.startswith(('cleaning_report', 'merged_summary', 'validation', 'checkpoint', 'pipeline'))
+        ]
+
+        if not data_files:
+            self.logger.warning("No data files found for analysis")
+            return {'error': 'No data files'}
+
+        self.logger.info(f"Analyzing {len(data_files)} data files...")
+
+        # 加载所有数据
+        data_list = []
+        for json_file in data_files:
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                data_list.append(data)
+            except Exception as e:
+                self.logger.warning(f"Failed to load {json_file}: {e}")
+
+        # 1. 置信度分析
+        confidence_analysis = self._analyze_confidence(data_list)
+
+        # 2. 质量分数分析
+        quality_analysis = self._analyze_quality_scores(data_list)
+
+        # 3. 任务分布分析
+        task_analysis = self._analyze_task_distribution(data_list)
+
+        # 4. CoT质量分析
+        cot_analysis = self._analyze_cot_quality(data_list)
+
+        # 5. 异常检测
+        anomaly_analysis = self._detect_anomalies_summary(data_list)
+
+        # 显示分析结果
+        self.logger.info("\n" + "-"*70)
+        self.logger.info("Analysis Results:")
+        self.logger.info("-"*70)
+
+        # 置信度统计
+        if 'mean' in confidence_analysis:
+            self.logger.info(f"\nConfidence Statistics:")
+            self.logger.info(f"  Mean: {confidence_analysis['mean']:.3f}")
+            self.logger.info(f"  Median: {confidence_analysis['median']:.3f}")
+            self.logger.info(f"  Std: {confidence_analysis['std']:.3f}")
+            self.logger.info(f"  Distribution:")
+            self.logger.info(f"    High (≥0.7): {confidence_analysis['high_count']} ({confidence_analysis['high_rate']*100:.1f}%)")
+            self.logger.info(f"    Medium (0.5-0.7): {confidence_analysis['medium_count']} ({confidence_analysis['medium_rate']*100:.1f}%)")
+            self.logger.info(f"    Low (<0.5): {confidence_analysis['low_count']} ({confidence_analysis['low_rate']*100:.1f}%)")
+
+        # 质量分数统计
+        if 'mean' in quality_analysis:
+            self.logger.info(f"\nQuality Score Statistics:")
+            self.logger.info(f"  Mean: {quality_analysis['mean']:.2f}")
+            self.logger.info(f"  Median: {quality_analysis['median']:.2f}")
+            self.logger.info(f"  Std: {quality_analysis['std']:.2f}")
+            self.logger.info(f"  Distribution:")
+            self.logger.info(f"    High (70-100): {quality_analysis['high_count']} ({quality_analysis['high_rate']*100:.1f}%)")
+            self.logger.info(f"    Medium (50-70): {quality_analysis['medium_count']} ({quality_analysis['medium_rate']*100:.1f}%)")
+            self.logger.info(f"    Low (<50): {quality_analysis['low_count']} ({quality_analysis['low_rate']*100:.1f}%)")
+
+        # 任务统计
+        self.logger.info(f"\nTask Distribution:")
+        self.logger.info(f"  Total samples: {task_analysis['total_samples']}")
+        for task_name, count in task_analysis['tasks'].items():
+            self.logger.info(f"  {task_name}: {count} samples")
+
+        # CoT统计
+        if cot_analysis['cot_rate'] > 0:
+            self.logger.info(f"\nCoT Quality:")
+            self.logger.info(f"  Coverage: {cot_analysis['cot_rate']*100:.1f}%")
+            if cot_analysis['avg_logical_flow']:
+                self.logger.info(f"  Avg logical flow: {cot_analysis['avg_logical_flow']:.3f}")
+            if cot_analysis['avg_step_count']:
+                self.logger.info(f"  Avg step count: {cot_analysis['avg_step_count']:.1f}")
+
+        # 异常统计
+        if anomaly_analysis['total_anomalies'] > 0:
+            self.logger.warning(f"\nAnomalies Detected:")
+            self.logger.warning(f"  Total: {anomaly_analysis['total_anomalies']}")
+            for anomaly_type, count in anomaly_analysis['by_type'].items():
+                if count > 0:
+                    self.logger.warning(f"  {anomaly_type}: {count}")
+
+        # 生成建议
+        recommendations = self._generate_quality_recommendations(
+            confidence_analysis, quality_analysis, cot_analysis, anomaly_analysis
+        )
+
+        self.logger.info(f"\nQuality Assessment:")
+        for rec in recommendations:
+            self.logger.info(f"  {rec}")
+
+        # 保存分析报告
+        analysis_report = {
+            'total_samples': len(data_list),
+            'confidence_analysis': confidence_analysis,
+            'quality_analysis': quality_analysis,
+            'task_analysis': task_analysis,
+            'cot_analysis': cot_analysis,
+            'anomaly_analysis': anomaly_analysis,
+            'recommendations': recommendations,
+            'timestamp': datetime.now().isoformat(),
+        }
+
+        report_path = Path('./outputs/data_quality_analysis.json')
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump(analysis_report, f, indent=2, ensure_ascii=False)
+
+        self.logger.info(f"\n  Analysis report saved: {report_path}")
+
+        return analysis_report
+
+    def _analyze_confidence(self, data_list: List[Dict]) -> Dict[str, Any]:
+        """分析置信度分布"""
+        confidence_values = []
+
+        for data in data_list:
+            tasks = data.get('tasks', {})
+            for task_name, task_data in tasks.items():
+                hard_label = task_data.get('hard_label', {})
+                confidence = hard_label.get('confidence')
+                if confidence is not None:
+                    confidence_values.append(confidence)
+
+        if not confidence_values:
+            return {'error': 'No confidence values'}
+
+        import numpy as np
+
+        high_count = len([c for c in confidence_values if c >= 0.7])
+        medium_count = len([c for c in confidence_values if 0.5 <= c < 0.7])
+        low_count = len([c for c in confidence_values if c < 0.5])
+        total = len(confidence_values)
+
+        return {
+            'count': total,
+            'mean': float(np.mean(confidence_values)),
+            'median': float(np.median(confidence_values)),
+            'std': float(np.std(confidence_values)),
+            'min': float(np.min(confidence_values)),
+            'max': float(np.max(confidence_values)),
+            'high_count': high_count,
+            'medium_count': medium_count,
+            'low_count': low_count,
+            'high_rate': high_count / total,
+            'medium_rate': medium_count / total,
+            'low_rate': low_count / total,
+        }
+
+    def _analyze_quality_scores(self, data_list: List[Dict]) -> Dict[str, Any]:
+        """分析质量分数分布"""
+        quality_scores = []
+
+        for data in data_list:
+            quality_score = data.get('quality_score')
+            if quality_score is not None:
+                quality_scores.append(quality_score)
+
+        if not quality_scores:
+            return {'error': 'No quality scores'}
+
+        import numpy as np
+
+        high_count = len([q for q in quality_scores if q >= 70])
+        medium_count = len([q for q in quality_scores if 50 <= q < 70])
+        low_count = len([q for q in quality_scores if q < 50])
+        total = len(quality_scores)
+
+        return {
+            'count': total,
+            'mean': float(np.mean(quality_scores)),
+            'median': float(np.median(quality_scores)),
+            'std': float(np.std(quality_scores)),
+            'min': float(np.min(quality_scores)),
+            'max': float(np.max(quality_scores)),
+            'high_count': high_count,
+            'medium_count': medium_count,
+            'low_count': low_count,
+            'high_rate': high_count / total,
+            'medium_rate': medium_count / total,
+            'low_rate': low_count / total,
+        }
+
+    def _analyze_task_distribution(self, data_list: List[Dict]) -> Dict[str, Any]:
+        """分析任务分布"""
+        task_counts = {}
+
+        for data in data_list:
+            tasks = data.get('tasks', {})
+            for task_name in tasks.keys():
+                task_counts[task_name] = task_counts.get(task_name, 0) + 1
+
+        import numpy as np
+
+        return {
+            'total_samples': len(data_list),
+            'tasks': task_counts,
+            'avg_tasks_per_sample': float(np.mean([len(d.get('tasks', {})) for d in data_list])),
+        }
+
+    def _analyze_cot_quality(self, data_list: List[Dict]) -> Dict[str, Any]:
+        """分析CoT质量"""
+        import numpy as np
+
+        cot_samples = 0
+        logical_flows = []
+        step_counts = []
+
+        for data in data_list:
+            tasks = data.get('tasks', {})
+            for task_name, task_data in tasks.items():
+                cot = task_data.get('cot_reasoning', {})
+                if cot:
+                    cot_samples += 1
+                    quality_metrics = cot.get('quality_metrics', {})
+
+                    logical_flow = quality_metrics.get('logical_flow_score')
+                    if logical_flow is not None:
+                        logical_flows.append(logical_flow)
+
+                    step_count = quality_metrics.get('step_count')
+                    if step_count is not None:
+                        step_counts.append(step_count)
+
+        return {
+            'cot_samples': cot_samples,
+            'cot_rate': cot_samples / len(data_list) if data_list else 0,
+            'avg_logical_flow': float(np.mean(logical_flows)) if logical_flows else None,
+            'avg_step_count': float(np.mean(step_counts)) if step_counts else None,
+        }
+
+    def _detect_anomalies_summary(self, data_list: List[Dict]) -> Dict[str, Any]:
+        """检测异常数据（汇总）"""
+        anomalies = {
+            'low_confidence': 0,
+            'short_answers': 0,
+            'long_answers': 0,
+            'empty_cot': 0,
+            'format_errors': 0,
+        }
+
+        for data in data_list:
+            tasks = data.get('tasks', {})
+
+            for task_name, task_data in tasks.items():
+                # 低置信度
+                hard_label = task_data.get('hard_label', {})
+                confidence = hard_label.get('confidence', 1.0)
+                if confidence < 0.5:
+                    anomalies['low_confidence'] += 1
+
+                # 答案长度异常
+                answer = hard_label.get('answer', '')
+                if len(answer) < 3:
+                    anomalies['short_answers'] += 1
+                elif len(answer) > 100:
+                    anomalies['long_answers'] += 1
+
+                # 空CoT
+                cot = task_data.get('cot_reasoning', {})
+                if not cot or not cot.get('raw_reasoning'):
+                    anomalies['empty_cot'] += 1
+
+        return {
+            'total_anomalies': sum(anomalies.values()),
+            'by_type': anomalies,
+        }
+
+    def _generate_quality_recommendations(
+        self,
+        confidence_analysis: Dict,
+        quality_analysis: Dict,
+        cot_analysis: Dict,
+        anomaly_analysis: Dict
+    ) -> List[str]:
+        """生成数据质量建议"""
+        recommendations = []
+
+        # 1. 整体质量评估
+        avg_quality = quality_analysis.get('mean', 0)
+        if avg_quality >= 70:
+            recommendations.append("✓ 数据质量优秀（平均{}分），可直接用于训练".format(avg_quality))
+        elif avg_quality >= 60:
+            recommendations.append("✓ 数据质量良好（平均{}分），建议使用前检查低质量样本".format(avg_quality))
+        elif avg_quality >= 50:
+            recommendations.append("⚠️ 数据质量中等（平均{}分），建议使用更严格的清洗参数".format(avg_quality))
+        else:
+            recommendations.append("❌ 数据质量较差（平均{}分），建议重新生成数据或调整参数".format(avg_quality))
+
+        # 2. 置信度评估
+        low_conf_rate = confidence_analysis.get('low_rate', 0)
+        if low_conf_rate > 0.2:
+            recommendations.append("⚠️ 低置信度样本占比{}%，建议检查教师模型生成质量".format(low_conf_rate*100))
+
+        # 3. CoT覆盖率
+        cot_rate = cot_analysis.get('cot_rate', 0)
+        if cot_rate < 0.8:
+            recommendations.append("⚠️ CoT覆盖率仅{}%，部分样本缺少推理过程".format(cot_rate*100))
+        elif cot_rate >= 0.9:
+            recommendations.append("✓ CoT覆盖率{}%，推理数据完整".format(cot_rate*100))
+
+        # 4. 异常评估
+        anomaly_count = anomaly_analysis.get('total_anomalies', 0)
+        if anomaly_count > 0:
+            anomaly_rate = anomaly_count / (confidence_analysis.get('count', 1) or 1)
+            if anomaly_rate > 0.1:
+                recommendations.append("⚠️ 异常率{}%，建议人工抽查验证".format(anomaly_rate*100))
+
+        # 5. 建议
+        if avg_quality >= 60 and low_conf_rate < 0.1 and anomaly_count < 5:
+            recommendations.append("✓ 数据整体可信，建议随机抽查100个样本进行人工验证")
+
+        return recommendations
+
     def _finalize_pipeline(
         self,
         success: bool,
@@ -1115,6 +1464,9 @@ class FullPipelineRunner:
             self.logger.info(f"  Cleaned data: {clean_out}")
             self.logger.info(f"  Removed data: {self.pipeline_status['results']['cleaning']['removed_output']}")
 
+        if 'quality_analysis' in self.pipeline_status['results']:
+            self.logger.info(f"  Quality analysis report: outputs/data_quality_analysis.json")
+
         self.logger.info(f"  Pipeline report: {report_path}")
 
         return final_report
@@ -1150,12 +1502,17 @@ Pipeline Steps (正确顺序):
   2. Initial Validation: Detect quality issues before cleaning
   3. Cleaning: Detect anomalies, score quality, filter and repair data
   4. Final Validation: Verify cleaning results and compare before/after
+  5. Quality Analysis: Deep statistical analysis and accuracy validation
 
 Output:
   - outputs/merged/*.json          - Raw distilled data
   - outputs/cleaned/cleaned/*.json - High-quality cleaned data
   - outputs/cleaned/removed/*.json - Low-quality removed data
-  - outputs/pipeline_report.json   - Complete pipeline report
+  - outputs/validation_initial.json   - Initial validation report
+  - outputs/validation_final.json     - Final validation report
+  - outputs/validation_comparison.json - Before/after comparison
+  - outputs/data_quality_analysis.json - Deep quality analysis
+  - outputs/pipeline_report.json      - Complete pipeline report
         """
     )
 
