@@ -46,8 +46,8 @@ class COCODataLoader:
 
         # Data paths
         self.coco_root = Path(self.config.get("data.coco_root", "./data/coco"))
-        self.annotations_root = self.coco_root / "annotations"
-        self.images_root = self.coco_root / "images"
+        self.annotations_root = Path(self.config.get("data.annotations_root", "./data/coco/annotations"))
+        self.images_root = Path(self.config.get("data.images_root", "./data/coco/images"))
 
         # COCO API instances
         self.coco_caption = None

@@ -2,15 +2,19 @@
 Utility Functions Module
 ========================
 
-Configuration management, logging, and other utilities.
+Configuration management, logging, data analysis, and visualization utilities.
 """
 
 from .config import ConfigManager
 from .logger import setup_logger
-from .visualization import visualize_results
+from .data_quality_analyzer import DataQualityAnalyzer
+from .validation_comparator import ValidationComparator
+from .pipeline_visualizer import PipelineVisualizer
 
 __all__ = [
     "ConfigManager",
     "setup_logger",
-    "visualize_results",
+    "DataQualityAnalyzer",
+    "ValidationComparator",
+    "PipelineVisualizer",
 ]

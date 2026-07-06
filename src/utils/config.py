@@ -37,6 +37,23 @@ class ConfigManager:
         with open(self.config_path, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
 
+        # Load prompts config if specified or exists
+        prompts_config_path = self.config.get('prompts_config')
+        if prompts_config_path:
+            prompts_path = Path(prompts_config_path)
+        else:
+            prompts_path = self.config_root / "prompts.yaml"
+
+        if prompts_path.exists():
+            with open(prompts_path, 'r', encoding='utf-8') as f:
+                prompts_config = yaml.safe_load(f)
+                # 直接合并，prompts.yaml 已经有正确的结构
+                if 'prompts' in prompts_config:
+                    self.config['prompts'] = prompts_config['prompts']
+                else:
+                    # 如果没有 'prompts' 键，直接合并到 prompts section
+                    self._merge_config(self.config, prompts_config, "prompts")
+
         # Load model config if exists
         model_config_path = self.config_root / "model_config.yaml"
         if model_config_path.exists():

@@ -3,13 +3,25 @@ project:
   version: "1.0.0"
   description: "VLM data distillation pipeline using Qwen2.5-VL-7B-Instruct"
 
+# Prompt 配置文件路径
+prompts_config: "configs/prompts.yaml"
+
 teacher:
   model_name: "models/Qwen2.5-VL-7B-Instruct"
   device: "cuda"
   precision: "bf16"  # bfloat16 for efficiency
   max_length: 2048
+
+  # 通用生成参数（适用于VQA、Captioning等任务）
   temperature: 0.7
   top_p: 0.9
+  top_k: 50
+  max_new_tokens: 512
+
+  # 检测任务专用优化参数（提高置信度、减少截断）
+  detection_temperature: 0.3      # 低温度=更确定性输出（避免低置信度）
+  detection_top_p: 0.95           # 高top_p=更结构化JSON
+  max_detection_tokens: 1024      # 长生成长度=避免截断（从512增加到1024）
 
 student:
   model_name: "models/Qwen2.5-VL-3B-Instruct"  # To be configured (e.g., Qwen/Qwen2-VL-2B-Instruct)
@@ -18,7 +30,7 @@ student:
 data:
   coco_root: "./data/coco"
   annotations_root: "./data/coco/annotations"
-  images_root: "./data/coco/images"
+  images_root: "./data/coco/val2014"
 
   # Dataset splits
   train_split: "train2014"
@@ -43,7 +55,7 @@ distillation:
     - "vqa"
     # - "captioning"
     - "detection"
-    # - "keypoints"
+    # - "keypoints"  # 需要person_keypoints标注文件，暂不启用
 
   # Hard label configuration
   hard_labels:
@@ -103,9 +115,9 @@ cleaning:
   enabled: true
 
   # 异常检测阈值
-  min_confidence: 0.4            # 最低置信度阈值（低于此值标记为异常）
+  min_confidence: 0.6            # 最低置信度阈值（提高到0.6，过滤更多低置信度数据）
   max_confidence: 0.95           # 最高置信度阈值（高于此值可能过于自信）
-  min_quality_score: 40.0        # 最低质量分数阈值（0-100，低于此值移除）
+  min_quality_score: 50.0        # 最低质量分数阈值（提高到50，移除低质量数据）
   min_cot_quality: 0.5           # 最低CoT逻辑流畅度分数
 
   # 答案长度限制
@@ -114,6 +126,7 @@ cleaning:
 
   # 清洗策略
   auto_remove_invalid: true      # 自动移除无效数据（invalid_answer/empty_result）
+  remove_empty_results: true     # 移除有空结果的样本（设置为false可保留部分任务数据）
   auto_repair_bbox: true         # 自动修复异常检测框
   deduplicate_answers: true      # 答案去重（标记但不移除）
 
@@ -133,3 +146,113 @@ cleaning:
     - "unclear"
     - "no answer"
     - "not sure"
+
+# ============================================================
+# 数据可视化配置 (Visualization Configuration)
+# ============================================================
+visualization:
+  # 是否启用可视化
+  enabled: true
+
+  # 输出设置
+  output_dir: "./outputs/visualizations"
+  plot_format: "png"  # 支持格式: png, svg, pdf
+  dpi: 150
+  save_plots: true
+
+  # 图表通用设置
+  figsize:
+    width: 12
+    height: 8
+  style: "seaborn-v0_8-whitegrid"  # matplotlib样式
+
+  # ============================================================
+  # 统计图表配置
+  # ============================================================
+  charts:
+    # 置信度分布图（直方图+箱线图）
+    confidence_distribution:
+      enabled: true
+      bins: 30
+
+    # 质量分数分布图
+    quality_scores:
+      enabled: true
+      bins: 20
+      show_thresholds: true
+
+    # 任务分布图（饼图+柱状图）
+    task_distribution:
+      enabled: true
+      show_percentages: true
+
+    # CoT质量分析图
+    cot_quality:
+      enabled: true
+      show_step_distribution: true
+
+  # ============================================================
+  # 样本可视化配置
+  # ============================================================
+  sample_visualization:
+    enabled: true
+    max_samples: 10              # 最大可视化样本数
+
+    # 展示内容配置
+    show_hard_label: true
+    show_soft_label: true
+    show_cot: true
+    show_bbox: true
+
+    # 图像设置
+    figsize:
+      width: 16
+      height: 12
+    dpi: 100
+
+    # 边界框颜色
+    bbox_colors:
+      person: "#FF6B6B"
+      car: "#4ECDC4"
+      default: "#3498DB"
+
+    # 软标签显示
+    soft_label_display:
+      top_k: 5
+
+    # CoT显示
+    cot_display:
+      max_length: 200
+
+  # ============================================================
+  # 时间线可视化配置
+  # ============================================================
+  timeline_visualization:
+    enabled: true
+
+    quality_timeline:
+      enabled: true
+      show_threshold: true
+      show_pass_fail: true
+
+    confidence_timeline:
+      enabled: true
+      show_threshold: true
+      show_high_low: true
+
+  # ============================================================
+  # 步骤耗时可视化配置
+  # ============================================================
+  timing_visualization:
+    enabled: true
+    show_cumulative: true        # 显示累计耗时
+    show_percentage: true        # 显示耗时占比
+    show_average_line: true      # 显示平均耗时线
+
+  # ============================================================
+  # HTML报告配置
+  # ============================================================
+  html_report:
+    enabled: true
+    filename: "visualization_report.html"
+    include_summary: true

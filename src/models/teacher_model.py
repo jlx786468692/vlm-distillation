@@ -51,8 +51,11 @@ class TeacherModel:
 
         # Generation parameters
         self.max_new_tokens = self.config.get("model.max_new_tokens", 512)
+        self.max_detection_tokens = self.config.get("model.max_detection_tokens", 1024)  # Detection needs more tokens
         self.temperature = self.config.get("model.temperature", 0.7)
+        self.detection_temperature = self.config.get("model.detection_temperature", 0.3)  # Lower temp for detection
         self.top_p = self.config.get("model.top_p", 0.9)
+        self.detection_top_p = self.config.get("model.detection_top_p", 0.95)  # Higher for deterministic output
         self.top_k = self.config.get("model.top_k", 50)
 
         # Model components
@@ -68,6 +71,13 @@ class TeacherModel:
         self.logger.info(f"Loading teacher model: {self.model_name}")
 
         try:
+            # Check if using HuggingFace mirror (for network issues)
+            hf_mirror = self.config.get("teacher.hf_mirror", None)
+            if hf_mirror:
+                import os
+                self.logger.info(f"Using HuggingFace mirror: {hf_mirror}")
+                os.environ['HF_ENDPOINT'] = hf_mirror
+
             # Determine dtype
             dtype_map = {
                 'fp32': torch.float32,
@@ -105,6 +115,10 @@ class TeacherModel:
 
         except Exception as e:
             self.logger.error(f"Failed to load model: {e}")
+            self.logger.error(f"Possible solutions:")
+            self.logger.error(f"  1. Use local model path in config: teacher.model_name")
+            self.logger.error(f"  2. Use HuggingFace mirror: teacher.hf_mirror: 'https://hf-mirror.com'")
+            self.logger.error(f"  3. Download model manually and use local path")
             raise
 
     def inference_vqa(
@@ -224,8 +238,14 @@ class TeacherModel:
         # Prepare inputs
         inputs = self._prepare_inputs(image, prompt)
 
-        # Generate
-        outputs = self._generate(inputs, return_logits=return_logits)
+        # Generate with optimized parameters for detection
+        outputs = self._generate(
+            inputs,
+            return_logits=return_logits,
+            max_new_tokens=self.max_detection_tokens,  # Use longer generation for detection
+            temperature=self.detection_temperature,    # Use lower temperature for more deterministic output
+            top_p=self.detection_top_p                  # Use higher top_p for structured JSON
+        )
 
         # Process outputs
         result = self._process_detection_outputs(outputs, return_logits)
@@ -268,7 +288,7 @@ class TeacherModel:
 
     def _construct_prompt(self, question: str, task: str) -> str:
         """
-        Construct task-specific prompt.
+        Construct task-specific prompt from configuration file.
 
         Args:
             question: Question for VQA (empty for other tasks)
@@ -277,18 +297,32 @@ class TeacherModel:
         Returns:
             Formatted prompt string
         """
-        prompts = {
-            'vqa': f"Look at the image and answer the following question:\nQuestion: {question}\nAnswer:",
-            'captioning': "Describe this image in detail, including all objects, their attributes, and the overall scene.",
-            'detection': "Detect all objects in this image. For each object, provide the bounding box coordinates and category.\n\nRespond ONLY with valid JSON in this exact format:\n{\"objects\": [{\"category\": \"object_name\", \"bbox\": [x_min, y_min, x_max, y_max], \"confidence\": 0.95}]}\n\nExample response:\n{\"objects\": [{\"category\": \"person\", \"bbox\": [100, 50, 300, 400], \"confidence\": 0.98}, {\"category\": \"car\", \"bbox\": [400, 200, 600, 350], \"confidence\": 0.92}]}",
-            'keypoints': "Detect all persons in this image and estimate their body pose with 17 keypoints.\n\nRespond ONLY with valid JSON in this exact format:\n{\"persons\": [{\"bbox\": [x, y, width, height], \"keypoints\": [{\"name\": \"nose\", \"x\": 123, \"y\": 456, \"visibility\": 2}]}]}\n\nKeypoint names: nose, left_eye, right_eye, left_ear, right_ear, left_shoulder, right_shoulder, left_elbow, right_elbow, left_wrist, right_wrist, left_hip, right_hip, left_knee, right_knee, left_ankle, right_ankle\n\nVisibility: 0=not visible, 1=occluded, 2=visible\n\nExample response:\n{\"persons\": [{\"bbox\": [50, 100, 200, 300], \"keypoints\": [{\"name\": \"nose\", \"x\": 150, \"y\": 120, \"visibility\": 2}, ...]}]}",
-        }
+        # 从配置文件读取 prompt
+        prompt_template = self.config.get(
+            f'prompts.standard.{task}',
+            self.config.get('prompts.default.standard', "Analyze this image.")
+        )
 
-        return prompts.get(task, "Analyze this image.")
+        # 调试日志：显示实际使用的 prompt
+        self.logger.debug(f"Loading prompt for task '{task}' from config")
+        self.logger.debug(f"Prompt template (first 100 chars): {prompt_template[:100]}")
+
+        # 支持变量插值（如 {question}）
+        try:
+            if '{question}' in prompt_template:
+                prompt = prompt_template.format(question=question)
+                self.logger.debug(f"Formatted prompt with question: {question}")
+            else:
+                prompt = prompt_template
+        except KeyError as e:
+            self.logger.warning(f"Prompt template missing variable: {e}")
+            prompt = prompt_template
+
+        return prompt.strip()
 
     def _construct_cot_prompt(self, question: str, task: str) -> str:
         """
-        Construct Chain-of-Thought prompt.
+        Construct Chain-of-Thought prompt from configuration file.
 
         Args:
             question: Question for VQA
@@ -297,14 +331,28 @@ class TeacherModel:
         Returns:
             CoT-formatted prompt
         """
-        cot_prompts = {
-            'vqa': f"Analyze this image step by step to answer the following question.\nQuestion: {question}\n\nPlease think through this systematically:\n1. First, identify all visual elements in the image.\n2. Next, analyze their attributes and relationships.\n3. Then, consider the context and scene.\n4. Finally, based on your analysis, provide the answer.\n\nLet's start:",
-            'captioning': "Describe this image systematically. Think through the following steps:\n1. Identify the main subjects and objects.\n2. Describe their attributes and positions.\n3. Note the scene and setting.\n4. Describe any actions or activities.\n5. Combine everything into a comprehensive caption.\n\nLet's analyze:",
-            'detection': "Detect objects in this image methodically:\n1. Scan the image systematically.\n2. Identify each object and its location.\n3. Determine the bounding box coordinates.\n4. Classify each object.\n\nAfter analysis, provide results ONLY as valid JSON:\n{\"objects\": [{\"category\": \"name\", \"bbox\": [x_min, y_min, x_max, y_max], \"confidence\": 0.95}]}\n\nLet's start the detection:",
-            'keypoints': "Estimate human poses in this image systematically:\n1. Identify all persons in the image and their approximate locations.\n2. For each person, locate head and face keypoints (nose, eyes, ears).\n3. Identify upper body keypoints (shoulders, elbows, wrists).\n4. Locate lower body keypoints (hips, knees, ankles).\n5. For each keypoint, provide coordinates [x, y] and visibility (0/1/2).\n\nAfter analysis, provide results ONLY as valid JSON:\n{\"persons\": [{\"bbox\": [x, y, w, h], \"keypoints\": [{\"name\": \"nose\", \"x\": 123, \"y\": 456, \"visibility\": 2}]}]}\n\nLet's start the pose estimation:",
-        }
+        # 从配置文件读取 CoT prompt
+        cot_template = self.config.get(
+            f'prompts.cot.{task}',
+            self.config.get('prompts.default.cot', "Analyze this image step by step.")
+        )
 
-        return cot_prompts.get(task, "Analyze this image step by step.")
+        # 调试日志：显示实际使用的 prompt
+        self.logger.debug(f"Loading CoT prompt for task '{task}' from config")
+        self.logger.debug(f"CoT template (first 100 chars): {cot_template[:100]}")
+
+        # 支持变量插值（如 {question}）
+        try:
+            if '{question}' in cot_template:
+                prompt = cot_template.format(question=question)
+                self.logger.debug(f"Formatted CoT prompt with question: {question}")
+            else:
+                prompt = cot_template
+        except KeyError as e:
+            self.logger.warning(f"CoT prompt template missing variable: {e}")
+            prompt = cot_template
+
+        return prompt.strip()
 
     def _prepare_inputs(
         self,
@@ -360,7 +408,9 @@ class TeacherModel:
         self,
         inputs: Dict[str, torch.Tensor],
         return_logits: bool = False,
-        max_new_tokens: Optional[int] = None
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Generate outputs from model.
@@ -368,18 +418,22 @@ class TeacherModel:
         Args:
             inputs: Input tensors
             return_logits: Whether to return logits
-            max_new_tokens: Maximum tokens to generate
+            max_new_tokens: Maximum tokens to generate (overrides default)
+            temperature: Sampling temperature (overrides default)
+            top_p: Top-p sampling parameter (overrides default)
 
         Returns:
             Generation outputs
         """
         max_new_tokens = max_new_tokens or self.max_new_tokens
+        temperature = temperature or self.temperature
+        top_p = top_p or self.top_p
 
         # Generation config
         gen_config = {
             'max_new_tokens': max_new_tokens,
-            'temperature': self.temperature,
-            'top_p': self.top_p,
+            'temperature': temperature,
+            'top_p': top_p,
             'top_k': self.top_k,
             'do_sample': True,
             'pad_token_id': self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
@@ -555,12 +609,7 @@ class TeacherModel:
         """
         Attempt to repair common JSON syntax errors in detection responses.
 
-        Common errors handled:
-        1. Missing closing brackets: {"objects": [obj1], obj2} → {"objects": [obj1, obj2]}
-        2. Truncated JSON: {"category": "cat", "bbox": [1,2, → auto-complete
-        3. Extra commas: [obj1, obj2, ] → [obj1, obj2]
-        4. Missing quotes: {category: "cat"} → {"category": "cat"}
-        5. Mixed bracket types: {"objects": [obj1}, obj2] → {"objects": [obj1, obj2]}
+        Handles common JSON syntax errors.
 
         Args:
             json_str: Potentially malformed JSON string
