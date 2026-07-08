@@ -28,6 +28,11 @@ Usage:
 
     # 启用可视化
     python scripts/run_full_pipeline.py --samples 1000 --enable-visualization
+
+    # 断点续运行（从 checkpoint 继续处理）
+    python scripts/run_full_pipeline.py \
+        --samples 1000 \
+        --checkpoint ./outputs/checkpoint_latest.json
 """
 
 import argparse
@@ -45,9 +50,8 @@ try:
         ConfigManager, TeacherModel, Distiller, COCODataLoader,
         setup_logger, DataCleaner
     )
-    from src.utils import (
-        DataQualityAnalyzer, ValidationComparator, PipelineVisualizer
-    )
+    from src.utils.data_visualizer import DataVisualizer
+    from src.utils.validation_comparator import ValidationComparator
 except ImportError:
     project_root = Path(__file__).parent.parent
     sys.path.insert(0, str(project_root))
@@ -55,9 +59,8 @@ except ImportError:
         ConfigManager, TeacherModel, Distiller, COCODataLoader,
         setup_logger, DataCleaner
     )
-    from src.utils import (
-        DataQualityAnalyzer, ValidationComparator, PipelineVisualizer
-    )
+    from src.utils.data_visualizer import DataVisualizer
+    from src.utils.validation_comparator import ValidationComparator
 
 
 class FullPipelineRunner:
@@ -70,9 +73,8 @@ class FullPipelineRunner:
     3. Result aggregation - generate final report
 
     Modules:
-    - Data Quality → DataQualityAnalyzer
     - Validation → ValidationComparator
-    - Visualization → PipelineVisualizer
+    - Visualization → DataVisualizer
     """
 
     def __init__(self, config_path: str = 'configs/default.yaml'):
@@ -100,22 +102,23 @@ class FullPipelineRunner:
             'results': {},
         }
 
-        # Step timing tracking
+        # Step timing tracking (包含蒸馏子步骤)
         self.timing_stats = OrderedDict()
-        self.timing_stats['data_loading'] = 0.0
-        self.timing_stats['preprocessing'] = 0.0
-        self.timing_stats['model_inference'] = 0.0
-        self.timing_stats['initial_validation'] = 0.0
-        self.timing_stats['cleaning'] = 0.0
-        self.timing_stats['final_validation'] = 0.0
-        self.timing_stats['visualization'] = 0.0
+        # 蒸馏子步骤
+        self.timing_stats['data_loading'] = {'duration': 0.0, 'samples': 0}
+        self.timing_stats['preprocessing'] = {'duration': 0.0, 'samples': 0}
+        self.timing_stats['model_inference'] = {'duration': 0.0, 'samples': 0}
+        # 其他步骤
+        self.timing_stats['initial_validation'] = {'duration': 0.0, 'samples': 0}
+        self.timing_stats['cleaning'] = {'duration': 0.0, 'samples': 0}
+        self.timing_stats['final_validation'] = {'duration': 0.0, 'samples': 0}
+        self.timing_stats['visualization'] = {'duration': 0.0, 'samples': 0}
 
-        # Module instances
-        self.quality_analyzer = DataQualityAnalyzer(self.logger)
-        self.validation_comparator = ValidationComparator(self.logger)
-        self.pipeline_visualizer = None  # Initialize on demand
+        # Module instances (initialize on demand)
+        self.visualizer = None
+        self.validation_comparator = None
 
-        # 默认步骤
+        # Default steps
         self.DEFAULT_STEPS = ['distillation', 'initial_validation', 'cleaning', 'final_validation']
         self.ALL_STEPS = ['distillation', 'initial_validation', 'cleaning', 'final_validation', 'visualization']
 
@@ -128,7 +131,10 @@ class FullPipelineRunner:
         min_confidence: Optional[float] = None,
         skip_validation: bool = False,
         dry_run: bool = False,
-        output_dir: Optional[str] = None
+        output_dir: Optional[str] = None,
+        input_dir: Optional[str] = None,
+        before_dir: Optional[str] = None,
+        checkpoint_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         运行完整数据管道
@@ -142,6 +148,9 @@ class FullPipelineRunner:
             skip_validation: 是否跳过验证
             dry_run: 测试运行
             output_dir: 输出目录
+            input_dir: 输入数据目录（单独运行 visualization/cleaning 时）
+            before_dir: 清洗前数据目录（对比可视化时）
+            checkpoint_path: 断点续运行的 checkpoint 文件路径
 
         Returns:
             流程报告
@@ -185,7 +194,7 @@ class FullPipelineRunner:
 
         # 按顺序执行步骤
         step_results = {}
-        current_input_dir = None
+        current_input_dir = input_dir  # 使用传入的 input_dir 作为初始值
 
         for step in steps:
             self.logger.info(f"\n{'='*70}")
@@ -197,11 +206,14 @@ class FullPipelineRunner:
             try:
                 if step == 'distillation':
                     result = self._run_distillation(
-                        max_samples, tasks, output_dir
+                        max_samples, tasks, output_dir, checkpoint_path
                     )
                     current_input_dir = result.get('merged_output')
 
                 elif step == 'initial_validation':
+                    # Initialize validation_comparator on demand
+                    if self.validation_comparator is None:
+                        self.validation_comparator = ValidationComparator(self.logger)
                     result = self.validation_comparator.run_validation(
                         current_input_dir, 'initial'
                     )
@@ -214,10 +226,13 @@ class FullPipelineRunner:
 
                 elif step == 'final_validation':
                     before_dir = step_results.get('distillation', {}).get('merged_output')
+                    # Initialize validation_comparator on demand
+                    if self.validation_comparator is None:
+                        self.validation_comparator = ValidationComparator(self.logger)
                     result = self.validation_comparator.run_validation(
                         current_input_dir, 'final'
                     )
-                    # 对比验证结果
+                    # Compare validation results
                     if 'initial_validation' in step_results:
                         comparison = self.validation_comparator.compare_validation_results(
                             step_results['initial_validation'],
@@ -226,13 +241,30 @@ class FullPipelineRunner:
                         result['comparison'] = comparison
 
                 elif step == 'visualization':
+                    viz_before_dir = before_dir or step_results.get('distillation', {}).get('merged_output')
                     result = self._run_visualization(
-                        current_input_dir, step_results.get('distillation', {}).get('merged_output')
+                        current_input_dir, viz_before_dir
                     )
 
                 step_end = datetime.now()
                 duration = (step_end - step_start).total_seconds()
-                self.timing_stats[step] = duration
+
+                # 记录耗时和样本数
+                if step == 'distillation':
+                    sample_count = result.get('processed_count', 1)
+                elif step == 'cleaning':
+                    sample_count = result.get('summary', {}).get('total_input', 1)
+                elif 'validation' in step:
+                    sample_count = result.get('total_files', 1)
+                elif step == 'visualization':
+                    sample_count = result.get('generated_plots', 1)
+                else:
+                    sample_count = 1
+
+                self.timing_stats[step] = {
+                    'duration': duration,
+                    'samples': sample_count if sample_count > 0 else 1
+                }
 
                 result['duration_seconds'] = duration
                 result['start_time'] = step_start.isoformat()
@@ -241,7 +273,10 @@ class FullPipelineRunner:
                 step_results[step] = result
                 self.pipeline_status['steps_completed'].append(step)
 
+                # 计算每样本平均耗时
+                avg_per_sample = duration / max(sample_count, 1)
                 self.logger.info(f"\n✓ Step {step} completed in {duration:.1f}s")
+                self.logger.info(f"  Samples: {sample_count}, Avg per sample: {avg_per_sample:.3f}s")
 
             except Exception as e:
                 self.logger.error(f"\n✗ Step {step} failed: {e}")
@@ -260,10 +295,17 @@ class FullPipelineRunner:
         self,
         max_samples: Optional[int],
         tasks: List[str],
-        output_dir: Optional[str]
+        output_dir: Optional[str],
+        checkpoint_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Run distillation step
+        Run distillation step with sub-timing tracking
+
+        Args:
+            max_samples: Maximum samples to process
+            tasks: Tasks to run
+            output_dir: Output directory
+            checkpoint_path: Path to checkpoint file for resuming
 
         Returns:
             Distillation result
@@ -280,16 +322,25 @@ class FullPipelineRunner:
             if output_dir:
                 self.config.set('output.root_dir', output_dir)
 
-            # Initialize COCO data loader
-            self.logger.info("\n[1/3] Initializing COCO dataset loader...")
+            # ============================================================
+            # [Phase 1] Data Loading
+            # ============================================================
+            data_loading_start = datetime.now()
+            self.logger.info("\n[1/3] Loading COCO dataset...")
+
             coco_loader = COCODataLoader(self.config)
             coco_loader.initialize(self.config.get('data.val_split', 'val2017'))
 
             dataset_summary = coco_loader.get_annotation_summary()
-            self.logger.info(f"Dataset loaded successfully")
-            self.logger.info(f"  - Images: {dataset_summary.get('total_images', 0)}")
+            self.logger.info(f"Dataset loaded: {dataset_summary.get('total_images', 0)} images")
 
-            # Initialize teacher model
+            data_loading_end = datetime.now()
+            data_loading_duration = (data_loading_end - data_loading_start).total_seconds()
+
+            # ============================================================
+            # [Phase 2] Preprocessing (Model loading)
+            # ============================================================
+            preprocessing_start = datetime.now()
             self.logger.info("\n[2/3] Loading teacher model...")
             self.logger.info(f"  Model: {self.config.get('teacher.model_name')}")
 
@@ -298,22 +349,44 @@ class FullPipelineRunner:
             self.logger.info(f"  Device: {model_info.get('device', 'unknown')}")
             self.logger.info(f"  Precision: {model_info.get('precision', 'unknown')}")
 
-            # Initialize distiller
             self.logger.info("\n[3/3] Creating distiller...")
-            distiller = Distiller(
-                teacher_model=teacher,
-                config=self.config
-            )
+            distiller = Distiller(teacher_model=teacher, config=self.config)
 
-            # Run distillation
+            preprocessing_end = datetime.now()
+            preprocessing_duration = (preprocessing_end - preprocessing_start).total_seconds()
+
+            # ============================================================
+            # [Phase 3] Model Inference
+            # ============================================================
+            inference_start = datetime.now()
+
+            # Resume info
+            if checkpoint_path:
+                self.logger.info(f"\n⚠️  Resume mode: Using checkpoint {checkpoint_path}")
+                checkpoint_file = Path(checkpoint_path)
+                if not checkpoint_file.exists():
+                    self.logger.warning(f"Checkpoint file not found: {checkpoint_path}")
+                    checkpoint_path = None
+
             self.logger.info("\n" + "-"*70)
-            self.logger.info("Running distillation...")
+            self.logger.info("Running model inference...")
             self.logger.info("-"*70)
 
-            result = distiller.run_distillation(max_samples=max_samples)
+            result = distiller.run_distillation(
+                max_samples=max_samples,
+                checkpoint_path=checkpoint_path
+            )
+
+            inference_end = datetime.now()
+            inference_duration = (inference_end - inference_start).total_seconds()
 
             step_end = datetime.now()
-            duration = (step_end - step_start).total_seconds()
+            total_duration = (step_end - step_start).total_seconds()
+
+            # 记录子步骤耗时
+            self.timing_stats['data_loading'] = {'duration': data_loading_duration, 'samples': max_samples or 1}
+            self.timing_stats['preprocessing'] = {'duration': preprocessing_duration, 'samples': max_samples or 1}
+            self.timing_stats['model_inference'] = {'duration': inference_duration, 'samples': result.get('processed_count', max_samples or 1)}
 
             # Prepare result report
             result_report = {
@@ -323,7 +396,12 @@ class FullPipelineRunner:
                 'merged_output': result.get('merged_data_path', './outputs/merged'),
                 'merged_data_path': result.get('merged_data_path', './outputs/merged'),
                 'statistics': result.get('statistics', {}),
-                'duration_seconds': duration,
+                'duration_seconds': total_duration,
+                'timing_breakdown': {
+                    'data_loading': data_loading_duration,
+                    'preprocessing': preprocessing_duration,
+                    'model_inference': inference_duration,
+                },
                 'start_time': step_start.isoformat(),
                 'end_time': step_end.isoformat(),
             }
@@ -335,7 +413,11 @@ class FullPipelineRunner:
             self.logger.info(f"  ✓ Processed: {result_report['processed_count']} images")
             self.logger.info(f"  ✓ Failed: {result_report['failed_count']} errors")
             self.logger.info(f"  ✓ Output: {result_report['merged_output']}")
-            self.logger.info(f"  ✓ Time: {duration:.1f}s")
+            self.logger.info(f"\n  Timing Breakdown:")
+            self.logger.info(f"    Data Loading:    {data_loading_duration:.1f}s")
+            self.logger.info(f"    Preprocessing:   {preprocessing_duration:.1f}s")
+            self.logger.info(f"    Model Inference: {inference_duration:.1f}s")
+            self.logger.info(f"    Total:           {total_duration:.1f}s")
 
             return result_report
 
@@ -467,8 +549,8 @@ class FullPipelineRunner:
                 raise ValueError("Input directory is required for visualization step")
 
             # Initialize visualizer
-            if self.pipeline_visualizer is None:
-                self.pipeline_visualizer = PipelineVisualizer(self.config, self.logger)
+            if self.visualizer is None:
+                self.visualizer = DataVisualizer(self.config, self.logger)
 
             # Load current data
             data_list = self._load_data_from_dir(input_dir)
@@ -490,16 +572,24 @@ class FullPipelineRunner:
                 self.logger.info(f"Loaded {len(before_data) if before_data else 0} before-cleaning samples")
 
             # Run visualization
-            viz_report = self.pipeline_visualizer.generate_all_plots(
+            # 设置visualization的初始timing
+            self.timing_stats['visualization'] = {'duration': 0.0, 'samples': len(data_list)}
+
+            viz_report = self.visualizer.visualize_all(
                 data_list=data_list,
-                output_dir=self.config.get('visualization.output_dir', './outputs/visualizations'),
+                before_data=before_data,
                 timing_stats=dict(self.timing_stats),
-                pipeline_results=self.pipeline_status['results'],
-                before_data=before_data
+                pipeline_results=self.pipeline_status['results']
             )
 
             step_end = datetime.now()
             duration = (step_end - step_start).total_seconds()
+
+            # 更新visualization的实际耗时
+            self.timing_stats['visualization'] = {
+                'duration': duration,
+                'samples': viz_report.get('generated_plots', len(data_list))
+            }
 
             # Display timing summary
             self._display_timing_summary()
@@ -602,24 +692,44 @@ class FullPipelineRunner:
 
     def _display_timing_summary(self):
         """
-        显示耗时汇总
+        Display timing summary with per-sample averages
         """
         self.logger.info("\n" + "="*70)
         self.logger.info("PIPELINE TIMING SUMMARY")
         self.logger.info("="*70)
 
-        total_time = sum(self.timing_stats.values())
-
         self.logger.info("\nStep-by-step Duration:")
-        self.logger.info("-"*50)
+        self.logger.info("-"*60)
+        self.logger.info(f"  {'Step':20s} {'Duration':12s} {'Samples':10s} {'Avg/sample':12s}")
 
-        for step, duration in self.timing_stats.items():
-            percentage = (duration / total_time * 100) if total_time > 0 else 0
-            self.logger.info(f"  {step:25s}: {duration:8.1f}s ({percentage:5.1f}%)")
+        total_duration = 0
+        total_samples = 0
 
-        self.logger.info("-"*50)
-        self.logger.info(f"  {'TOTAL':25s}: {total_time:8.1f}s (100.0%)")
+        for step, stats in self.timing_stats.items():
+            duration = stats.get('duration', 0)
+            samples = stats.get('samples', 0)
+            avg_per_sample = duration / max(samples, 1)
+
+            self.logger.info(f"  {step:20s} {duration:10.1f}s {samples:8d} {avg_per_sample:10.3f}s")
+
+            total_duration += duration
+            total_samples += samples
+
+        self.logger.info("-"*60)
+        self.logger.info(f"  {'TOTAL':20s} {total_duration:10.1f}s {total_samples:8d}")
         self.logger.info("="*70)
+
+        # 找出瓶颈
+        max_avg = 0
+        bottleneck = None
+        for step, stats in self.timing_stats.items():
+            avg = stats.get('duration', 0) / max(stats.get('samples', 1), 1)
+            if avg > max_avg:
+                max_avg = avg
+                bottleneck = step
+
+        if bottleneck:
+            self.logger.info(f"\n⚠️  Bottleneck detected: {bottleneck} ({max_avg:.3f}s/sample)")
 
     def _finalize_pipeline(self) -> Dict[str, Any]:
         """
@@ -632,7 +742,11 @@ class FullPipelineRunner:
         self.logger.info("PIPELINE COMPLETE")
         self.logger.info("="*70)
 
-        total_duration = sum(self.timing_stats.values())
+        # 正确计算总耗时（从 dict 结构中提取 duration）
+        total_duration = sum(
+            stats.get('duration', 0) if isinstance(stats, dict) else stats
+            for stats in self.timing_stats.values()
+        )
 
         # 检查是否有失败的步骤
         success = len(self.pipeline_status['steps_failed']) == 0
@@ -815,6 +929,27 @@ def main():
         help='Output directory for all results'
     )
 
+    parser.add_argument(
+        '--input-dir',
+        type=str,
+        default=None,
+        help='Input data directory for visualization/cleaning step (when running standalone)'
+    )
+
+    parser.add_argument(
+        '--before-dir',
+        type=str,
+        default=None,
+        help='Before-cleaning data directory for comparison visualization'
+    )
+
+    parser.add_argument(
+        '--checkpoint',
+        type=str,
+        default=None,
+        help='Checkpoint file path for resuming distillation (e.g., ./outputs/checkpoint_latest.json)'
+    )
+
     args = parser.parse_args()
 
     # 初始化管道运行器
@@ -836,7 +971,10 @@ def main():
         min_confidence=args.min_confidence,
         skip_validation=args.skip_validation,
         dry_run=args.dry_run,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        input_dir=args.input_dir,
+        before_dir=args.before_dir,
+        checkpoint_path=args.checkpoint
     )
 
     # 返回状态码

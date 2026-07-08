@@ -8,8 +8,6 @@ Handles exporting and merging distillation results in JSON format.
 import json
 import shutil
 from typing import Dict, Any, List, Optional
-import torch
-import numpy as np
 from pathlib import Path
 from datetime import datetime
 import glob
@@ -17,19 +15,6 @@ import glob
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
 
-class CustomEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        if isinstance(obj, torch.Tensor):
-            return obj.tolist()
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        if hasattr(obj, 'item'):
-            return obj.item()
-        if hasattr(obj, '__dict__'):
-            return str(obj)
-        return super().default(obj)
 
 class JSONExporter:
     """
@@ -67,9 +52,6 @@ class JSONExporter:
         """Create output directories."""
         dirs = [
             self.output_dir,
-            self.output_dir / "hard_labels",
-            self.output_dir / "soft_labels",
-            self.output_dir / "cot_reasoning",
             self.output_dir / "merged",
         ]
 
@@ -109,7 +91,7 @@ class JSONExporter:
                 result['timestamp'] = datetime.now().isoformat()
 
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump(result, f, indent=2, ensure_ascii=False, cls=CustomEncoder)
+                json.dump(result, f, indent=2, ensure_ascii=False)
 
             self.logger.debug(f"Result saved to {path}")
             return True
@@ -232,7 +214,7 @@ class JSONExporter:
         }
 
         with open(summary_file, 'w') as f:
-            json.dump(summary, f, indent=2, cls=CustomEncoder)
+            json.dump(summary, f, indent=2)
 
         # Clean up batch files if successful
         if merged_count > 0:
@@ -328,7 +310,7 @@ class JSONExporter:
         }
 
         with open(report_path, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, ensure_ascii=False, cls=CustomEncoder)
+            json.dump(report, f, indent=2, ensure_ascii=False)
 
         self.logger.info(f"Summary report saved to {report_path}")
         return str(report_path)
@@ -366,7 +348,7 @@ class JSONExporter:
             'by_directory': {},
         }
 
-        dirs = ['hard_labels', 'soft_labels', 'cot_reasoning', 'merged']
+        dirs = ['merged']
 
         for dir_name in dirs:
             dir_path = self.output_dir / dir_name
@@ -387,7 +369,7 @@ class JSONExporter:
         Args:
             keep_merged: Whether to keep merged results
         """
-        dirs_to_clean = ['hard_labels', 'soft_labels', 'cot_reasoning']
+        dirs_to_clean = []
 
         if not keep_merged:
             dirs_to_clean.append('merged')
@@ -398,7 +380,8 @@ class JSONExporter:
                 shutil.rmtree(dir_path)
                 dir_path.mkdir(parents=True, exist_ok=True)
 
-        self.logger.info(f"Cleaned up output directories: {dirs_to_clean}")
+        if dirs_to_clean:
+            self.logger.info(f"Cleaned up output directories: {dirs_to_clean}")
 
     def __repr__(self) -> str:
         """String representation."""
