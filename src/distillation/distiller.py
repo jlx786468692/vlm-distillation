@@ -7,6 +7,8 @@ Orchestrates the complete distillation pipeline.
 
 import json
 import time
+import signal
+import sys
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from datetime import datetime
@@ -83,6 +85,11 @@ class Distiller:
             'end_time': None,
         }
 
+        # Signal handling for graceful shutdown
+        self._shutdown_requested = False
+        self._current_processed_ids = []  # Track currently processed IDs for emergency checkpoint
+        self._current_batch_count = 0     # Track current batch count for emergency checkpoint
+
     def run_distillation(
         self,
         max_samples: Optional[int] = None,
@@ -98,13 +105,16 @@ class Distiller:
         Returns:
             Distillation results summary
         """
+        # Setup signal handlers for graceful shutdown
+        self._setup_signal_handlers()
+
         self.logger.info("Starting distillation pipeline...")
         self.distill_logger.start_process(
             total_count=self.stats['total_images'],
             description="VLM Data Distillation"
         )
 
-        self.stats['start_time'] = datetime.now()
+        self.stats['start_time'] = datetime.now()  # Keep as datetime object for time calculation
 
         # Get sample IDs
         sample_ids = self.data_manager.get_sample_ids()
@@ -114,10 +124,24 @@ class Distiller:
         self.stats['total_images'] = len(sample_ids)
 
         # Resume from checkpoint if provided
+        start_batch_idx = 0  # Default start from batch 0
         if checkpoint_path:
             remaining_ids = self.data_manager.get_remaining_ids(sample_ids, checkpoint_path)
             sample_ids = remaining_ids
             self.logger.info(f"Resuming from checkpoint: {len(sample_ids)} images remaining")
+
+            # Load checkpoint to get processed batch count
+            checkpoint = self.data_manager.load_checkpoint(checkpoint_path)
+            if checkpoint and 'processed_batches' in checkpoint:
+                start_batch_idx = checkpoint['processed_batches']
+                self.logger.info(f"Resuming from batch {start_batch_idx + 1} (already completed {start_batch_idx} batches)")
+            elif checkpoint:
+                # Fallback: calculate batch count from processed_ids
+                processed_count = len(checkpoint.get('processed_ids', []))
+                batch_size = self.config.get('data.batch_size', 4)
+                estimated_batches = processed_count // batch_size
+                start_batch_idx = estimated_batches
+                self.logger.info(f"Estimated batch count from checkpoint: {start_batch_idx} batches completed")
 
         # Create batches
         batches = self.data_manager.create_batches(sample_ids)
@@ -126,8 +150,17 @@ class Distiller:
         processed_ids = []
         all_results = []
 
-        for batch_idx, batch_ids in enumerate(batches):
-            self.logger.info(f"\nProcessing batch {batch_idx + 1}: {len(batch_ids)} images")
+        for batch_idx, batch_ids in enumerate(batches, start=start_batch_idx):
+            # Check for shutdown request (Ctrl+C)
+            if self._shutdown_requested:
+                self.logger.warning("\n⚠️  Received interrupt signal, saving checkpoint before shutdown...")
+                self._save_checkpoint(processed_ids, batch_count=batch_idx)
+                self.logger.info(f"✓ Emergency checkpoint saved: {len(processed_ids)} images processed, {batch_idx} batches")
+                self.logger.info(f"✓ You can resume with: --checkpoint ./outputs/checkpoint_latest.json")
+                break
+
+            display_batch_num = batch_idx + 1  # For display (batch 1, 2, 3...)
+            self.logger.info(f"\nProcessing batch {display_batch_num}: {len(batch_ids)} images")
 
             try:
                 # Get batch data
@@ -136,39 +169,44 @@ class Distiller:
                 # Process batch
                 batch_results = self.process_batch(batch_data)
 
-                # Save results
+                # Save results (use actual batch_idx for file naming)
                 self._save_batch_results(batch_results, batch_idx)
 
                 # Update tracking
                 processed_ids.extend(batch_ids)
                 all_results.append(batch_results)
 
-                # Log progress
+                # Update emergency checkpoint tracking
+                self._current_processed_ids = processed_ids.copy()
+                self._current_batch_count = batch_idx + 1
+
+                # Log progress (use display_batch_num for user-friendly display)
                 self.distill_logger.log_progress(
                     current=len(processed_ids),
-                    message=f"Batch {batch_idx + 1} completed"
+                    message=f"Batch {display_batch_num} completed"
                 )
 
-                # Save checkpoint
+                # Save checkpoint with batch count
                 if len(processed_ids) % self.checkpoint_interval == 0:
-                    self._save_checkpoint(processed_ids)
+                    self._save_checkpoint(processed_ids, batch_count=batch_idx + 1)
 
                 self.stats['processed_images'] += len(batch_ids)
 
             except Exception as e:
-                self.logger.error(f"Error processing batch {batch_idx}: {e}")
+                self.logger.error(f"Error processing batch {display_batch_num}: {e}")
                 self.stats['failed_images'] += len(batch_ids)
-                self.distill_logger.log_error(e, context=f"Batch {batch_idx}")
+                self.distill_logger.log_error(e, context=f"Batch {display_batch_num}")
 
-        # Final checkpoint
-        self._save_checkpoint(processed_ids)
+        # Final checkpoint (only if not interrupted)
+        if not self._shutdown_requested:
+            self._save_checkpoint(processed_ids, batch_count=batch_idx + 1)
 
         # Merge all results
         self.logger.info("\nMerging all results...")
         merged_results = self.exporter.merge_all_results()
 
         # Compute final statistics
-        self.stats['end_time'] = datetime.now()
+        self.stats['end_time'] = datetime.now()  # Keep as datetime object for time calculation
         final_stats = self._compute_final_statistics(all_results)
 
         self.distill_logger.end_process("Distillation completed")
@@ -409,13 +447,36 @@ class Distiller:
 
                     self.exporter.save_task_result(task_data, str(task_file))
 
+    def _setup_signal_handlers(self):
+        """
+        Setup signal handlers for graceful shutdown.
+
+        Handles:
+        - SIGINT (Ctrl+C)
+        - SIGTERM (kill command)
+        """
+        def signal_handler(signum, frame):
+            """Signal handler function for graceful shutdown."""
+            signal_name = signal.Signals(signum).name
+            self.logger.warning(f"\n⚠️  Received {signal_name} signal")
+            self.logger.warning("Preparing for graceful shutdown...")
+            self._shutdown_requested = True
+
+        # Register signal handlers
+        signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+        signal.signal(signal.SIGTERM, signal_handler)  # kill command
+
+        self.logger.debug("Signal handlers registered for graceful shutdown")
+
     def _save_checkpoint(
         self,
-        processed_ids: List[int]
+        processed_ids: List[int],
+        batch_count: int = 0
     ) -> None:
         """Save processing checkpoint."""
         checkpoint_data = {
             'processed_ids': processed_ids,
+            'processed_batches': batch_count,  # Add batch count for resume
             'stats': {
                 'total_images': self.stats['total_images'],
                 'processed_images': self.stats['processed_images'],
@@ -431,7 +492,7 @@ class Distiller:
         with open(checkpoint_file, 'w') as f:
             json.dump(checkpoint_data, f, indent=2)
 
-        self.logger.info(f"Checkpoint saved: {len(processed_ids)} images processed")
+        self.logger.info(f"Checkpoint saved: {len(processed_ids)} images processed, {batch_count} batches completed")
 
     def _compute_final_statistics(
         self,

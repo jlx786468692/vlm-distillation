@@ -216,7 +216,8 @@ class TeacherModel:
         self,
         image: Union[Image.Image, str, Path],
         return_logits: bool = False,
-        generate_cot: bool = False
+        generate_cot: bool = False,
+        max_retries: int = 2
     ) -> Dict[str, Any]:
         """
         Perform object detection inference.
@@ -225,6 +226,7 @@ class TeacherModel:
             image: PIL Image or image path
             return_logits: Whether to return logits
             generate_cot: Whether to generate CoT
+            max_retries: Maximum retries if JSON parsing fails (default: 2)
 
         Returns:
             Dictionary with detected objects and metadata
@@ -238,18 +240,42 @@ class TeacherModel:
         # Prepare inputs
         inputs = self._prepare_inputs(image, prompt)
 
-        # Generate with optimized parameters for detection
-        outputs = self._generate(
-            inputs,
-            return_logits=return_logits,
-            max_new_tokens=self.max_detection_tokens,  # Use longer generation for detection
-            temperature=self.detection_temperature,    # Use lower temperature for more deterministic output
-            top_p=self.detection_top_p                  # Use higher top_p for structured JSON
-        )
+        # Try generation with retries
+        for attempt in range(max_retries + 1):
+            # Generate with optimized parameters for detection
+            # Increase temperature slightly on retries for more diversity
+            current_temp = self.detection_temperature if attempt == 0 else max(self.detection_temperature + 0.05, 0.3)
 
-        # Process outputs
-        result = self._process_detection_outputs(outputs, return_logits)
+            outputs = self._generate(
+                inputs,
+                return_logits=return_logits,
+                max_new_tokens=self.max_detection_tokens,
+                temperature=current_temp,
+                top_p=self.detection_top_p
+            )
 
+            # Process outputs
+            result = self._process_detection_outputs(outputs, return_logits)
+
+            # Check if parsing was successful
+            objects = result.get('objects', [])
+            full_response = result.get('full_response', '')
+
+            # Success criteria: has objects OR no parsing errors
+            if objects or not ('Failed to parse' in full_response or 'malformed' in full_response.lower()):
+                if attempt > 0:
+                    self.logger.info(f"Detection successful on retry attempt {attempt}")
+                return result
+
+            # If failed and this is not the last attempt, retry
+            if attempt < max_retries:
+                self.logger.warning(f"Detection output parsing failed (attempt {attempt + 1}), retrying...")
+                # On retry, try with even lower temperature
+                if attempt == max_retries - 1:
+                    self.logger.info("Final retry with minimal temperature")
+
+        # Return last result even if parsing had issues (fallback extraction will handle it)
+        self.logger.warning(f"Detection completed after {max_retries + 1} attempts with potential parsing issues")
         return result
 
     def inference_keypoints(
@@ -723,6 +749,64 @@ class TeacherModel:
                         repaired = '{"objects": [' + ', '.join(extracted_objects) + ']}'
                         self.logger.debug(f"Rebuilt JSON using simple extraction with {len(extracted_objects)} objects")
 
+            # Pattern: comma followed directly by array (missing key name)
+            if re.search(r',\s*\[\d+', repaired):
+                self.logger.debug("Detected: missing 'bbox' key name before array")
+                # Fix: Insert "bbox": before arrays that follow a comma
+                # Pattern: ", [...]" → ", "bbox": [...]"
+                repaired = re.sub(r',\s*\[', ', "bbox": [', repaired)
+                self.logger.debug("Added missing 'bbox' key name")
+
+            # Pattern: "bbox" followed by space and array (missing colon)
+            if re.search(r'"bbox"\s*\[', repaired):
+                self.logger.debug("Detected: missing colon after 'bbox'")
+                # Fix: Add colon between "bbox" and array
+                # Pattern: "bbox [...]" → "bbox": [...]"
+                repaired = re.sub(r'"bbox"\s*\[', '"bbox": [', repaired)
+                self.logger.debug("Added missing colon after 'bbox'")
+
+            # Pattern: "bbox=" followed by quoted coordinates
+            if re.search(r'"bbox="', repaired):
+                self.logger.debug("Detected: wrong bbox format 'bbox=\"...\"'")
+                # Fix: Replace "bbox="..." with "bbox": [...]
+                # Pattern: "bbox="169, 172, 194, 277" → "bbox": [169, 172, 194, 277]
+                # Use non-greedy match to capture coordinates between quotes
+                repaired = re.sub(r'"bbox="([^"]+)"', r'"bbox": [\1]', repaired)
+                self.logger.debug("Fixed bbox format from 'bbox=\"...\"' to 'bbox\": [...]'")
+
+            # Error 8: Malformed bbox format - "bbox="bbox_2d": or similar nested errors
+            if re.search(r'"bbox="?bbox', repaired):
+                self.logger.debug("Detected: malformed nested bbox format 'bbox=\"bbox_2d\"' or 'bbox=bbox'")
+                # Fix: Replace "bbox="bbox_2d": or "bbox=bbox_2d": with "bbox": or "bbox_2d":
+                repaired = re.sub(r'"bbox="?bbox_2d":', '"bbox":', repaired)
+                repaired = re.sub(r'"bbox="?bbox":', '"bbox":', repaired)
+                self.logger.debug("Fixed malformed nested bbox format")
+
+            # Error 9: Unclosed bbox array followed by other fields
+            # Pattern: "bbox": [0, 56, 83, 311, \n "confidence": 0.95
+            if re.search(r'"bbox":\s*\[[^\]]*\n\s*"[^"]+":', repaired):
+                self.logger.debug("Detected: unclosed bbox array with following fields")
+                # Fix: Find all bbox arrays and close them before the next field
+                # Pattern: "bbox": [numbers,\n → "bbox": [numbers],\n
+                repaired = re.sub(
+                    r'"bbox":\s*\[([^\]]*?)\n(\s*)"([^"]+)":',
+                    r'"bbox": [\1],\n\2"\3":',
+                    repaired
+                )
+                self.logger.debug("Added closing bracket to bbox array before next field")
+
+            # Error 10: Unclosed bbox array followed by newline and confidence
+            # Pattern: "bbox": [0, 56, 83, 311,\n "confidence": 0.95
+            if re.search(r'"bbox":\s*\[[^\]]+,\s*\n\s*"confidence":', repaired):
+                self.logger.debug("Detected: unclosed bbox array before confidence")
+                # Fix: Close the bbox array before confidence
+                repaired = re.sub(
+                    r'"bbox":\s*\[([^\]]+),\s*\n(\s*)"confidence":',
+                    r'"bbox": [\1],\n\2"confidence":',
+                    repaired
+                )
+                self.logger.debug("Closed bbox array before confidence field")
+
             if repaired != json_str:
                 self.logger.info(f"JSON repaired successfully")
                 self.logger.debug(f"Original: {json_str[:100]}")
@@ -734,6 +818,111 @@ class TeacherModel:
         except Exception as e:
             self.logger.error(f"Error during JSON repair: {e}")
             return None
+
+    def _extract_objects_from_malformed_json(self, json_str: str) -> List[Dict]:
+        """
+        Extract objects from severely malformed JSON using regex patterns.
+
+        This is a fallback method when JSON repair fails. It attempts to
+        extract object information using pattern matching.
+
+        Args:
+            json_str: Malformed JSON string
+
+        Returns:
+            List of extracted objects (may be incomplete)
+        """
+        import re
+
+        objects = []
+
+        try:
+            # Strategy 1: Extract objects with all three required fields
+            # Pattern: {"category": "...", "bbox": [...], "confidence": ...}
+            # Allow for various formats and missing brackets
+
+            # Find all category names
+            category_pattern = r'"category":\s*"([^"]+)"'
+            categories = re.findall(category_pattern, json_str)
+
+            # Find all bbox arrays (may be malformed)
+            # Try to extract numbers from bbox arrays
+            bbox_pattern = r'"bbox(?:_2d)?":\s*\[([\d,\s]+)'
+            bbox_matches = re.findall(bbox_pattern, json_str)
+
+            # Find all confidence values
+            confidence_pattern = r'"confidence":\s*([\d.]+)'
+            confidences = re.findall(confidence_pattern, json_str)
+
+            # If we have matching counts, try to build objects
+            if len(categories) == len(bbox_matches) == len(confidences):
+                for i in range(len(categories)):
+                    try:
+                        # Parse bbox numbers
+                        bbox_str = bbox_matches[i].strip()
+                        if bbox_str.endswith(','):
+                            bbox_str = bbox_str[:-1]
+                        bbox_numbers = [float(x.strip()) for x in bbox_str.split(',') if x.strip()]
+
+                        if len(bbox_numbers) >= 4:
+                            obj = {
+                                'category': categories[i],
+                                'bbox': bbox_numbers[:4],
+                                'confidence': float(confidences[i])
+                            }
+                            objects.append(obj)
+                    except Exception as e:
+                        self.logger.debug(f"Failed to parse object {i}: {e}")
+                        continue
+
+                if objects:
+                    self.logger.info(f"Extracted {len(objects)} objects using field-by-field matching")
+                    return objects
+
+            # Strategy 2: Extract using object pattern with flexible bbox
+            # Pattern matches objects even with malformed bbox arrays
+            object_pattern = r'\{[^{}]*"category":\s*"([^"]+)"[^{}]*"bbox(?:_2d)?":\s*\[([\d,\s]+)[^\}]*"confidence":\s*([\d.]+)[^{}]*\}'
+
+            matches = re.finditer(object_pattern, json_str, re.DOTALL)
+            for match in matches:
+                try:
+                    category = match.group(1)
+                    bbox_str = match.group(2).strip()
+                    if bbox_str.endswith(','):
+                        bbox_str = bbox_str[:-1]
+                    bbox_numbers = [float(x.strip()) for x in bbox_str.split(',') if x.strip()]
+                    confidence = float(match.group(3))
+
+                    if len(bbox_numbers) >= 4:
+                        obj = {
+                            'category': category,
+                            'bbox': bbox_numbers[:4],
+                            'confidence': confidence
+                        }
+                        objects.append(obj)
+                except Exception as e:
+                    self.logger.debug(f"Failed to parse matched object: {e}")
+                    continue
+
+            if objects:
+                self.logger.info(f"Extracted {len(objects)} objects using flexible pattern")
+                return objects
+
+            # Strategy 3: Last resort - try to extract any partial information
+            # Find individual objects even if some fields are missing
+            partial_pattern = r'\{"category":\s*"([^"]+)"[^}]*\}'
+            partial_matches = re.findall(partial_pattern, json_str)
+
+            for category in partial_matches:
+                # Try to find corresponding bbox and confidence near this category
+                # This is a very rough heuristic
+                self.logger.warning(f"Found partial object with category '{category}' but incomplete data")
+
+            return objects
+
+        except Exception as e:
+            self.logger.error(f"Error extracting objects from malformed JSON: {e}")
+            return objects
 
     def _parse_detection_response(self, text: str) -> List[Dict]:
         """Parse detected objects from response.
@@ -781,7 +970,6 @@ class TeacherModel:
                         if 'confidence' not in obj:
                             obj['confidence'] = 0.5
 
-                    self.logger.info(f"Successfully parsed {len(objects)} objects from markdown code block")
                     return objects
                 except json.JSONDecodeError as e:
                     self.logger.warning(f"Failed to parse JSON from markdown: {e}")
@@ -806,10 +994,15 @@ class TeacherModel:
                                 if 'confidence' not in obj:
                                     obj['confidence'] = 0.5
 
-                            self.logger.info(f"Successfully parsed {len(objects)} objects after JSON repair")
                             return objects
                         except json.JSONDecodeError:
                             self.logger.warning(f"Failed to parse repaired JSON")
+
+                            # Try to extract objects manually using regex
+                            extracted_objects = self._extract_objects_from_malformed_json(json_content)
+                            if extracted_objects:
+                                self.logger.info(f"Manually extracted {len(extracted_objects)} objects from malformed JSON")
+                                return extracted_objects
 
             # Method 2: Try to parse each line as separate JSON object
             lines = [line.strip() for line in text.strip().split('\n') if line.strip()]

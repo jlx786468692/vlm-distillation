@@ -25,23 +25,26 @@ prompts:
     detection: |
       Detect all objects in this image.
 
-      INSTRUCTIONS:
-      1. Identify each object's category (e.g., person, car, dog)
-      2. Provide exact bounding box: [x1, y1, x2, y2] (numbers only, no placeholders!)
-      3. Assign confidence 0.5-1.0 based on clarity
+      CRITICAL REQUIREMENTS:
+      1. Return ONLY valid JSON - no explanations, no extra text
+      2. Use EXACTLY this structure with ALL brackets closed:
+         {"objects": [{"category": "name", "bbox": [x1, y1, x2, y2], "confidence": 0.9}]}
+      3. bbox MUST have 4 NUMBERS: [x1, y1, x2, y2] with closing bracket ]
+      4. confidence MUST be a number between 0.5-1.0
+      5. Complete the JSON before stopping - close all [ and {
 
-      OUTPUT FORMAT:
-      Return ONLY JSON with REAL coordinates and names. NO templates or placeholders!
+      STRICT JSON FORMAT:
+      {"objects": [
+        {"category": "person", "bbox": [100, 50, 200, 300], "confidence": 0.95},
+        {"category": "car", "bbox": [250, 150, 400, 280], "confidence": 0.9}
+      ]}
 
-      Example of CORRECT output (with actual numbers):
-      {"objects": [{"category": "person", "bbox": [120, 80, 340, 450], "confidence": 0.95}]}
+      FORBIDDEN OUTPUTS:
+      - "bbox": [x1, y1, x2, y2] ← WRONG! Use actual numbers
+      - Missing ] or } ← WRONG! Complete all brackets
+      - Extra text after JSON ← WRONG! Only JSON
 
-      WRONG output (do NOT return this):
-      {"objects": [{"category": "object_name", "bbox": [x_min, y_min, x_max, y_max]...]} NO NO placeholders!
-
-      Field names: Use "category" (or "label"), "bbox" (or "bbox_2d"), "confidence".
-
-      Provide actual detection results now.
+      Provide the detection results now as complete JSON only:
 
     # Keypoints 任务
     keypoints: |
@@ -92,19 +95,25 @@ prompts:
 
       STEP-BY-STEP:
       1. Scan image from top-left to bottom-right
-      2. For each object:
-         - Identify category (person, car, dog, table, etc.)
-         - Mark bounding box: [x1, y1, x2, y2] (ACTUAL numbers!)
-         - Assign confidence 0.7-1.0 based on clarity
-      3. Double-check coordinates are within image bounds
+      2. For each object found:
+         - Identify category (person, car, dog, etc.)
+         - Mark bbox: [x1, y1, x2, y2] with REAL numbers
+         - Assign confidence 0.7-1.0
+      3. Verify all brackets [ and { are CLOSED before finalizing
 
-      CRITICAL RULES:
-      - Provide REAL coordinates (e.g., [120, 80, 340, 450])
-      - NO placeholders like [x_min, y_min] or [x1,y1,x2,y2]
-      - Complete JSON with all brackets closed
+      CRITICAL JSON FORMAT - MUST follow exactly:
+      {"objects": [
+        {"category": "person", "bbox": [100, 50, 200, 300], "confidence": 0.95},
+        {"category": "car", "bbox": [250, 150, 400, 280], "confidence": 0.9}
+      ]}
 
-      Example of CORRECT output:
-      {"objects": [{"category": "person", "bbox": [120, 80, 340, 450], "confidence": 0.95}]}
+      ABSOLUTE REQUIREMENTS:
+      - NO placeholder text like [x_min, y_min]
+      - NO missing brackets - every [ must have ]
+      - NO incomplete arrays - bbox has 4 numbers and closing ]
+      - NO extra text - ONLY JSON
+
+      Provide complete detection results as JSON now:
 
     # Keypoints CoT
     keypoints: |

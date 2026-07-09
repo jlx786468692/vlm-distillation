@@ -19,9 +19,9 @@ teacher:
   max_new_tokens: 512
 
   # 检测任务专用优化参数（提高置信度、减少截断）
-  detection_temperature: 0.3      # 低温度=更确定性输出（避免低置信度）
-  detection_top_p: 0.95           # 高top_p=更结构化JSON
-  max_detection_tokens: 1024      # 长生成长度=避免截断（从512增加到1024）
+  detection_temperature: 0.1      # 更低温度=更确定性、更规范的JSON（从0.3降到0.1）
+  detection_top_p: 0.9            # 适中的top_p=减少随机性（从0.95降到0.9）
+  max_detection_tokens: 2048      # 更长生成长度=避免截断（从1024增加到2048）
 
 student:
   model_name: "models/Qwen2.5-VL-3B-Instruct"  # To be configured (e.g., Qwen/Qwen2-VL-2B-Instruct)
