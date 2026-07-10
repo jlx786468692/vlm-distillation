@@ -6,6 +6,23 @@ project:
 # Prompt 配置文件路径
 prompts_config: "configs/prompts.yaml"
 
+# Pipeline 运行控制
+pipeline:
+  # 默认运行的步骤（可通过命令行 --steps 覆盖）
+  default_steps:
+    - "distillation"
+    - "initial_validation"
+    - "cleaning"
+    - "final_validation"
+    - "quality_validation"
+    - "visualization"  # 可视化默认不运行，需要显式指定
+
+  # 断点续运行
+  checkpoint_path: null  # 设置为具体路径可恢复运行，如 "./outputs/checkpoint_latest.json"
+
+  # 测试运行（只验证配置，不实际运行）
+  dry_run: false
+
 teacher:
   model_name: "models/Qwen2.5-VL-7B-Instruct"
   device: "cuda"
@@ -39,7 +56,7 @@ data:
   # Processing parameters
   batch_size: 4
   num_workers: 4
-  max_samples: 5000  # For small-scale processing (set to null for full dataset)
+  max_samples: 4  # For small-scale processing (set to null for full dataset)
 
   # Image preprocessing
   image_size: 224
@@ -80,7 +97,7 @@ distillation:
 
   # Processing options
   parallel_processing: false
-  checkpoint_interval: 100  # Save checkpoint every N images
+  checkpoint_interval: 20  # Save checkpoint every N images (降低到20，更频繁保存)
   resume_from_checkpoint: null
 
 output:
@@ -90,11 +107,10 @@ output:
   compress_outputs: false  # Compress large soft label arrays
   save_metadata: true
 
-  # Subdirectories
-  hard_labels_dir: "./outputs/hard_labels"
-  soft_labels_dir: "./outputs/soft_labels"
-  cot_reasoning_dir: "./outputs/cot_reasoning"
-  merged_dir: "./outputs/merged"
+  # 各步骤输出目录（单步运行时自动使用作为默认输入）
+  merged_dir: "./outputs/merged"        # Distillation 输出
+  cleaned_dir: "./outputs/cleaned"      # Cleaning 输出
+  visualization_dir: "./outputs/visualizations"  # Visualization 输出
 
 logging:
   level: "INFO"

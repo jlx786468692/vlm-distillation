@@ -75,6 +75,7 @@ class Distiller:
         # Checkpoint settings
         self.checkpoint_interval = self.config.get("distillation.checkpoint_interval", 100)
         self.output_dir = Path(self.config.get("output.root_dir", "./outputs"))
+        self.merged_dir = Path(self.config.get("output.merged_dir", "./outputs/merged"))
 
         # Processing stats
         self.stats = {
@@ -201,9 +202,9 @@ class Distiller:
         if not self._shutdown_requested:
             self._save_checkpoint(processed_ids, batch_count=batch_idx + 1)
 
-        # Merge all results
-        self.logger.info("\nMerging all results...")
-        merged_results = self.exporter.merge_all_results()
+        # Generate final summary (no merge needed - data already saved individually)
+        self.logger.info("\nGenerating final summary...")
+        summary = self.exporter.generate_summary()
 
         # Compute final statistics
         self.stats['end_time'] = datetime.now()  # Keep as datetime object for time calculation
@@ -215,7 +216,8 @@ class Distiller:
             'statistics': final_stats,
             'processed_count': len(processed_ids),
             'failed_count': self.stats['failed_images'],
-            'merged_data_path': str(self.output_dir / "merged"),
+            'merged_dir': str(self.merged_dir),
+            'summary': summary,
         }
 
     def process_batch(
@@ -420,32 +422,40 @@ class Distiller:
         self,
         batch_results: Dict,
         batch_idx: int
-    ) -> None:
-        """Save batch results to separate files."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        batch_file = self.output_dir / f"batch_{batch_idx}_{timestamp}.json"
+    ) -> Dict[str, Any]:
+        """
+        Save batch results - NEW: directly save individual image files
 
-        self.exporter.save_batch(batch_results, str(batch_file))
+        重构逻辑：
+        - 不再保存batch文件（batch_*.json）
+        - 直接将每个图片保存到 merged/{image_id}.json
+        - 不需要后续合并步骤
+        - 不需要archive归档
 
-        # Also save to task-specific directories if enabled
-        if self.config.get("output.merge_outputs", True):
-            # Will be merged later
-            pass
-        else:
-            # Save separately
-            for img_result in batch_results['images']:
-                for task, task_result in img_result['tasks'].items():
-                    task_file = self.output_dir / task / f"{img_result['image_id']}.json"
+        Args:
+            batch_results: Batch results dictionary
+            batch_idx: Batch index (for logging only)
 
-                    task_data = {
-                        'image_id': img_result['image_id'],
-                        'image_path': img_result['image_path'],
-                        'task': task,
-                        'data': task_result,
-                        'metadata': img_result['metadata'],
-                    }
+        Returns:
+            Save statistics
+        """
+        self.logger.info(f"保存批次 {batch_idx + 1} 的结果...")
 
-                    self.exporter.save_task_result(task_data, str(task_file))
+        # 使用新的导出方法：直接保存每个图片
+        save_stats = self.exporter.save_batch_results(batch_results)
+
+        # 记录保存统计
+        self.logger.info(
+            f"批次 {batch_idx + 1} 保存完成: "
+            f"总计 {save_stats['total']}, "
+            f"成功 {save_stats['saved']}, "
+            f"失败 {save_stats['failed']}"
+        )
+
+        # 注意：不再保存batch文件，不再需要task-specific目录
+        # 所有数据直接保存到 merged/{image_id}.json
+
+        return save_stats
 
     def _setup_signal_handlers(self):
         """

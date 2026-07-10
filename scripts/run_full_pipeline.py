@@ -7,32 +7,56 @@
 2. 参数解析和配置
 3. 结果汇总和报告生成
 
+所有参数从配置文件读取，只有 --config 和 --steps 可通过命令行覆盖
+
 具体功能已提取到独立模块：
 - 数据质量分析 → DataQualityAnalyzer
 - 验证比较 → ValidationComparator
-- 可视化生成 → PipelineVisualizer
+- 可视化生成 → DataVisualizer
+
+配置文件说明：
+    所有参数在 configs/default.yaml 中配置：
+
+    核心参数：
+    - data.max_samples: 最大样本数（默认 5000）
+    - distillation.tasks: 任务列表（默认 ['vqa', 'detection']）
+    - cleaning.min_quality_score: 最小质量分数（默认 50.0）
+    - cleaning.min_confidence: 最小置信度（默认 0.6）
+
+    输出目录（单步运行时自动使用）：
+    - output.merged_dir: Distillation 输出（默认 './outputs/merged'）
+    - output.cleaned_dir: Cleaning 输出（默认 './outputs/cleaned'）
+    - output.visualization_dir: Visualization 输出（默认 './outputs/visualizations'')
+
+    Pipeline 控制：
+    - pipeline.default_steps: 默认步骤列表
+    - pipeline.checkpoint_path: 断点续运行的 checkpoint 文件路径
+    - pipeline.dry_run: 测试运行模式
 
 Usage:
-    # 运行完整流程（使用配置文件参数）
-    python scripts/run_full_pipeline.py --samples 5000
+    # 运行完整流程（使用配置文件中的参数）
+    python scripts/run_full_pipeline.py
 
-    # 仅运行特定步骤
+    # 指定配置文件
+    python scripts/run_full_pipeline.py --config configs/custom.yaml
+
+    # 覆盖步骤
     python scripts/run_full_pipeline.py --steps distillation cleaning
 
-    # 自定义参数（覆盖配置文件）
-    python scripts/run_full_pipeline.py \
-        --samples 1000 \
-        --tasks vqa captioning \
-        --min-quality 40 \
-        --min-confidence 0.6
+    # 单独运行某个步骤（自动使用配置文件中的默认输入目录）
+    python scripts/run_full_pipeline.py --steps cleaning
+    # 输入目录自动使用 output.merged_dir ('./outputs/merged')
 
-    # 启用可视化
-    python scripts/run_full_pipeline.py --samples 1000 --enable-visualization
+    python scripts/run_full_pipeline.py --steps visualization
+    # 输入目录自动使用 output.cleaned_dir ('./outputs/cleaned')
 
-    # 断点续运行（从 checkpoint 继续处理）
-    python scripts/run_full_pipeline.py \
-        --samples 1000 \
-        --checkpoint ./outputs/checkpoint_latest.json
+步骤依赖关系：
+    - distillation: 从数据集加载，无前置依赖
+    - initial_validation: 输入来自 merged_dir
+    - cleaning: 输入来自 merged_dir
+    - final_validation: 输入来自 cleaned_dir
+    - quality_validation: 输入来自 cleaned_dir
+    - visualization: 输入来自 cleaned_dir，对比数据来自 merged_dir
 """
 
 import argparse
@@ -52,6 +76,7 @@ try:
     )
     from src.utils.data_visualizer import DataVisualizer
     from src.utils.validation_comparator import ValidationComparator
+    from src.utils.data_quality_validator import DataQualityValidator, compare_cleaning_effect
 except ImportError:
     project_root = Path(__file__).parent.parent
     sys.path.insert(0, str(project_root))
@@ -61,6 +86,7 @@ except ImportError:
     )
     from src.utils.data_visualizer import DataVisualizer
     from src.utils.validation_comparator import ValidationComparator
+    from src.utils.data_quality_validator import DataQualityValidator, compare_cleaning_effect
 
 
 class FullPipelineRunner:
@@ -108,6 +134,8 @@ class FullPipelineRunner:
         self.timing_stats['data_loading'] = {'duration': 0.0, 'samples': 0}
         self.timing_stats['preprocessing'] = {'duration': 0.0, 'samples': 0}
         self.timing_stats['model_inference'] = {'duration': 0.0, 'samples': 0}
+        # 质量校验步骤
+        self.timing_stats['quality_validation'] = {'duration': 0.0, 'samples': 0}
         # 其他步骤
         self.timing_stats['initial_validation'] = {'duration': 0.0, 'samples': 0}
         self.timing_stats['cleaning'] = {'duration': 0.0, 'samples': 0}
@@ -117,63 +145,52 @@ class FullPipelineRunner:
         # Module instances (initialize on demand)
         self.visualizer = None
         self.validation_comparator = None
+        self.quality_validator = None
 
-        # Default steps
-        self.DEFAULT_STEPS = ['distillation', 'initial_validation', 'cleaning', 'final_validation']
-        self.ALL_STEPS = ['distillation', 'initial_validation', 'cleaning', 'final_validation', 'visualization']
+        # Default steps (可视化已包含在默认流程中)
+        self.DEFAULT_STEPS = ['distillation', 'initial_validation', 'cleaning', 'final_validation', 'quality_validation', 'visualization']
+        self.ALL_STEPS = ['distillation', 'initial_validation', 'cleaning', 'final_validation', 'quality_validation', 'visualization']
 
     def run_full_pipeline(
         self,
-        steps: Optional[List[str]] = None,
-        max_samples: Optional[int] = None,
-        tasks: Optional[List[str]] = None,
-        min_quality: Optional[float] = None,
-        min_confidence: Optional[float] = None,
-        skip_validation: bool = False,
-        dry_run: bool = False,
-        output_dir: Optional[str] = None,
-        input_dir: Optional[str] = None,
-        before_dir: Optional[str] = None,
-        checkpoint_path: Optional[str] = None
+        steps: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         运行完整数据管道
 
+        所有参数从配置文件读取，只有 steps 可以通过命令行覆盖
+
         Args:
-            steps: 要运行的步骤列表
-            max_samples: 最大处理样本数
-            tasks: 任务列表
-            min_quality: 最小质量分数阈值
-            min_confidence: 最小置信度阈值
-            skip_validation: 是否跳过验证
-            dry_run: 测试运行
-            output_dir: 输出目录
-            input_dir: 输入数据目录（单独运行 visualization/cleaning 时）
-            before_dir: 清洗前数据目录（对比可视化时）
-            checkpoint_path: 断点续运行的 checkpoint 文件路径
+            steps: 要运行的步骤列表（可覆盖配置文件中的 pipeline.default_steps）
 
         Returns:
             流程报告
         """
         self.pipeline_status['start_time'] = datetime.now()
 
-        # 确定运行步骤
+        # 确定运行步骤（优先级：参数 > 配置文件）
         if steps is None:
-            steps = self.DEFAULT_STEPS.copy()
-            if skip_validation:
-                steps = [s for s in steps if 'validation' not in s]
+            steps = self.config.get('pipeline.default_steps', self.DEFAULT_STEPS)
 
-        # 确定参数（优先级：命令行 > 配置文件 > 默认值）
-        if tasks is None:
-            tasks = self.config.get('distillation.tasks', ['vqa', 'captioning', 'detection'])
+        # 从配置文件读取所有参数
+        max_samples = self.config.get('data.max_samples', None)
+        tasks = self.config.get('distillation.tasks', ['vqa', 'captioning', 'detection'])
+        min_quality = self.config.get('cleaning.min_quality_score', 30.0)
+        min_confidence = self.config.get('cleaning.min_confidence', 0.6)
+        output_dir = self.config.get('output.root_dir', './outputs')
+        checkpoint_path = self.config.get('pipeline.checkpoint_path', None)
+        dry_run = self.config.get('pipeline.dry_run', False)
 
-        if min_quality is None:
-            min_quality = self.config.get('cleaning.min_quality_score', 30.0)
-            self.logger.info(f"Using min_quality from config: {min_quality}")
+        # 从配置文件读取各步骤的默认输出目录
+        merged_dir = self.config.get('output.merged_dir', './outputs/merged')
+        cleaned_dir = self.config.get('output.cleaned_dir', './outputs/cleaned')
+        visualization_dir = self.config.get('output.visualization_dir', './outputs/visualizations')
 
-        if min_confidence is None:
-            min_confidence = self.config.get('cleaning.min_confidence', 0.5)
-            self.logger.info(f"Using min_confidence from config: {min_confidence}")
+        self.logger.info(f"Using config parameters:")
+        self.logger.info(f"  max_samples: {max_samples}")
+        self.logger.info(f"  tasks: {tasks}")
+        self.logger.info(f"  min_quality: {min_quality}")
+        self.logger.info(f"  min_confidence: {min_confidence}")
 
         # 验证步骤名称
         for step in steps:
@@ -194,7 +211,31 @@ class FullPipelineRunner:
 
         # 按顺序执行步骤
         step_results = {}
-        current_input_dir = input_dir  # 使用传入的 input_dir 作为初始值
+
+        # 确定初始输入目录（根据步骤依赖关系自动确定）
+        current_input_dir = None
+
+        if 'distillation' in steps and steps[0] == 'distillation':
+            # 以 distillation 开始，初始输入为空（distillation 会从数据集加载）
+            pass
+        else:
+            # 根据步骤类型确定默认输入目录
+            if 'cleaning' in steps and 'distillation' not in steps:
+                # 单独运行 cleaning，默认输入是 merged_dir
+                current_input_dir = merged_dir
+            elif 'visualization' in steps and 'distillation' not in steps:
+                # 单独运行 visualization，默认输入是 cleaned_dir
+                current_input_dir = cleaned_dir
+            elif any(s in steps for s in ['initial_validation', 'final_validation', 'quality_validation']) \
+                 and 'distillation' not in steps and 'cleaning' not in steps:
+                # 单独运行 validation，根据步骤类型确定输入
+                if 'final_validation' in steps or 'quality_validation' in steps:
+                    current_input_dir = cleaned_dir
+                elif 'initial_validation' in steps:
+                    current_input_dir = merged_dir
+
+            if current_input_dir:
+                self.logger.info(f"Using default input directory for step: {current_input_dir}")
 
         for step in steps:
             self.logger.info(f"\n{'='*70}")
@@ -203,12 +244,26 @@ class FullPipelineRunner:
 
             step_start = datetime.now()
 
+            # 检查步骤依赖
+            if step in ['initial_validation', 'cleaning', 'final_validation', 'quality_validation', 'visualization']:
+                if current_input_dir is None:
+                    self.logger.error(f"✗ Step {step} requires input from previous step, but input directory not found")
+                    self.logger.error("")
+                    self.logger.error("Solution:")
+                    self.logger.error("  1. Run 'distillation' step first to generate data")
+                    self.logger.error("  2. Or ensure the default input directory exists:")
+                    self.logger.error(f"     - For cleaning/initial_validation: {merged_dir}")
+                    self.logger.error(f"     - For visualization/final_validation/quality_validation: {cleaned_dir}")
+                    self.logger.error("")
+                    step_results[step] = {'success': False, 'error': 'Missing input directory'}
+                    continue
+
             try:
                 if step == 'distillation':
                     result = self._run_distillation(
                         max_samples, tasks, output_dir, checkpoint_path
                     )
-                    current_input_dir = result.get('merged_output')
+                    current_input_dir = result.get('merged_output') or merged_dir
 
                 elif step == 'initial_validation':
                     # Initialize validation_comparator on demand
@@ -222,10 +277,9 @@ class FullPipelineRunner:
                     result = self._run_cleaning(
                         current_input_dir, min_quality, min_confidence, output_dir
                     )
-                    current_input_dir = result.get('cleaned_output')
+                    current_input_dir = result.get('cleaned_output') or cleaned_dir
 
                 elif step == 'final_validation':
-                    before_dir = step_results.get('distillation', {}).get('merged_output')
                     # Initialize validation_comparator on demand
                     if self.validation_comparator is None:
                         self.validation_comparator = ValidationComparator(self.logger)
@@ -240,10 +294,20 @@ class FullPipelineRunner:
                         )
                         result['comparison'] = comparison
 
+                elif step == 'quality_validation':
+                    # 最终质量校验，在清洗后进行深度质量评估
+                    result = self._run_quality_validation(current_input_dir)
+
                 elif step == 'visualization':
-                    viz_before_dir = before_dir or step_results.get('distillation', {}).get('merged_output')
+                    # 默认使用 cleaned_dir 作为输入，merged_dir 作为 before_dir（用于对比）
+                    viz_before_dir = step_results.get('distillation', {}).get('merged_output') or merged_dir
+
+                    # 获取质量校验结果用于可视化（传递完整的结果，包括 duration_seconds）
+                    quality_validation_results = step_results.get('quality_validation', {})
+
                     result = self._run_visualization(
-                        current_input_dir, viz_before_dir
+                        current_input_dir, viz_before_dir,
+                        quality_validation_results=quality_validation_results
                     )
 
                 step_end = datetime.now()
@@ -254,8 +318,10 @@ class FullPipelineRunner:
                     sample_count = result.get('processed_count', 1)
                 elif step == 'cleaning':
                     sample_count = result.get('summary', {}).get('total_input', 1)
-                elif 'validation' in step:
+                elif 'validation' in step and 'quality' not in step:
                     sample_count = result.get('total_files', 1)
+                elif step == 'quality_validation':
+                    sample_count = result.get('sample_count', 1)
                 elif step == 'visualization':
                     sample_count = result.get('generated_plots', 1)
                 else:
@@ -429,6 +495,115 @@ class FullPipelineRunner:
                 'duration_seconds': (datetime.now() - step_start).total_seconds()
             }
 
+    def _run_quality_validation(
+        self,
+        input_dir: str
+    ) -> Dict[str, Any]:
+        """
+        Run data quality validation step (最终质量把关)
+
+        在清洗后、训练前进行深度质量校验，包括：
+        - 软标签分布校验（KL散度、分布对齐）
+        - ECE置信度校准
+        - Top-K匹配统计
+        - CoT质量校验（幻觉检测、重复度）
+        - 数据阶段判定（是否具备训练价值）
+
+        Args:
+            input_dir: Input data directory (清洗后的数据)
+
+        Returns:
+            Quality validation result
+        """
+        self.logger.info("\nSTEP: FINAL QUALITY VALIDATION")
+        self.logger.info(f"Input: {input_dir} (清洗后的数据)")
+        self.logger.info(f"Purpose: 训练前的最终质量把关")
+
+        step_start = datetime.now()
+
+        try:
+            # Validate input directory
+            if not input_dir:
+                raise ValueError("Input directory is required for quality validation step")
+
+            # Initialize quality validator on demand
+            if self.quality_validator is None:
+                coco_annotations_dir = self.config.get('data.annotations_root', './data/coco/annotations')
+                self.quality_validator = DataQualityValidator(
+                    config=self.config,
+                    logger=self.logger,
+                    coco_annotations_dir=coco_annotations_dir
+                )
+
+            # Run quality validation
+            self.logger.info("\n" + "-"*70)
+            self.logger.info("Running comprehensive data quality validation...")
+            self.logger.info("-"*70)
+
+            # 直接保存到 outputs 目录（不需要 validation 子目录）
+            output_dir = self.config.get('output.root_dir', './outputs')
+            result = self.quality_validator.run_full_validation(
+                input_dir=input_dir,
+                output_dir=output_dir
+            )
+
+            step_end = datetime.now()
+            duration = (step_end - step_start).total_seconds()
+
+            # Prepare result report
+            result_report = {
+                'success': result.get('success', False),
+                'overall_passed': result.get('overall_passed', False),
+                'sample_count': result.get('sample_count', 0),
+                'validation_results': result.get('validation_results', {}),
+                'duration_seconds': duration,
+                'start_time': step_start.isoformat(),
+                'end_time': step_end.isoformat(),
+            }
+
+            # Display summary
+            self.logger.info("\n" + "-"*70)
+            self.logger.info("Quality Validation Summary:")
+            self.logger.info("-"*70)
+
+            # 显示关键指标
+            val_results = result.get('validation_results', {})
+
+            # Top-K匹配
+            top_k = val_results.get('top_k_matching', {}).get('statistics', {})
+            self.logger.info(f"  Top-K匹配率: {top_k.get('match_rate', 0)*100:.1f}%")
+
+            # KL散度
+            kl = val_results.get('soft_label_distribution', {}).get('kl_divergence_analysis', {}).get('statistics', {})
+            self.logger.info(f"  平均KL散度: {kl.get('average_kl', 'N/A')}")
+
+            # ECE
+            ece = val_results.get('ece_calibration', {})
+            self.logger.info(f"  ECE校准误差: {ece.get('ece', 'N/A')}")
+
+            # 幻觉检测
+            halluc = val_results.get('cot_quality', {}).get('hallucination_detection', {}).get('statistics', {})
+            self.logger.info(f"  CoT幻觉占比: {halluc.get('hallucination_ratio', 0)*100:.1f}%")
+
+            # 最终判定
+            assessment = val_results.get('training_value_assessment', {})
+            if assessment.get('can_train'):
+                self.logger.info(f"\n  ✓ 数据质量合格，具备训练价值")
+            else:
+                self.logger.info(f"\n  ✗ 数据质量不合格，需要清洗或重新生成")
+
+            self.logger.info(f"\n  Time: {duration:.1f}s")
+
+            return result_report
+
+        except Exception as e:
+            self.logger.error(f"\n✗ Quality validation failed: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'duration_seconds': (datetime.now() - step_start).total_seconds()
+            }
+
     def _run_cleaning(
         self,
         input_dir: str,
@@ -527,7 +702,8 @@ class FullPipelineRunner:
     def _run_visualization(
         self,
         input_dir: str,
-        before_dir: Optional[str] = None
+        before_dir: Optional[str] = None,
+        quality_validation_results: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """
         Run visualization step
@@ -535,6 +711,7 @@ class FullPipelineRunner:
         Args:
             input_dir: Input data directory (cleaned output)
             before_dir: Before cleaning data directory (for comparison)
+            quality_validation_results: Quality validation results for visualization
 
         Returns:
             Visualization result
@@ -571,7 +748,7 @@ class FullPipelineRunner:
                 before_data = self._load_data_from_dir(before_dir)
                 self.logger.info(f"Loaded {len(before_data) if before_data else 0} before-cleaning samples")
 
-            # Run visualization
+            # Run visualization with quality validation results
             # 设置visualization的初始timing
             self.timing_stats['visualization'] = {'duration': 0.0, 'samples': len(data_list)}
 
@@ -579,7 +756,8 @@ class FullPipelineRunner:
                 data_list=data_list,
                 before_data=before_data,
                 timing_stats=dict(self.timing_stats),
-                pipeline_results=self.pipeline_status['results']
+                pipeline_results=self.pipeline_status['results'],
+                quality_validation_results=quality_validation_results
             )
 
             step_end = datetime.now()
@@ -859,95 +1037,21 @@ def main():
         epilog=__doc__
     )
 
+    # 只保留必要的命令行参数，其他参数从配置文件读取
     parser.add_argument(
         '--config',
         type=str,
         default='configs/default.yaml',
-        help='Configuration file path'
-    )
-
-    parser.add_argument(
-        '--samples',
-        type=int,
-        default=None,
-        help='Maximum number of samples to process'
-    )
-
-    parser.add_argument(
-        '--tasks',
-        nargs='+',
-        default=None,
-        choices=['vqa', 'captioning', 'detection'],
-        help='Tasks to include (vqa, captioning, detection)'
+        help='Configuration file path (default: configs/default.yaml)'
     )
 
     parser.add_argument(
         '--steps',
         nargs='+',
         default=None,
-        choices=['distillation', 'initial_validation', 'cleaning',
+        choices=['distillation', 'quality_validation', 'initial_validation', 'cleaning',
                  'final_validation', 'visualization'],
-        help='Steps to run (default: all except visualization)'
-    )
-
-    parser.add_argument(
-        '--min-quality',
-        type=float,
-        default=None,
-        help='Minimum quality score threshold (0-100)'
-    )
-
-    parser.add_argument(
-        '--min-confidence',
-        type=float,
-        default=None,
-        help='Minimum confidence threshold (0-1)'
-    )
-
-    parser.add_argument(
-        '--enable-visualization',
-        action='store_true',
-        help='Enable visualization step'
-    )
-
-    parser.add_argument(
-        '--skip-validation',
-        action='store_true',
-        help='Skip validation steps'
-    )
-
-    parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Test configuration without running pipeline'
-    )
-
-    parser.add_argument(
-        '--output-dir',
-        type=str,
-        default=None,
-        help='Output directory for all results'
-    )
-
-    parser.add_argument(
-        '--input-dir',
-        type=str,
-        default=None,
-        help='Input data directory for visualization/cleaning step (when running standalone)'
-    )
-
-    parser.add_argument(
-        '--before-dir',
-        type=str,
-        default=None,
-        help='Before-cleaning data directory for comparison visualization'
-    )
-
-    parser.add_argument(
-        '--checkpoint',
-        type=str,
-        default=None,
-        help='Checkpoint file path for resuming distillation (e.g., ./outputs/checkpoint_latest.json)'
+        help='Steps to run (overrides pipeline.default_steps in config)'
     )
 
     args = parser.parse_args()
@@ -955,26 +1059,14 @@ def main():
     # 初始化管道运行器
     runner = FullPipelineRunner(config_path=args.config)
 
-    # 确定步骤列表
+    # 确定步骤列表（优先级：命令行 > 配置文件）
     steps = args.steps
     if steps is None:
-        steps = runner.DEFAULT_STEPS.copy()
-        if args.enable_visualization:
-            steps.append('visualization')
+        steps = runner.config.get('pipeline.default_steps', runner.DEFAULT_STEPS)
 
-    # 运行管道
+    # 运行管道（所有参数从配置文件读取）
     result = runner.run_full_pipeline(
-        steps=steps,
-        max_samples=args.samples,
-        tasks=args.tasks,
-        min_quality=args.min_quality,
-        min_confidence=args.min_confidence,
-        skip_validation=args.skip_validation,
-        dry_run=args.dry_run,
-        output_dir=args.output_dir,
-        input_dir=args.input_dir,
-        before_dir=args.before_dir,
-        checkpoint_path=args.checkpoint
+        steps=steps
     )
 
     # 返回状态码

@@ -13,8 +13,15 @@ prompts:
   standard:
     # VQA 任务
     vqa: |
-      Look at the image and answer the following question:
+      Look at the image and answer the following question.
       Question: {question}
+
+      STRICT REQUIREMENTS:
+      1. Answer in ONE WORD or NUMBER only
+      2. Use lowercase only
+      3. No punctuation, no explanation
+      4. Examples: "yes", "no", "2", "red", "bicycle"
+
       Answer:
 
     # Captioning 任务

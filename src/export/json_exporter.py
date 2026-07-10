@@ -1,16 +1,15 @@
 """
-JSON Exporter
-=============
+JSON Exporter (重构版)
+======================
 
-Handles exporting and merging distillation results in JSON format.
+每个图片单独保存为JSON文件，文件名=image_id
+不再使用batch文件和archive归档
 """
 
 import json
-import shutil
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from pathlib import Path
 from datetime import datetime
-import glob
 
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
@@ -18,13 +17,13 @@ from ..utils.logger import get_logger
 
 class JSONExporter:
     """
-    Exports and manages distillation results in JSON format.
+    导出蒸馏结果为JSON格式（重构版）
 
-    Provides:
-    - Individual result saving
-    - Batch result saving
-    - Result merging across tasks
-    - Schema validation
+    特点：
+    - 每个图片单独保存一个JSON文件
+    - 文件名使用image_id（如：391895.json）
+    - 直接保存到merged目录，无需后续合并
+    - 不使用batch文件和archive归档
     """
 
     def __init__(
@@ -42,8 +41,7 @@ class JSONExporter:
 
         # Output settings
         self.output_dir = Path(self.config.get("output.root_dir", "./outputs"))
-        self.merge_outputs = self.config.get("output.merge_outputs", True)
-        self.compress_outputs = self.config.get("output.compress_outputs", False)
+        self.merged_dir = Path(self.config.get("output.merged_dir", "./outputs/merged"))
 
         # Ensure output directories exist
         self._ensure_output_dirs()
@@ -52,211 +50,139 @@ class JSONExporter:
         """Create output directories."""
         dirs = [
             self.output_dir,
-            self.output_dir / "merged",
+            self.merged_dir,
         ]
 
         for dir_path in dirs:
             dir_path.mkdir(parents=True, exist_ok=True)
 
-        self.logger.info(f"Output directories created: {self.output_dir}")
+        self.logger.info(f"Output directories created: {self.merged_dir}")
 
-    def save_result(
+    def save_image_result(
         self,
-        result: Dict[str, Any],
-        output_path: str,
-        validate: bool = True
+        image_result: Dict[str, Any],
+        image_id: Optional[str] = None
     ) -> bool:
         """
-        Save single result to JSON file.
+        保存单个图片的蒸馏结果
 
         Args:
-            result: Result dictionary
-            output_path: Path to save
-            validate: Whether to validate before saving
+            image_result: 图片结果字典，包含:
+                - image_id: 图片ID
+                - image_path: 图片路径（用于提取文件名）
+                - tasks: 各任务结果（vqa, detection等）
+                - metadata: 元数据
+            image_id: 可选，如果提供则使用此ID作为文件名
 
         Returns:
             True if successful
         """
-        if validate:
-            if not self._validate_result(result):
-                self.logger.warning(f"Invalid result structure, skipping save to {output_path}")
-                return False
+        # 获取image_id
+        if image_id is None:
+            image_id = image_result.get('image_id')
+
+        if not image_id:
+            self.logger.error("无法保存：缺少image_id")
+            return False
+
+        # 验证结果结构
+        if not self._validate_result(image_result):
+            self.logger.warning(f"图片 {image_id} 结果结构无效，跳过保存")
+            return False
+
+        # 关键改进：从image_path提取原始文件名
+        # 例如：/data/coco/val2014/COCO_val2014_000000391895.jpg -> COCO_val2014_000000391895
+        image_path = image_result.get('image_path', '')
+
+        if image_path:
+            # 提取文件名（去掉路径和扩展名）
+            from pathlib import Path as PathLib
+            filename = PathLib(image_path).stem  # 去掉.jpg扩展名
+            json_filename = f"{filename}.json"
+        else:
+            # 如果没有image_path，使用image_id
+            json_filename = f"{image_id}.json"
+
+        # 构建文件路径：merged/{filename}.json
+        output_path = self.merged_dir / json_filename
 
         try:
-            path = Path(output_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
+            # 添加保存时间戳
+            if 'metadata' not in image_result:
+                image_result['metadata'] = {}
 
-            # Add timestamp if not present
-            if 'timestamp' not in result:
-                result['timestamp'] = datetime.now().isoformat()
+            image_result['metadata']['save_timestamp'] = datetime.now().isoformat()
 
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(result, f, indent=2, ensure_ascii=False)
+            # 保存JSON
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(image_result, f, indent=2, ensure_ascii=False)
 
-            self.logger.debug(f"Result saved to {path}")
+            self.logger.debug(f"图片结果已保存: {output_path.name} (image_id={image_id})")
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to save result: {e}")
+            self.logger.error(f"保存图片 {image_id} 失败: {e}")
             return False
 
-    def save_batch(
+    def save_batch_results(
         self,
-        batch_results: Dict[str, Any],
-        output_path: str
-    ) -> bool:
-        """
-        Save batch results.
-
-        Args:
-            batch_results: Batch results dictionary
-            output_path: Path to save
-
-        Returns:
-            True if successful
-        """
-        return self.save_result(batch_results, output_path, validate=False)
-
-    def save_task_result(
-        self,
-        task_result: Dict[str, Any],
-        output_path: str
-    ) -> bool:
-        """
-        Save task-specific result.
-
-        Args:
-            task_result: Task result dictionary
-            output_path: Path to save
-
-        Returns:
-            True if successful
-        """
-        return self.save_result(task_result, output_path)
-
-    def merge_all_results(
-        self,
-        batch_files: Optional[List[str]] = None
+        batch_results: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Merge all batch results into consolidated outputs.
+        保存批处理中的所有图片结果
+
+        新逻辑：遍历batch中的每个图片，单独保存
 
         Args:
-            batch_files: List of batch file paths. If None, finds all in output_dir.
+            batch_results: 批处理结果，包含:
+                - batch_id: 批次ID
+                - images: 图片结果列表
 
         Returns:
-            Summary of merged results
+            保存统计信息
         """
-        self.logger.info("Merging all batch results...")
+        images = batch_results.get('images', [])
 
-        # Find all batch files
-        if batch_files is None:
-            batch_pattern = str(self.output_dir / "batch_*.json")
-            batch_files = glob.glob(batch_pattern)
+        if not images:
+            self.logger.warning("批处理结果中无图片数据")
+            return {
+                'total': 0,
+                'saved': 0,
+                'failed': 0
+            }
 
-        if not batch_files:
-            self.logger.warning("No batch files found to merge")
-            return {'status': 'no_files', 'merged_count': 0}
+        saved_count = 0
+        failed_count = 0
 
-        # Load all batch results
-        all_results = []
+        for image_result in images:
+            image_id = image_result.get('image_id')
 
-        for batch_file in batch_files:
-            try:
-                with open(batch_file, 'r', encoding='utf-8') as f:
-                    batch_data = json.load(f)
+            if self.save_image_result(image_result, image_id):
+                saved_count += 1
+            else:
+                failed_count += 1
+                self.logger.warning(f"图片 {image_id} 保存失败")
 
-                # Extract image results
-                if 'images' in batch_data:
-                    all_results.extend(batch_data['images'])
+        total_count = len(images)
 
-            except Exception as e:
-                self.logger.error(f"Failed to load batch file {batch_file}: {e}")
-
-        self.logger.info(f"Loaded {len(all_results)} image results from {len(batch_files)} batch files")
-
-        # Merge by image ID
-        merged_by_image = {}
-
-        for img_result in all_results:
-            image_id = img_result.get('image_id')
-
-            if image_id:
-                if image_id in merged_by_image:
-                    # Merge tasks
-                    for task, task_data in img_result.get('tasks', {}).items():
-                        if task in merged_by_image[image_id]['tasks']:
-                            # Keep more recent/complete data
-                            merged_by_image[image_id]['tasks'][task].update(task_data)
-                        else:
-                            merged_by_image[image_id]['tasks'][task] = task_data
-                else:
-                    merged_by_image[image_id] = img_result
-
-        # Save merged results
-        merged_count = 0
-
-        for image_id, merged_data in merged_by_image.items():
-            merged_file = self.output_dir / "merged" / f"{image_id}.json"
-
-            if self.save_result(merged_data, str(merged_file), validate=False):
-                merged_count += 1
-
-        self.logger.info(f"Merged and saved {merged_count} image results")
-
-        # Create merged summary
-        summary_file = self.output_dir / "merged_summary.json"
-        summary = {
-            'total_images': merged_count,
-            'batch_files_processed': len(batch_files),
-            'tasks': self.config.get("distillation.tasks", []),
-            'merge_timestamp': datetime.now().isoformat(),
-        }
-
-        with open(summary_file, 'w') as f:
-            json.dump(summary, f, indent=2)
-
-        # Clean up batch files if successful
-        if merged_count > 0:
-            self._cleanup_batch_files(batch_files)
+        self.logger.info(
+            f"批处理保存完成: 总计 {total_count}, "
+            f"成功 {saved_count}, 失败 {failed_count}"
+        )
 
         return {
-            'status': 'success',
-            'merged_count': merged_count,
-            'summary_path': str(summary_file),
+            'total': total_count,
+            'saved': saved_count,
+            'failed': failed_count,
+            'batch_id': batch_results.get('batch_id')
         }
-
-    def _cleanup_batch_files(
-        self,
-        batch_files: List[str]
-    ) -> None:
-        """
-        Clean up temporary batch files after merging.
-
-        Args:
-            batch_files: List of batch file paths
-        """
-        archive_dir = self.output_dir / "archive"
-        archive_dir.mkdir(exist_ok=True)
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        for batch_file in batch_files:
-            try:
-                batch_path = Path(batch_file)
-                archived_path = archive_dir / f"{batch_path.stem}_{timestamp}.json"
-                shutil.move(batch_file, str(archived_path))
-            except Exception as e:
-                self.logger.warning(f"Failed to archive {batch_file}: {e}")
-
-        self.logger.info(f"Archived {len(batch_files)} batch files")
 
     def _validate_result(
         self,
         result: Dict[str, Any]
     ) -> bool:
         """
-        Validate result structure.
+        验证结果结构
 
         Args:
             result: Result dictionary
@@ -264,126 +190,143 @@ class JSONExporter:
         Returns:
             True if valid
         """
-        # Required top-level keys
+        # 必需的顶级字段
         required_keys = ['image_id']
 
         for key in required_keys:
             if key not in result:
-                self.logger.warning(f"Missing required key: {key}")
+                self.logger.warning(f"缺少必需字段: {key}")
                 return False
 
-        # Validate tasks if present
+        # 验证tasks结构（如果存在）
         if 'tasks' in result:
+            if not isinstance(result['tasks'], dict):
+                self.logger.warning("tasks字段应为字典类型")
+                return False
+
             for task_name, task_data in result['tasks'].items():
                 if not isinstance(task_data, dict):
-                    self.logger.warning(f"Invalid task data structure for {task_name}")
+                    self.logger.warning(f"任务 {task_name} 数据应为字典类型")
                     return False
 
         return True
 
-    def export_summary_report(
+    def load_image_result(
         self,
-        statistics: Dict[str, Any]
-    ) -> str:
-        """
-        Export summary report of distillation results.
-
-        Args:
-            statistics: Statistics dictionary
-
-        Returns:
-            Path to saved report
-        """
-        report_path = self.output_dir / "distillation_report.json"
-
-        report = {
-            'distillation_summary': statistics,
-            'configuration': {
-                'teacher_model': self.config.get("teacher.model_name"),
-                'tasks': self.config.get("distillation.tasks"),
-                'max_samples': self.config.get("data.max_samples"),
-            },
-            'output_info': {
-                'output_dir': str(self.output_dir),
-                'generated_timestamp': datetime.now().isoformat(),
-            },
-        }
-
-        with open(report_path, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
-
-        self.logger.info(f"Summary report saved to {report_path}")
-        return str(report_path)
-
-    def load_result(
-        self,
-        result_path: str
+        image_id: str,
+        image_path: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Load result from JSON file.
+        加载单个图片的结果
 
         Args:
-            result_path: Path to result file
+            image_id: 图片ID
+            image_path: 可选，图片路径（用于提取文件名）
 
         Returns:
-            Loaded result dictionary or None if failed
+            图片结果字典，如果不存在返回None
         """
+        # 确定JSON文件名
+        if image_path:
+            from pathlib import Path as PathLib
+            filename = PathLib(image_path).stem
+            json_filename = f"{filename}.json"
+        else:
+            # 尝试两种格式：
+            # 1. 直接使用image_id（如：391895.json）
+            # 2. 假设是COCO格式（如：COCO_val2014_000000391895.json）
+            json_filename = f"{image_id}.json"
+
+        file_path = self.merged_dir / json_filename
+
+        # 如果直接文件不存在，尝试查找匹配的文件
+        if not file_path.exists():
+            # 尝试查找包含该image_id的文件
+            possible_files = list(self.merged_dir.glob(f"*{image_id}*.json"))
+            if possible_files:
+                file_path = possible_files[0]
+            else:
+                self.logger.warning(f"图片 {image_id} 的结果文件不存在")
+                return None
+
         try:
-            with open(result_path, 'r', encoding='utf-8') as f:
-                result = json.load(f)
-            return result
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
         except Exception as e:
-            self.logger.error(f"Failed to load result from {result_path}: {e}")
+            self.logger.error(f"加载图片 {image_id} 结果失败: {e}")
             return None
 
-    def get_output_statistics(self) -> Dict[str, Any]:
+    def get_saved_image_ids(self) -> list:
         """
-        Get statistics about generated outputs.
+        获取已保存的所有图片ID列表
 
         Returns:
-            Statistics dictionary
+            图片ID列表
         """
-        stats = {
-            'total_files': 0,
-            'by_directory': {},
+        json_files = list(self.merged_dir.glob("*.json"))
+
+        # 提取image_id（文件名）
+        image_ids = [f.stem for f in json_files if f.stem != "merged_summary"]
+
+        return sorted(image_ids)
+
+    def generate_summary(self) -> Dict[str, Any]:
+        """
+        生成merged目录的摘要文件
+
+        Returns:
+            摘要信息
+        """
+        image_ids = self.get_saved_image_ids()
+
+        summary = {
+            'total_images': len(image_ids),
+            'image_ids': image_ids[:100],  # 只记录前100个
+            'output_dir': str(self.merged_dir),
+            'tasks': self.config.get("distillation.tasks", []),
+            'generated_timestamp': datetime.now().isoformat(),
         }
 
-        dirs = ['merged']
+        # 保存摘要文件
+        summary_path = self.merged_dir / "merged_summary.json"
 
-        for dir_name in dirs:
-            dir_path = self.output_dir / dir_name
-            if dir_path.exists():
-                json_files = list(dir_path.glob("*.json"))
-                stats['by_directory'][dir_name] = len(json_files)
-                stats['total_files'] += len(json_files)
+        try:
+            with open(summary_path, 'w', encoding='utf-8') as f:
+                json.dump(summary, f, indent=2, ensure_ascii=False)
 
-        return stats
+            self.logger.info(f"摘要文件已生成: {summary_path}")
+            self.logger.info(f"总计已保存 {len(image_ids)} 个图片结果")
 
-    def cleanup_outputs(
-        self,
-        keep_merged: bool = True
-    ) -> None:
+        except Exception as e:
+            self.logger.error(f"生成摘要文件失败: {e}")
+
+        return summary
+
+    def cleanup(self) -> None:
         """
-        Clean up output directories.
+        清理临时文件（如果需要）
 
-        Args:
-            keep_merged: Whether to keep merged results
+        新逻辑：不再需要清理batch文件和archive
         """
-        dirs_to_clean = []
+        self.logger.info("无需清理临时文件（已使用单图片保存模式）")
 
-        if not keep_merged:
-            dirs_to_clean.append('merged')
 
-        for dir_name in dirs_to_clean:
-            dir_path = self.output_dir / dir_name
-            if dir_path.exists():
-                shutil.rmtree(dir_path)
-                dir_path.mkdir(parents=True, exist_ok=True)
+# 向后兼容的方法（已弃用）
+    def save_result(self, result: Dict[str, Any], output_path: str, validate: bool = True) -> bool:
+        """已弃用：请使用 save_image_result"""
+        self.logger.warning("save_result 已弃用，建议使用 save_image_result")
+        return self.save_image_result(result)
 
-        if dirs_to_clean:
-            self.logger.info(f"Cleaned up output directories: {dirs_to_clean}")
+    def save_batch(self, batch_results: Dict[str, Any], output_path: str) -> bool:
+        """已弃用：请使用 save_batch_results"""
+        self.logger.warning("save_batch 已弃用，建议使用 save_batch_results")
+        stats = self.save_batch_results(batch_results)
+        return stats['saved'] > 0
 
-    def __repr__(self) -> str:
-        """String representation."""
-        stats = self.get_output_statistics()
-        return f"JSONExporter(output_dir={self.output_dir}, total_files={stats['total_files']})"
+    def merge_all_results(self, batch_files=None) -> Dict[str, Any]:
+        """已弃用：不再需要合并步骤"""
+        self.logger.info("merge_all_results 已弃用：数据已直接保存为单图片文件")
+        self.logger.info(f"请直接使用 {self.merged_dir} 目录中的数据")
+
+        # 生成摘要
+        return self.generate_summary()

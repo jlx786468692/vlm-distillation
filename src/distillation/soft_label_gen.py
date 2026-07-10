@@ -275,6 +275,8 @@ class SoftLabelGenerator:
         """
         Process VQA logits into answer probability distribution.
 
+        改进：使用tokenizer解码token ID为实际答案词，而不是token_0
+
         Args:
             logits_data: Dictionary with logits and probabilities
             answer_candidates: Optional list of answer candidates
@@ -293,21 +295,38 @@ class SoftLabelGenerator:
         # Get top-k tokens/probabilities
         top_k_probs = self._get_top_k_probabilities(scaled_probs)
 
-        # Map token IDs to answers (would need tokenizer)
-        # For now, return as token probabilities
         distribution = {}
 
         if answer_candidates:
             # Use provided candidates
-            # This would require computing probabilities for each candidate
-            # Placeholder implementation
             for i, candidate in enumerate(answer_candidates[:self.top_k]):
                 distribution[candidate] = 1.0 / len(answer_candidates[:self.top_k])
         else:
-            # Use top token probabilities
-            for i, prob_val in enumerate(top_k_probs['values'][:self.top_k]):
-                if prob_val >= self.min_probability:
-                    distribution[f'token_{i}'] = float(prob_val)
+            # 关键修复：使用tokenizer解码token ID为实际答案词
+            if 'indices' in top_k_probs:
+                # 获取top-k的token ID
+                token_indices = top_k_probs['indices'][:self.top_k]
+                token_probs = top_k_probs['values'][:self.top_k]
+
+                # 解码每个token为实际词
+                for idx, prob_val in zip(token_indices, token_probs):
+                    if prob_val >= self.min_probability:
+                        try:
+                            # 使用teacher的tokenizer解码
+                            word = self.teacher.tokenizer.decode([idx.item()])
+                            # 清理特殊字符和空格
+                            word = word.strip().lower()
+                            if word and word not in ['<s>', '</s>', '<pad>']:
+                                distribution[word] = float(prob_val)
+                        except Exception as e:
+                            # 如果解码失败，使用token_i作为后备
+                            self.logger.warning(f"Failed to decode token {idx}: {e}")
+                            distribution[f'token_{idx.item()}'] = float(prob_val)
+            else:
+                # 后备方案：如果没有indices，使用values
+                for i, prob_val in enumerate(top_k_probs['values'][:self.top_k]):
+                    if prob_val >= self.min_probability:
+                        distribution[f'token_{i}'] = float(prob_val)
 
         return distribution
 

@@ -612,16 +612,64 @@ class TeacherModel:
         return result
 
     def _extract_answer(self, text: str) -> str:
-        """Extract final answer from VQA response."""
-        # Simple extraction - last sentence or after "Answer:"
-        if "Answer:" in text:
-            answer = text.split("Answer:")[-1].strip()
-        else:
-            # Take last sentence
-            sentences = text.split(".")
-            answer = sentences[-1].strip() if sentences else text.strip()
+        """
+        从VQA响应中提取简短答案（改进版）
 
-        return answer
+        改进：
+        1. 去掉 assistant\n 前缀
+        2. 去掉 Answer: 等提示词
+        3. 提取第一个词作为简短答案
+        4. 清理标点和格式
+        5. 转小写
+
+        Args:
+            text: 生成的文本
+
+        Returns:
+            清理后的简短答案
+        """
+        import re
+
+        # 去掉常见的系统提示前缀
+        prefixes_to_remove = [
+            "assistant\n",
+            "Assistant\n",
+            "ASSISTANT\n",
+            "Assistant:",
+            "assistant:",
+            "Answer:",
+            "answer:",
+        ]
+
+        cleaned_text = text.strip()
+
+        # 去掉前缀
+        for prefix in prefixes_to_remove:
+            if cleaned_text.startswith(prefix):
+                cleaned_text = cleaned_text[len(prefix):].strip()
+            elif prefix in cleaned_text:
+                # 如果前缀在中间，取后面的部分
+                parts = cleaned_text.split(prefix)
+                if len(parts) > 1:
+                    cleaned_text = parts[-1].strip()
+
+        # 提取第一个词（最可能的简短答案）
+        words = cleaned_text.split()
+
+        if words:
+            # 取第一个词
+            answer = words[0]
+
+            # 去掉标点符号
+            answer = re.sub(r'[^\w]', '', answer)
+
+            # 转小写
+            answer = answer.lower()
+
+            return answer
+
+        # 如果没有词，返回空字符串
+        return ""
 
     def _extract_caption(self, text: str) -> str:
         """Extract caption from captioning response."""
