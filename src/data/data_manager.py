@@ -113,10 +113,13 @@ class DataManager:
 
     def _get_multi_task_ids(self) -> List[int]:
         """
-        Get image IDs that have annotations for all tasks.
+        Get image IDs that have annotations for at least one task.
+
+        🔧 修复：改为宽松模式（并集），而非严格模式（交集）
+        原因：用户可能缺少某些任务的标注文件，不应该阻止其他任务的执行
 
         Returns:
-            List of image IDs with all task annotations
+            List of image IDs with at least one task annotation
         """
         # Get IDs for each task
         vqa_ids = set(self.coco_loader.get_image_ids('vqa')) if 'vqa' in self.tasks else set()
@@ -124,36 +127,52 @@ class DataManager:
         instance_ids = set(self.coco_loader.get_image_ids('instance')) if 'detection' in self.tasks else set()
         keypoints_ids = set(self.coco_loader.get_image_ids('keypoints')) if 'keypoints' in self.tasks else set()
 
-        # Find intersection (images with all required annotations)
+        # 🔧 改进：使用宽松模式（并集），只要有任一任务的标注即可
         all_ids = set(self.coco_loader.get_image_ids())
 
-        if self.tasks:
-            # STRICT MODE: Only select images that have ALL requested task annotations
-            # This prevents empty results during distillation
-            task_sets = []
-            if 'vqa' in self.tasks:
-                task_sets.append(vqa_ids)
-            if 'captioning' in self.tasks:
-                task_sets.append(caption_ids)
-            if 'detection' in self.tasks:
-                task_sets.append(instance_ids)
-            if 'keypoints' in self.tasks:
-                task_sets.append(keypoints_ids)
+        # 记录每个任务的标注数量
+        self.logger.info("Dataset annotations summary:")
+        if 'vqa' in self.tasks:
+            self.logger.info(f"  VQA: {len(vqa_ids)} images")
+        if 'captioning' in self.tasks:
+            self.logger.info(f"  Captioning: {len(caption_ids)} images")
+        if 'detection' in self.tasks:
+            self.logger.info(f"  Detection: {len(instance_ids)} images")
+        if 'keypoints' in self.tasks:
+            self.logger.info(f"  Keypoints: {len(keypoints_ids)} images")
 
-            # Intersection of all requested tasks
-            valid_ids = list(all_ids)
-            for task_set in task_sets:
-                valid_ids = [id for id in valid_ids if id in task_set]
-        else:
-            valid_ids = list(all_ids)
+        # 收集所有有标注的任务集合
+        task_sets = []
+        if 'vqa' in self.tasks and vqa_ids:
+            task_sets.append(vqa_ids)
+        if 'captioning' in self.tasks and caption_ids:
+            task_sets.append(caption_ids)
+        if 'detection' in self.tasks and instance_ids:
+            task_sets.append(instance_ids)
+        if 'keypoints' in self.tasks and keypoints_ids:
+            task_sets.append(keypoints_ids)
+
+        # 🔧 宽松模式：并集（只要有任一任务的标注）
+        valid_ids = set()
+        for task_set in task_sets:
+            valid_ids.update(task_set)
+
+        # 只保留在all_ids中的图片
+        valid_ids = valid_ids.intersection(all_ids)
 
         self.logger.info(
-            f"Found {len(valid_ids)} images with all requested task annotations "
-            f"(VQA: {len(vqa_ids)}, Caption: {len(caption_ids)}, "
-            f"Instance: {len(instance_ids)}, Keypoints: {len(keypoints_ids)})"
+            f"✓ Found {len(valid_ids)} images with at least one task annotation"
         )
 
-        return valid_ids
+        # 如果没有找到任何图片，给出警告
+        if not valid_ids:
+            self.logger.error("⚠ No images found with any task annotations!")
+            self.logger.error("Please check:")
+            self.logger.error("  1. Annotation files exist in: " + str(self.annotations_root))
+            self.logger.error("  2. Annotation files match the split: " + self.config.get("data.val_split", "val2017"))
+            self.logger.error("  3. Tasks are correctly configured: " + str(self.tasks))
+
+        return list(valid_ids)
 
     def _apply_sampling_strategy(
         self,

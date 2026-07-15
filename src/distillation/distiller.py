@@ -9,6 +9,7 @@ import json
 import time
 import signal
 import sys
+import re
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from datetime import datetime
@@ -254,25 +255,39 @@ class Distiller:
             for task in self.tasks:
                 task_result = {}
 
-                # Hard labels
+                # 🔧 新方案：Hard Label + Soft Label 用一次推理，CoT 单独推理
+                #
+                # 推理 1: Standard Prompt → hard_label + soft_label
+                #   - 使用简洁 prompt，获取准确答案和真实概率分布
+                #   - 获取 logits 用于 soft_label
+                #
+                # 推理 2: CoT Prompt → cot_reasoning
+                #   - 使用推理 prompt，获取详细推理过程
+                #   - 答案可能与 hard_label 不同，这是正常的
+                #
+
+                # Step 1: 生成 Hard Label（获取 logits 供 Soft Label 使用）
                 if self.enable_hard_labels:
                     start_time = time.time()
                     hard_labels = self._generate_task_hard_labels(
-                        task, batch_data, image_id, image_path
+                        task, batch_data, image_id, image_path,
+                        cot_result=None  # 不从 CoT 提取，单独推理
                     )
                     task_result['hard_label'] = hard_labels
                     task_result['hard_label_time'] = time.time() - start_time
 
-                # Soft labels
+                # Step 2: 生成 Soft Label（使用 hard_label 的 logits）
                 if self.enable_soft_labels:
                     start_time = time.time()
+                    hard_label_for_soft = task_result.get('hard_label') if self.enable_hard_labels else None
                     soft_labels = self._generate_task_soft_labels(
-                        task, batch_data, image_id, image_path
+                        task, batch_data, image_id, image_path,
+                        hard_label_result=hard_label_for_soft
                     )
                     task_result['soft_label'] = soft_labels
                     task_result['soft_label_time'] = time.time() - start_time
 
-                # Chain-of-Thought
+                # Step 3: 生成 CoT（单独推理）
                 if self.enable_cot:
                     start_time = time.time()
                     cot = self._generate_task_cot(
@@ -304,9 +319,27 @@ class Distiller:
         task: str,
         batch_data: Dict,
         image_id: int,
-        image_path: str
+        image_path: str,
+        cot_result: Optional[Dict] = None  # 保留参数兼容，但不再使用
     ) -> Dict[str, Any]:
-        """Generate hard labels for specific task."""
+        """
+        Generate hard labels for specific task.
+
+        新方案：直接推理获取 hard_label，不从 CoT 提取
+        - 使用 Standard prompt，获取准确答案
+        - 获取 logits 供 soft_label 使用
+
+        Args:
+            task: Task type
+            batch_data: Batch data
+            image_id: Image ID
+            image_path: Image path
+            cot_result: 保留参数兼容，但不再使用
+
+        Returns:
+            Hard label dictionary
+        """
+        # 直接调用模型推理
         if task == 'vqa':
             questions = batch_data['annotations']['vqa'].get(image_id, [])
             if questions:
@@ -339,14 +372,79 @@ class Distiller:
 
         return {}
 
+    def _extract_objects_from_cot(self, raw_reasoning: str) -> Optional[List[Dict]]:
+        """
+        从CoT推理结果中提取检测到的物体。
+
+        Args:
+            raw_reasoning: CoT推理的完整文本
+
+        Returns:
+            检测到的物体列表，如果解析失败返回None
+        """
+        import json
+        import re
+
+        # 查找JSON块（通常在```json ... ```中）
+        json_pattern = r'```(?:json)?\s*\n?(.*?)\n?```'
+        match = re.search(json_pattern, raw_reasoning, re.DOTALL)
+
+        if match:
+            json_content = match.group(1).strip()
+
+            try:
+                parsed = json.loads(json_content)
+
+                # 处理不同的格式
+                objects = []
+                if isinstance(parsed, list):
+                    objects = parsed
+                elif isinstance(parsed, dict) and 'objects' in parsed:
+                    objects = parsed['objects']
+
+                # 规范化字段名
+                for obj in objects:
+                    if 'bbox_2d' in obj:
+                        obj['bbox'] = obj.pop('bbox_2d')
+                    if 'label' in obj and 'category' not in obj:
+                        obj['category'] = obj.pop('label')
+                    if 'confidence' not in obj:
+                        obj['confidence'] = 0.9
+
+                self.logger.debug(f"Successfully extracted {len(objects)} objects from CoT JSON")
+                return objects  # 返回列表（可能为空）
+
+            except json.JSONDecodeError as e:
+                self.logger.debug(f"Failed to parse JSON from CoT: {e}")
+                return None  # 解析失败
+
+        # 没有找到JSON块
+        self.logger.debug("No JSON block found in CoT reasoning")
+        return None  # 解析失败
+
     def _generate_task_soft_labels(
         self,
         task: str,
         batch_data: Dict,
         image_id: int,
-        image_path: str
+        image_path: str,
+        hard_label_result: Optional[Dict] = None
     ) -> Dict[str, Any]:
-        """Generate soft labels for specific task."""
+        """
+        Generate soft labels for specific task.
+
+        新方案：使用 hard_label 中的 logits，不使用 CoT
+
+        Args:
+            task: Task type
+            batch_data: Batch data
+            image_id: Image ID
+            image_path: Image path
+            hard_label_result: hard_label 结果（包含 logits）
+
+        Returns:
+            Soft label dictionary
+        """
         if task == 'vqa':
             questions = batch_data['annotations']['vqa'].get(image_id, [])
             if questions:
@@ -354,7 +452,8 @@ class Distiller:
                 return self.soft_label_gen.generate_vqa_soft_labels(
                     image_path=image_path,
                     question=question,
-                    image_id=str(image_id)
+                    image_id=str(image_id),
+                    hard_label_result=hard_label_result
                 )
             return {}
 
@@ -366,9 +465,11 @@ class Distiller:
             )
 
         elif task == 'detection':
+            # 🔧 传入hard_label结果，避免重复推理
             return self.soft_label_gen.generate_detection_soft_labels(
                 image_path=image_path,
-                image_id=str(image_id)
+                image_id=str(image_id),
+                hard_label_result=hard_label_result
             )
 
         elif task == 'keypoints':

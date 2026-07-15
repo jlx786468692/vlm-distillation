@@ -1,0 +1,141 @@
+# Prompt Configuration (中文版)
+# ====================
+#
+# 针对 Qwen2.5-VL-7B 模型优化的中文 Prompt
+# - 简洁明了，适合 7B 模型理解能力
+# - 发挥千问中文理解优势
+# - 明确格式要求，确保稳定输出
+#
+
+prompts:
+  # ==================
+  # 普通 Prompt（无 CoT）
+  # ==================
+
+  standard:
+    # VQA 任务
+    vqa: |
+      请看图回答问题：{question}
+
+      要求：
+      1. 只用一个词或数字回答
+      2. 不要解释
+      3. 示例：yes, no, two, red
+
+      回答：
+
+    # Captioning 任务
+    captioning: |
+      请详细描述这张图片，包括：
+      - 主要物体及其位置
+      - 场景和环境
+      - 颜色、动作等细节
+
+      描述：
+
+    # Detection 任务
+    detection: |
+      检测图片中的所有物体，输出JSON格式：
+
+      格式要求：
+      {"objects": [{"category": "类别", "bbox": [x1,y1,x2,y2], "confidence": 0.9}]}
+
+      注意：
+      - bbox 是边界框坐标 [x1,y1,x2,y2]
+      - confidence 是置信度(0.5-1.0)
+      - 只输出JSON，不要其他文字
+
+      示例：
+      {"objects": [
+        {"category": "person", "bbox": [100,50,200,300], "confidence": 0.95},
+        {"category": "car", "bbox": [250,150,400,280], "confidence": 0.9}
+      ]}
+
+      JSON：
+
+    # Keypoints 任务
+    keypoints: |
+      检测图片中所有人的姿态关键点(17点)。
+
+      JSON格式：
+      {"persons": [{"bbox": [x,y,w,h], "keypoints": [{"name": "nose", "x": 100, "y": 200, "visibility": 2}]}]}
+
+      关键点：nose, left_eye, right_eye, left_ear, right_ear, left_shoulder, right_shoulder, left_elbow, right_elbow, left_wrist, right_wrist, left_hip, right_hip, left_knee, right_knee, left_ankle, right_ankle
+
+      visibility: 0=不可见, 1=遮挡, 2=可见
+
+      JSON：
+
+  # ==================
+  # CoT Prompt（思维链）
+  # ==================
+
+  cot:
+    # VQA CoT
+    vqa: |
+      请一步步分析图片并回答：{question}
+
+      分析步骤：
+      1. 看到什么？
+      2. 分析细节
+      3. 得出结论
+
+      让我们开始：
+
+    # Captioning CoT
+    captioning: |
+      系统描述图片：
+
+      步骤：
+      1. 识别主体
+      2. 描述属性和位置
+      3. 说明场景
+      4. 综合描述
+
+      开始分析：
+
+    # Detection CoT
+    detection: |
+      系统检测图片中的物体：
+
+      请按以下步骤分析：
+      1. 描述图片的整体场景
+      2. 从左到右、从上到下扫描，识别每个物体
+      3. 对每个物体，说明：
+         - 类别（如：person, car, dog）
+         - 大致位置（如：图片左侧、中央）
+         - 边界框坐标 [x1, y1, x2, y2]
+      4. 检查是否有遗漏的物体
+
+      分析完成后，输出JSON格式的检测结果：
+      {"objects": [{"category": "类别", "bbox": [x1,y1,x2,y2], "confidence": 0.9}]}
+
+      注意：
+      - bbox 是像素坐标 [x1,y1,x2,y2]
+      - confidence 范围 0.5-1.0
+      - 只输出JSON，不要包含分析过程
+
+      JSON：
+
+    # Keypoints CoT
+    keypoints: |
+      系统检测人体姿态：
+
+      请按以下步骤分析：
+      1. 找到图片中的所有人
+      2. 对每个人，描述其姿态（站立、坐着、运动等）
+      3. 定位17个关键点：nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles
+      4. 标注每个关键点的可见性（0=不可见, 1=遮挡, 2=可见）
+
+      分析完成后，输出JSON格式：
+      {"persons": [{"bbox": [x,y,w,h], "keypoints": [{"name": "nose", "x": 100, "y": 200, "visibility": 2}]}]}
+
+      JSON：
+
+  # ==================
+  # 默认 Prompt
+  # ==================
+
+  default:
+    standard: "分析这张图片。"
+    cot: "请一步步分析这张图片。"

@@ -388,7 +388,7 @@ class DataVisualizer:
         values = [avg_length, short_ratio, long_ratio]
         colors = ['#3498DB', '#F39C12', '#E74C3C']
         bars = ax3.bar(x, values, color=colors, width=0.6, edgecolor='black', linewidth=2)
-        ax3.set_ylabel('值', fontsize=12)
+        ax3.set_ylabel('Value', fontsize=12)
         ax3.grid(True, alpha=0.3)
 
         for bar, val in zip(bars, values):
@@ -482,13 +482,13 @@ class DataVisualizer:
         """构建Markdown内容"""
 
         # 使用相对路径引用图片
-        md = f"""# VLM数据质量完整可视化报告
+        md = f"""# VLM Data Quality Complete Visualization Report
 
-**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 ---
 
-## 📊 数据质量关键指标
+## 📊 Data Quality Key Metrics
 
 """
 
@@ -1328,15 +1328,15 @@ class DataVisualizer:
         output_dir: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        可视化验证结果
+        Visualize validation results
 
         Args:
-            data_list: 数据列表
-            validation_report: 验证报告
-            output_dir: 输出目录
+            data_list: Data list
+            validation_report: Validation report
+            output_dir: Output directory
 
         Returns:
-            可视化结果
+            Visualization results
         """
         if not HAS_MATPLOTLIB:
             self._log("matplotlib not installed", 'warning')
@@ -1347,7 +1347,7 @@ class DataVisualizer:
         output_path = Path(self.output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        self._log(f"\n生成验证可视化...")
+        self._log(f"\nGenerating validation visualizations...")
         generated_plots = []
 
         try:
@@ -1395,7 +1395,7 @@ class DataVisualizer:
         data_list: List[Dict],
         output_path: Path
     ) -> Optional[Path]:
-        """置信度分布可视化"""
+        """Confidence distribution visualization"""
         if not HAS_MATPLOTLIB:
             return None
 
@@ -1491,7 +1491,7 @@ class DataVisualizer:
         data_list: List[Dict],
         output_path: Path
     ) -> Optional[Path]:
-        """答案频率分布图"""
+        """Answer frequency distribution visualization"""
         if not HAS_MATPLOTLIB:
             return None
 
@@ -1563,7 +1563,7 @@ class DataVisualizer:
         data_list: List[Dict],
         output_path: Path
     ) -> Optional[Path]:
-        """检测类别分布图"""
+        """Detection classes distribution visualization"""
         if not HAS_MATPLOTLIB:
             return None
 
@@ -1653,7 +1653,7 @@ class DataVisualizer:
         data_list: List[Dict],
         output_path: Path
     ) -> Optional[Path]:
-        """CoT 质量指标图"""
+        """CoT quality metrics visualization"""
         if not HAS_MATPLOTLIB:
             return None
 

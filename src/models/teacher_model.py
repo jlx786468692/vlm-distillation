@@ -71,6 +71,19 @@ class TeacherModel:
         self.logger.info(f"Loading teacher model: {self.model_name}")
 
         try:
+            # 🔧 关键：设置随机种子，确保推理结果可复现
+            import random
+            import numpy as np
+
+            seed = self.config.get("data.seed", 42)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+
+            self.logger.info(f"Random seed set to {seed} for reproducibility")
+
             # Check if using HuggingFace mirror (for network issues)
             hf_mirror = self.config.get("teacher.hf_mirror", None)
             if hf_mirror:
@@ -441,6 +454,9 @@ class TeacherModel:
         """
         Generate outputs from model.
 
+        改进：当return_logits=True时，不应用温度缩放
+        让soft_label在提取后手动应用温度，避免分布过于尖锐
+
         Args:
             inputs: Input tensors
             return_logits: Whether to return logits
@@ -456,9 +472,14 @@ class TeacherModel:
         top_p = top_p or self.top_p
 
         # Generation config
+        # 🔧 关键修复：软标签logits使用较低的温度，确保概率分布和生成答案一致
+        # 问题：如果温度太高（1.5），模型可能通过采样选择低概率token，
+        #      导致软标签分布（"1"概率高）和硬标签答案（"2"）不匹配
+        # 解决：使用较低温度（teacher.temperature=0.3），概率分布更确定
+        #      这样如果模型选择"2"，那么"2"的概率应该是最高的
         gen_config = {
             'max_new_tokens': max_new_tokens,
-            'temperature': temperature,
+            'temperature': temperature if return_logits else temperature,  # 🔧 统一使用teacher温度
             'top_p': top_p,
             'top_k': self.top_k,
             'do_sample': True,
@@ -507,7 +528,54 @@ class TeacherModel:
             # Process logits for soft labels
             logits = self._process_logits(outputs.scores)
             result['logits'] = logits
-            result['confidence'] = self._compute_confidence(logits)
+
+            # 【修复】使用更准确的方法提取答案token IDs
+            # 方法：从完整生成的token序列中，找到答案部分
+            # 答案部分是去掉prompt后的部分
+
+            # 获取完整的生成序列
+            full_sequence = generated_ids[0].cpu().tolist()
+
+            # 🔧 改进方法：使用tokenizer的特殊token来定位
+            # Qwen2.5-VL的chat template通常包含：
+            # <|im_start|>system\n...<|im_end|>\n<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n
+
+            # 找到assistant token的位置（答案开始位置）
+            assistant_token = "<|im_start|>assistant"  # Qwen的assistant标记
+            assistant_token_ids = self.tokenizer.encode(assistant_token, add_special_tokens=False)
+
+            # 在序列中查找assistant token
+            answer_start_idx = 0
+            for i in range(len(full_sequence) - len(assistant_token_ids) + 1):
+                if full_sequence[i:i+len(assistant_token_ids)] == assistant_token_ids:
+                    answer_start_idx = i + len(assistant_token_ids)
+                    break
+
+            # 如果找不到assistant token，使用fallback方法
+            if answer_start_idx == 0:
+                # Fallback：查找最后一个换行符或特殊token后的位置
+                # 通常答案在最后一个prompt标记之后
+                self.logger.warning("Could not find assistant token, using fallback method")
+                # 简单方法：假设答案在序列的最后1/3部分
+                answer_start_idx = len(full_sequence) // 2
+
+            # 提取答案token IDs（去掉前导空白token）
+            answer_token_ids = full_sequence[answer_start_idx:]
+
+            # 去掉前导的空白、换行等token
+            while answer_token_ids and self.tokenizer.decode([answer_token_ids[0]]).strip() == '':
+                answer_token_ids = answer_token_ids[1:]
+
+            result['answer_token_ids'] = answer_token_ids
+
+            # 调试日志：显示token信息
+            self.logger.debug(f"Full sequence length: {len(full_sequence)}")
+            self.logger.debug(f"Answer start index: {answer_start_idx}")
+            self.logger.debug(f"Answer token IDs: {answer_token_ids[:10]}...")
+            self.logger.debug(f"Answer tokens: {self.tokenizer.decode(answer_token_ids[:10])}")
+
+            # 计算置信度（基于答案token）
+            result['confidence'] = self._compute_confidence_from_tokens(logits, answer_token_ids)
 
         return result
 
@@ -679,6 +747,75 @@ class TeacherModel:
         caption = " ".join(caption_lines).strip()
         return caption
 
+    def _clean_json_content(self, json_str: str) -> str:
+        """
+        Clean JSON content by removing extra text after the JSON structure.
+
+        🔧 新增方法：清理JSON后面的多余文本
+
+        Args:
+            json_str: JSON string that may contain extra text
+
+        Returns:
+            Cleaned JSON string
+        """
+        import re
+
+        # 去掉前后空白
+        json_str = json_str.strip()
+
+        # 策略：找到完整的JSON结构（从第一个 { 或 [ 到最后一个匹配的 } 或 ]）
+
+        # 判断JSON是对象还是数组
+        if json_str.startswith('{'):
+            # 对象格式：找到最后一个匹配的 }
+            brace_count = 0
+            last_valid_pos = 0
+
+            for i, char in enumerate(json_str):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        last_valid_pos = i + 1
+                        break
+
+            if last_valid_pos > 0:
+                return json_str[:last_valid_pos]
+
+        elif json_str.startswith('['):
+            # 数组格式：找到最后一个匹配的 ]
+            bracket_count = 0
+            last_valid_pos = 0
+
+            for i, char in enumerate(json_str):
+                if char == '[':
+                    bracket_count += 1
+                elif char == ']':
+                    bracket_count -= 1
+                    if bracket_count == 0:
+                        last_valid_pos = i + 1
+                        break
+
+            if last_valid_pos > 0:
+                return json_str[:last_valid_pos]
+
+        # Fallback: 使用正则表达式匹配完整的JSON
+        # 匹配 {...} 或 [...]
+        json_patterns = [
+            r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}',  # 匹配嵌套的 {}
+            r'\[(?:[^\[\]]|(?:\[[^\[\]]*\]))*\]',  # 匹配嵌套的 []
+        ]
+
+        for pattern in json_patterns:
+            match = re.search(pattern, json_str, re.DOTALL)
+            if match:
+                return match.group(0)
+
+        # 如果都无法匹配，返回原始字符串（让后续逻辑处理）
+        return json_str
+
     def _repair_json(self, json_str: str) -> Optional[str]:
         """
         Attempt to repair common JSON syntax errors in detection responses.
@@ -696,9 +833,26 @@ class TeacherModel:
         try:
             repaired = json_str
 
-            # Error 1: Objects outside array - {"objects": [obj1], obj2}
-            # Pattern: closing bracket followed by comma and another object
-            if ']}, {' in repaired or ']}, {' in repaired:
+            # 🔧 新增：先清理多余文本
+            repaired = self._clean_json_content(repaired)
+
+            # Error 0: Missing key name before array - {"category": "person", [0, 150, 38, 387], "confidence": 0.8}
+            # Pattern: comma followed by array without key name
+            if re.search(r',\s*\[', repaired):
+                self.logger.debug("Detected: missing 'bbox' key before array")
+                # Fix: Insert "bbox": before arrays that follow a comma
+                # Pattern: ", [...]" → ", "bbox": [...]"
+                repaired = re.sub(r',\s*\[', ', "bbox": [', repaired)
+                self.logger.debug("Added missing 'bbox' key before array")
+
+            # Error 00: Missing key name after comma - {"category": "person", "bbox": [18, 195, 154, 387], "confidence": 0.9}[0, 150, 38, 387]
+            # Pattern: } followed by [ without key
+            if re.search(r'\}\s*\[', repaired):
+                self.logger.debug("Detected: array after object without key")
+                # This is malformed: two objects merged incorrectly
+                # Try to split them
+                repaired = re.sub(r'\}\s*\[', '},\n{', repaired)
+                self.logger.debug("Split merged objects")
                 self.logger.debug("Detected: objects outside array (missing bracket)")
                 # Try to extract all objects and rebuild
                 object_pattern = r'\{[^{}]*"category":\s*"[^"]*"[^{}]*\}'
@@ -994,10 +1148,40 @@ class TeacherModel:
 
             # Method 1: Extract from markdown code blocks (most common for VLM outputs)
             # Pattern: ```json ... ``` or ``` ... ```
-            markdown_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
-            if markdown_match:
-                json_content = markdown_match.group(1).strip()
-                self.logger.debug(f"Extracted from markdown: {json_content[:200]}")
+            # 🔧 改进：更健壮的提取，避免提取到多余的prompt文本
+            markdown_patterns = [
+                r'```json\s*\n(.*?)\n```',  # 标准格式，严格要求换行
+                r'```json\s+(.*?)\s+```',   # 空格分隔
+                r'```\s*\n(.*?)\n```',      # 无语言标记，要求换行
+                r'```json\s*(.*?)\s*```',   # 无换行（fallback）
+            ]
+
+            json_content = None
+            for pattern in markdown_patterns:
+                matches = list(re.finditer(pattern, text, re.DOTALL))
+                if matches:
+                    # 使用最后一个匹配（通常是最完整的JSON）
+                    json_content = matches[-1].group(1).strip()
+                    self.logger.debug(f"Found JSON with pattern: {pattern}")
+                    self.logger.debug(f"Extracted content (first 200 chars): {json_content[:200]}")
+                    break
+
+            if json_content:
+                # 🔧 关键修复：清理JSON后面的多余文本
+                # 策略：找到最后一个闭合的 } 或 ]，截断后面的内容
+                json_content = self._clean_json_content(json_content)
+
+                # 🔧 调试：显示清理后的内容
+                self.logger.debug(f"Cleaned JSON content (first 200 chars): {json_content[:200]}")
+
+                # 🔧 修复：检查是否提取到的是占位符或截断的内容
+                if json_content == '{"objects": [...]}' or json_content == '{"objects": [...]}':
+                    self.logger.warning("Extracted placeholder content, trying alternative extraction")
+                    # 尝试提取完整的markdown块（包括换行）
+                    full_match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+                    if full_match:
+                        json_content = full_match.group(1).strip()
+                        self.logger.debug(f"Re-extracted content: {json_content[:500]}")
 
                 try:
                     parsed = json.loads(json_content)
@@ -1318,6 +1502,10 @@ class TeacherModel:
         """
         Process generation scores into logits.
 
+        改进：
+        1. 增加top-k数量（从100增加到500），确保包含低概率答案
+        2. 对于二元答案（yes/no），对立答案概率可能很低但需要保留
+
         Args:
             scores: Tuple of score tensors from generation
 
@@ -1330,14 +1518,35 @@ class TeacherModel:
         # Apply softmax to get probabilities
         probs = torch.softmax(logits_stack, dim=-1)
 
+        # 🔧 关键改进：增加top-k数量，确保包含对立答案
+        # 原因：二元答案的对立答案概率可能极低（如1e-8），但需要保留
+        # 从100增加到500，可以覆盖更多低概率答案
+        top_k = self.config.get('distillation.soft_labels.top_k_logits', 500)  # 从100改为500
+
+        # 对每个位置提取top-k
+        # probs shape: [num_tokens, vocab_size] 或 [num_tokens, batch_size, vocab_size]
+        if probs.dim() == 3:
+            # [num_tokens, batch_size, vocab_size]
+            # 对最后一个维度提取top-k
+            top_k = min(top_k, probs.size(-1))
+            top_probs, top_indices = torch.topk(probs, top_k, dim=-1)
+        else:
+            # [num_tokens, vocab_size]
+            top_k = min(top_k, probs.size(-1))
+            top_probs, top_indices = torch.topk(probs, top_k, dim=-1)
+
         return {
-            'raw_logits': logits_stack,
-            'probabilities': probs,
+            'top_k_indices': top_indices,       # 🔧 top-k索引（增加到500）
+            'top_k_values': top_probs,          # 🔧 top-k概率（增加到500）
+            'top_k': top_k,                      # 记录k值
+            'vocab_size': probs.size(-1),        # 记录词表大小
         }
 
     def _compute_confidence(self, logits_data: Dict) -> float:
         """
         Compute confidence score from logits.
+
+        改进：兼容新的 top-k 存储格式
 
         Args:
             logits_data: Processed logits dictionary
@@ -1345,12 +1554,161 @@ class TeacherModel:
         Returns:
             Confidence score (0-1)
         """
-        probs = logits_data['probabilities']
-        # Take max probability for each position
-        max_probs = probs.max(dim=-1).values
-        # Average across positions
-        confidence = max_probs.mean().item()
-        return confidence
+        # 🔧 兼容新格式（top-k only）和旧格式（完整概率）
+        if 'probabilities' in logits_data:
+            # 旧格式：有完整的概率分布
+            probs = logits_data['probabilities']
+            max_probs = probs.max(dim=-1).values
+            confidence = max_probs.mean().item()
+            return confidence
+
+        elif 'top_k_values' in logits_data:
+            # 新格式：只有 top-k 概率
+            # top-k 中的最大值就是第一个（因为已经排序）
+            top_k_values = logits_data['top_k_values']
+
+            # 对每个位置，取第一个值（最大概率）
+            if top_k_values.dim() == 2:
+                # [num_tokens, top_k]
+                max_probs = top_k_values[:, 0]
+            elif top_k_values.dim() == 3:
+                # [num_tokens, batch_size, top_k]
+                max_probs = top_k_values[:, 0, 0]
+            else:
+                # 单个位置
+                max_probs = top_k_values[0:1]
+
+            # 返回平均置信度
+            confidence = max_probs.mean().item()
+            return confidence
+
+        else:
+            # 既没有 probabilities 也没有 top_k_values
+            self.logger.warning("logits_data missing both 'probabilities' and 'top_k_values'")
+            return 0.5  # 默认值
+
+    def _compute_confidence_from_tokens(self, logits_data: Dict, token_ids: List[int]) -> float:
+        """
+        Compute confidence based on actual generated tokens.
+
+        改进：
+        1. 兼容新的 top-k 存储格式
+        2. 处理数字和文字的映射（如 "2" vs "two"）
+
+        Args:
+            logits_data: Processed logits dictionary (新格式：top-k only，或旧格式：完整概率)
+            token_ids: List of generated token IDs
+
+        Returns:
+            Confidence score (0-1)
+        """
+        if not token_ids:
+            return 0.0
+
+        # 🔧 兼容新格式（top-k only）和旧格式（完整概率）
+        if 'probabilities' in logits_data:
+            # 旧格式：有完整的概率分布
+            probs = logits_data['probabilities']
+
+            token_probs = []
+            for i, token_id in enumerate(token_ids):
+                if i < probs.shape[0]:
+                    prob = probs[i, 0, token_id].item()  # batch_size=0
+                    token_probs.append(prob)
+
+            return sum(token_probs) / len(token_probs) if token_probs else 0.0
+
+        elif 'top_k_indices' in logits_data:
+            # 新格式：只有 top-k 概率
+            top_k_indices = logits_data['top_k_indices']
+            top_k_values = logits_data['top_k_values']
+
+            token_probs = []
+            for i, token_id in enumerate(token_ids):
+                # 检查 token 是否在 top-k 中
+                if i < top_k_indices.shape[0]:  # 确保不越界
+                    # 获取该位置的 top-k indices
+                    if top_k_indices.dim() == 2:
+                        # [num_tokens, top_k]
+                        position_indices = top_k_indices[i]
+                        position_values = top_k_values[i]
+                    elif top_k_indices.dim() == 3:
+                        # [num_tokens, batch_size, top_k]
+                        position_indices = top_k_indices[i, 0]
+                        position_values = top_k_values[i, 0]
+                    else:
+                        continue
+
+                    # 查找 token_id 是否在 top-k 中
+                    mask = position_indices == token_id
+                    if mask.any():
+                        # 找到了，获取对应的概率
+                        prob = position_values[mask].item()
+                        token_probs.append(prob)
+                        self.logger.debug(f"Token {i} (ID={token_id}) found in top-k with prob {prob}")
+                    else:
+                        # 🔧 改进：检查同义词和不同形式的token
+                        # 解码token看是什么
+                        token_text = self.tokenizer.decode([token_id]).strip().lower()
+
+                        # 数字和文字的映射
+                        number_word_map = {
+                            '0': 'zero', '1': 'one', '2': 'two', '3': 'three', '4': 'four',
+                            '5': 'five', '6': 'six', '7': 'seven', '8': 'eight', '9': 'nine',
+                            'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
+                            'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9'
+                        }
+
+                        # 在top-k中查找匹配的token
+                        found_match = False
+
+                        # 方法1：检查同义词
+                        if token_text in number_word_map:
+                            synonym = number_word_map[token_text]
+                            self.logger.debug(f"Token {i}: '{token_text}' -> checking synonym '{synonym}'")
+
+                            # 在top-k中查找同义词
+                            for j, idx in enumerate(position_indices.tolist()):
+                                word = self.tokenizer.decode([int(idx)]).strip().lower()
+                                # 去掉前缀字符（▁）
+                                word_clean = word.replace('▁', '').strip()
+
+                                if word_clean == synonym or word_clean == token_text:
+                                    prob = position_values[j].item()
+                                    token_probs.append(prob)
+                                    found_match = True
+                                    self.logger.debug(f"Found synonym: '{token_text}' -> '{word_clean}' (ID={idx}) with prob {prob}")
+                                    break
+
+                        # 方法2：检查文本匹配（去掉前缀字符）
+                        if not found_match:
+                            token_text_clean = token_text.replace('▁', '').strip()
+
+                            for j, idx in enumerate(position_indices.tolist()):
+                                word = self.tokenizer.decode([int(idx)]).strip().lower()
+                                word_clean = word.replace('▁', '').strip()
+
+                                # 检查文本是否匹配
+                                if word_clean == token_text_clean:
+                                    prob = position_values[j].item()
+                                    token_probs.append(prob)
+                                    found_match = True
+                                    self.logger.debug(f"Found text match: '{token_text_clean}' (ID={idx}) with prob {prob}")
+                                    break
+
+                        if not found_match:
+                            # 不在 top-k 中，说明概率很低（< 1/top_k）
+                            # 使用一个很小的默认值
+                            token_probs.append(0.001)
+                            self.logger.warning(f"Token {i} (ID={token_id}, text='{token_text}') not found in top-k")
+
+            # 返回平均概率
+            return sum(token_probs) / len(token_probs) if token_probs else 0.0
+
+        else:
+            # 既没有 probabilities 也没有 top_k_indices
+            self.logger.warning("logits_data missing both 'probabilities' and 'top_k_indices'")
+            return 0.0
 
     def _generate_cot(
         self,

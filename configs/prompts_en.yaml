@@ -1,0 +1,139 @@
+# Prompt Configuration (English)
+# ====================
+#
+# Prompts optimized for Qwen2.5-VL-7B model
+# - Concise and clear
+# - Clear format requirements
+#
+
+prompts:
+  # ==================
+  # Standard Prompt (No CoT)
+  # ==================
+
+  standard:
+    # VQA Task
+    vqa: |
+      Look at the image and answer: {question}
+
+      Rules:
+      1. ONE word/number only
+      2. No explanation
+      3. Examples: yes, no, two, red
+
+      Answer:
+
+    # Captioning Task
+    captioning: |
+      Describe this image in detail:
+      - Main objects and their positions
+      - Scene and environment
+      - Colors, actions, and details
+
+      Caption:
+
+    # Detection Task
+    detection: |
+      Detect all objects in this image. Output JSON only.
+
+      Format: {"objects": [{"category": "name", "bbox": [x1,y1,x2,y2], "confidence": 0.9}]}
+
+      Rules:
+      - bbox: [x1, y1, x2, y2] coordinates
+      - confidence: 0.5-1.0
+      - ONLY JSON, no other text
+
+      Example:
+      {"objects": [
+        {"category": "person", "bbox": [100,50,200,300], "confidence": 0.95},
+        {"category": "car", "bbox": [250,150,400,280], "confidence": 0.9}
+      ]}
+
+      JSON:
+
+    # Keypoints Task
+    keypoints: |
+      Detect all persons with 17 keypoints.
+
+      JSON format:
+      {"persons": [{"bbox": [x,y,w,h], "keypoints": [{"name": "nose", "x": 100, "y": 200, "visibility": 2}]}]}
+
+      Keypoints: nose, left_eye, right_eye, left_ear, right_ear, left_shoulder, right_shoulder, left_elbow, right_elbow, left_wrist, right_wrist, left_hip, right_hip, left_knee, right_knee, left_ankle, right_ankle
+
+      visibility: 0=not visible, 1=occluded, 2=visible
+
+      JSON:
+
+  # ==================
+  # CoT Prompt
+  # ==================
+
+  cot:
+    # VQA CoT
+    vqa: |
+      Analyze the image step by step to answer: {question}
+
+      Steps:
+      1. What do you see?
+      2. Analyze details
+      3. Draw conclusion
+
+      Let's analyze:
+
+    # Captioning CoT
+    captioning: |
+      Describe this image systematically:
+
+      Steps:
+      1. Identify subjects
+      2. Describe attributes
+      3. Note the scene
+      4. Summarize
+
+      Let's analyze:
+
+    # Detection CoT
+    detection: |
+      Detect objects in this image systematically:
+
+      Analyze step by step:
+      1. Describe the overall scene
+      2. Scan from left to right, top to bottom
+      3. For each object, note:
+         - Category (e.g., person, car, dog)
+         - Approximate position (e.g., left side, center)
+         - Bounding box [x1, y1, x2, y2]
+      4. Check for missed objects
+
+      After analysis, output JSON format:
+      {"objects": [{"category": "name", "bbox": [x1,y1,x2,y2], "confidence": 0.9}]}
+
+      Note:
+      - bbox: pixel coordinates [x1, y1, x2, y2]
+      - confidence: 0.5-1.0
+      - Output ONLY JSON, do not include analysis
+
+      JSON:
+
+    # Keypoints CoT
+    keypoints: |
+      Detect human poses systematically:
+
+      Analyze step by step:
+      1. Find all persons in the image
+      2. For each person, describe their pose (standing, sitting, moving)
+      3. Locate 17 keypoints: nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles
+      4. Mark visibility for each keypoint (0=not visible, 1=occluded, 2=visible)
+
+      After analysis, output JSON format:
+      {"persons": [{"bbox": [x,y,w,h], "keypoints": [{"name": "nose", "x": 100, "y": 200, "visibility": 2}]}]}
+
+      JSON:
+
+  # ==================
+  # Default Prompt
+  # ==================
+
+  default:
+    standard: "Analyze this image."
+    cot: "Analyze this image step by step."

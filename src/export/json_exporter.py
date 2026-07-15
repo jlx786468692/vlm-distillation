@@ -113,9 +113,12 @@ class JSONExporter:
 
             image_result['metadata']['save_timestamp'] = datetime.now().isoformat()
 
+            # 🔧 关键修复：转换Tensor为可序列化格式
+            serializable_result = self._make_serializable(image_result)
+
             # 保存JSON
             with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(image_result, f, indent=2, ensure_ascii=False)
+                json.dump(serializable_result, f, indent=2, ensure_ascii=False)
 
             self.logger.debug(f"图片结果已保存: {output_path.name} (image_id={image_id})")
             return True
@@ -301,6 +304,52 @@ class JSONExporter:
             self.logger.error(f"生成摘要文件失败: {e}")
 
         return summary
+
+    def _make_serializable(self, data: Any) -> Any:
+        """
+        递归转换数据为JSON可序列化格式。
+
+        🔧 关键：将Tensor转换为list，避免JSON序列化错误
+        🔧 过滤：移除top_k_indices和top_k_values，减少存储大小
+
+        Args:
+            data: 待转换的数据（可能包含Tensor）
+
+        Returns:
+            可序列化的数据
+        """
+        import torch
+
+        if isinstance(data, torch.Tensor):
+            # Tensor转换为list
+            return data.tolist()
+
+        elif isinstance(data, dict):
+            # 🔧 过滤掉中间计算数据，只保留最终结果，减少JSON存储大小
+            # topk数据：用于内部概率计算
+            # logits相关：模型输出的原始logits数据
+            # token_ids：答案token序列，用于置信度计算
+            excluded_keys = {
+                'top_k_indices', 'top_k_values', 'top_k', 'vocab_size',  # topk数据
+                'logits', 'answer_token_ids',  # logits相关数据
+            }
+            return {
+                k: self._make_serializable(v)
+                for k, v in data.items()
+                if k not in excluded_keys
+            }
+
+        elif isinstance(data, list):
+            # 递归处理列表
+            return [self._make_serializable(v) for v in data]
+
+        elif isinstance(data, tuple):
+            # 元组转换为列表
+            return [self._make_serializable(v) for v in data]
+
+        else:
+            # 其他类型直接返回（int, float, str, bool, None等）
+            return data
 
     def cleanup(self) -> None:
         """

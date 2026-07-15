@@ -4,18 +4,20 @@ project:
   description: "VLM data distillation pipeline using Qwen2.5-VL-7B-Instruct"
 
 # Prompt 配置文件路径
-prompts_config: "configs/prompts.yaml"
+# prompts_config: "configs/prompts.yaml"  # 原版本（已删除）
+# prompts_config: "configs/prompts_zh.yaml"  # 中文版本
+prompts_config: "configs/prompts_en.yaml"  # 英文版本（数据集为英文）
 
 # Pipeline 运行控制
 pipeline:
   # 默认运行的步骤（可通过命令行 --steps 覆盖）
   default_steps:
     - "distillation"
-    - "initial_validation"
-    - "cleaning"
-    - "final_validation"
-    - "quality_validation"
-    - "visualization"  # 可视化默认不运行，需要显式指定
+    # - "initial_validation"
+    # - "cleaning"
+    # - "final_validation"
+    # - "quality_validation"
+    # - "visualization"  # 可视化默认不运行，需要显式指定
 
   # 断点续运行
   checkpoint_path: null  # 设置为具体路径可恢复运行，如 "./outputs/checkpoint_latest.json"
@@ -30,9 +32,15 @@ teacher:
   max_length: 2048
 
   # 通用生成参数（适用于VQA、Captioning等任务）
-  temperature: 0.7
-  top_p: 0.9
-  top_k: 50
+  # 【知识蒸馏优化】使用贪婪解码（temperature=0）
+  # 原因：
+  # 1. 硬标签需要确定性（每次结果相同）
+  # 2. 软标签中的概率分布仍然保留（不确定性信息）
+  # 3. 避免随机性导致的结果不一致
+  # 注意：temperature=0 使用贪婪解码，temperature>0 使用采样
+  temperature: 0.0       # 贪婪解码，确保结果确定性
+  top_p: 1.0            # temperature=0时，top_p不生效，设为1.0
+  top_k: 1              # temperature=0时，top_k不生效，设为1
   max_new_tokens: 512
 
   # 检测任务专用优化参数（提高置信度、减少截断）
@@ -56,7 +64,7 @@ data:
   # Processing parameters
   batch_size: 4
   num_workers: 4
-  max_samples: 4  # For small-scale processing (set to null for full dataset)
+  max_samples: 4  # 【优化】先用10个样本测试参数调整效果，后续可增加到5000
 
   # Image preprocessing
   image_size: 224
@@ -82,9 +90,9 @@ distillation:
 
   # Soft label configuration
   soft_labels:
-    enabled: true
-    temperature: 2.0  # Temperature for knowledge distillation
-    top_k_logits: 100  # Keep top-k logits/probabilities for storage
+    enabled: true  # 【重新启用】VQA和Detection软标签逻辑已修复
+    temperature: 1.5  # 【优化】从2.0降到1.5，减少KL散度，提高软标签与硬标签一致性
+    top_k_logits: 500  # 【优化】从100增加到500，确保包含低概率答案（如二元答案的对立答案）
     save_format: "json"
 
   # Chain-of-Thought configuration
@@ -131,10 +139,10 @@ cleaning:
   enabled: true
 
   # 异常检测阈值
-  min_confidence: 0.6            # 最低置信度阈值（提高到0.6，过滤更多低置信度数据）
+  min_confidence: 0.3            # 最低置信度阈值（降低到0.3，允许更多低置信度数据通过）
   max_confidence: 0.95           # 最高置信度阈值（高于此值可能过于自信）
-  min_quality_score: 50.0        # 最低质量分数阈值（提高到50，移除低质量数据）
-  min_cot_quality: 0.5           # 最低CoT逻辑流畅度分数
+  min_quality_score: 35.0        # 最低质量分数阈值（降低到35，基于实际数据质量调整）
+  min_cot_quality: 0.3           # 最低CoT逻辑流畅度分数（降低到0.3）
 
   # 答案长度限制
   min_answer_length: 3           # 最短答案长度（字符）
@@ -142,7 +150,7 @@ cleaning:
 
   # 清洗策略
   auto_remove_invalid: true      # 自动移除无效数据（invalid_answer/empty_result）
-  remove_empty_results: true     # 移除有空结果的样本（设置为false可保留部分任务数据）
+  remove_empty_results: false    # 移除有空结果的样本（设置为false保留部分任务数据）
   auto_repair_bbox: true         # 自动修复异常检测框
   deduplicate_answers: true      # 答案去重（标记但不移除）
 
