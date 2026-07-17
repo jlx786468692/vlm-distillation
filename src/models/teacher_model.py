@@ -472,19 +472,30 @@ class TeacherModel:
         top_p = top_p or self.top_p
 
         # Generation config
-        # 🔧 关键修复：软标签logits使用较低的温度，确保概率分布和生成答案一致
-        # 问题：如果温度太高（1.5），模型可能通过采样选择低概率token，
-        #      导致软标签分布（"1"概率高）和硬标签答案（"2"）不匹配
-        # 解决：使用较低温度（teacher.temperature=0.3），概率分布更确定
-        #      这样如果模型选择"2"，那么"2"的概率应该是最高的
+        # 🔧 关键修复：当return_logits=True时，强制使用temperature=0（确定性生成）
+        # 原因：如果temperature > 0，模型可能通过采样选择非top-1的token
+        #      导致生成答案和logits top-1不一致（硬标签≠logits的bug）
+        # 解决：使用temperature=0，确保生成答案一定来自logits的argmax
+        if return_logits:
+            # 强制使用确定性生成
+            temperature = 0.0  # 或使用极小值如0.01
+            self.logger.debug(f"Using temperature={temperature} for deterministic generation (return_logits=True)")
+
         gen_config = {
             'max_new_tokens': max_new_tokens,
-            'temperature': temperature if return_logits else temperature,  # 🔧 统一使用teacher温度
-            'top_p': top_p,
-            'top_k': self.top_k,
-            'do_sample': True,
             'pad_token_id': self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
         }
+
+        # 🔧 关键修复：只在采样时传递temperature和top_p参数
+        # 当temperature=0时，使用贪婪解码（do_sample=False），不需要这些参数
+        if temperature > 0:
+            gen_config['temperature'] = temperature
+            gen_config['top_p'] = top_p
+            gen_config['top_k'] = self.top_k
+            gen_config['do_sample'] = True
+        else:
+            # temperature=0时，使用贪婪解码，不传递temperature/top_p避免警告
+            gen_config['do_sample'] = False  # 贪婪解码
 
         # Generate
         with torch.no_grad():
@@ -522,6 +533,7 @@ class TeacherModel:
         result = {
             'full_response': generated_text,
             'answer': answer,
+            'sequences': generated_ids[0].cpu().tolist(),  # 🔧 返回完整序列，方便诊断
         }
 
         if return_logits:
@@ -529,19 +541,15 @@ class TeacherModel:
             logits = self._process_logits(outputs.scores)
             result['logits'] = logits
 
-            # 【修复】使用更准确的方法提取答案token IDs
-            # 方法：从完整生成的token序列中，找到答案部分
-            # 答案部分是去掉prompt后的部分
+            # 🔧 关键修复：定位答案token的正确位置
+            # 问题：之前的逻辑可能取错了logits位置
+            # 解决：找到assistant标记后的第一个非空白token
 
             # 获取完整的生成序列
             full_sequence = generated_ids[0].cpu().tolist()
 
-            # 🔧 改进方法：使用tokenizer的特殊token来定位
-            # Qwen2.5-VL的chat template通常包含：
-            # <|im_start|>system\n...<|im_end|>\n<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n
-
-            # 找到assistant token的位置（答案开始位置）
-            assistant_token = "<|im_start|>assistant"  # Qwen的assistant标记
+            # 方法：使用tokenizer的特殊token来定位答案开始位置
+            assistant_token = "<|im_start|>assistant"
             assistant_token_ids = self.tokenizer.encode(assistant_token, add_special_tokens=False)
 
             # 在序列中查找assistant token
@@ -553,22 +561,78 @@ class TeacherModel:
 
             # 如果找不到assistant token，使用fallback方法
             if answer_start_idx == 0:
-                # Fallback：查找最后一个换行符或特殊token后的位置
-                # 通常答案在最后一个prompt标记之后
                 self.logger.warning("Could not find assistant token, using fallback method")
-                # 简单方法：假设答案在序列的最后1/3部分
-                answer_start_idx = len(full_sequence) // 2
+                # Fallback：查找最后一个换行符后的位置
+                for i in range(len(full_sequence) - 1, -1, -1):
+                    token_text = self.tokenizer.decode([full_sequence[i]])
+                    if '\n' in token_text or i == 0:
+                        answer_start_idx = i + 1 if '\n' in token_text else i
+                        break
 
             # 提取答案token IDs（去掉前导空白token）
             answer_token_ids = full_sequence[answer_start_idx:]
-
-            # 去掉前导的空白、换行等token
             while answer_token_ids and self.tokenizer.decode([answer_token_ids[0]]).strip() == '':
                 answer_token_ids = answer_token_ids[1:]
 
             result['answer_token_ids'] = answer_token_ids
+            result['answer_start_idx'] = answer_start_idx  # 🔧 记录答案开始位置
 
-            # 调试日志：显示token信息
+            # 🔧 关键改进：只返回答案第一个token对应的logits
+            # logits的shape: [num_generated_tokens, vocab_size]
+            # 答案第一个token的logits应该在 answer_start_idx - (len(full_sequence) - len(answer_token_ids)) 位置
+            # 或者更简单：直接取第一个生成步骤的logits（对应答案第一个token）
+
+            if 'top_k_indices' in logits and 'top_k_values' in logits:
+                indices = logits['top_k_indices']
+                values = logits['top_k_values']
+
+                # 🔧 优先级1修复：确保取的是答案第一个token的logits
+                # logits_stack 的第0个位置对应生成的第一个token（答案第一个token）
+                # 所以直接取 [0] 或 [0, 0]
+
+                if indices.dim() == 1:
+                    # 已经是单个位置的top-k
+                    first_answer_indices = indices
+                    first_answer_values = values
+                elif indices.dim() == 2:
+                    # [num_tokens, top_k] - 取第0个token（答案第一个token）
+                    first_answer_indices = indices[0]
+                    first_answer_values = values[0]
+                elif indices.dim() == 3:
+                    # [num_tokens, batch_size, top_k] - 取第0个token，第0个batch
+                    first_answer_indices = indices[0, 0]
+                    first_answer_values = values[0, 0]
+
+                # 🔧 验证：logits的top-1必须和答案token一致（temperature=0时）
+                top1_token_id = first_answer_indices[0].item()
+                top1_word = self.tokenizer.decode([top1_token_id]).strip().lower()
+
+                # 记录验证信息
+                result['logits_top1_token_id'] = top1_token_id
+                result['logits_top1_word'] = top1_word
+
+                # 对比答案
+                if answer_token_ids:
+                    answer_first_token_id = answer_token_ids[0]
+                    answer_first_word = self.tokenizer.decode([answer_first_token_id]).strip().lower()
+
+                    # 验证是否匹配
+                    if top1_token_id == answer_first_token_id:
+                        self.logger.debug(f"✓ Logits top-1 matches answer: '{top1_word}'")
+                    else:
+                        self.logger.warning(f"⚠ Logits top-1 mismatch!")
+                        self.logger.warning(f"  Answer first token: {answer_first_token_id} ('{answer_first_word}')")
+                        self.logger.warning(f"  Logits top-1 token: {top1_token_id} ('{top1_word}')")
+                        self.logger.warning(f"  This indicates logits extraction position is wrong!")
+
+                # 🔧 只返回答案第一个token的logits（简化后续处理）
+                result['logits'] = {
+                    'top_k_indices': first_answer_indices,
+                    'top_k_values': first_answer_values,
+                    'position': 'answer_first_token',  # 标记提取位置
+                }
+
+            # 调试日志
             self.logger.debug(f"Full sequence length: {len(full_sequence)}")
             self.logger.debug(f"Answer start index: {answer_start_idx}")
             self.logger.debug(f"Answer token IDs: {answer_token_ids[:10]}...")
@@ -1500,46 +1564,54 @@ class TeacherModel:
 
     def _process_logits(self, scores: tuple) -> Dict[str, torch.Tensor]:
         """
-        Process generation scores into logits.
+        Process generation scores into probability distribution.
 
         改进：
-        1. 增加top-k数量（从100增加到500），确保包含低概率答案
-        2. 对于二元答案（yes/no），对立答案概率可能很低但需要保留
+        1. 应用温度缩放
+        2. 计算softmax得到概率分布
+        3. 提取top-k概率（学生训练直接使用）
 
         Args:
             scores: Tuple of score tensors from generation
 
         Returns:
-            Dictionary with processed logits
+            Dictionary with probability distribution (NOT logits)
         """
-        # Stack scores
+        # Stack scores - 这是原始logits
         logits_stack = torch.stack(scores)
 
-        # Apply softmax to get probabilities
-        probs = torch.softmax(logits_stack, dim=-1)
+        # 🔧 保存原始logits（用于硬标签置信度计算）
+        raw_logits_stack = logits_stack.clone()
 
-        # 🔧 关键改进：增加top-k数量，确保包含对立答案
-        # 原因：二元答案的对立答案概率可能极低（如1e-8），但需要保留
-        # 从100增加到500，可以覆盖更多低概率答案
-        top_k = self.config.get('distillation.soft_labels.top_k_logits', 500)  # 从100改为500
+        # 🔧 应用温度缩放（用于软标签）
+        temperature = self.config.get("distillation.soft_labels.temperature", 4.0)
+        scaled_logits = logits_stack / temperature
 
-        # 对每个位置提取top-k
-        # probs shape: [num_tokens, vocab_size] 或 [num_tokens, batch_size, vocab_size]
-        if probs.dim() == 3:
-            # [num_tokens, batch_size, vocab_size]
-            # 对最后一个维度提取top-k
-            top_k = min(top_k, probs.size(-1))
-            top_probs, top_indices = torch.topk(probs, top_k, dim=-1)
+        # 🔧 计算softmax得到概率分布（用于软标签）
+        probs_stack = torch.softmax(scaled_logits, dim=-1)
+
+        # 🔧 计算原始概率（temperature=1.0，用于硬标签置信度）
+        raw_probs_stack = torch.softmax(raw_logits_stack, dim=-1)
+
+        # 🔧 提取top-k概率（学生训练直接使用）
+        top_k = self.config.get('distillation.soft_labels.top_k_logits', 50)  # 🔧 修复：使用配置值50，而不是500
+        top_k = min(top_k, probs_stack.size(-1))
+
+        # 提取软标签的top-k（温度缩放后）
+        if probs_stack.dim() == 3:
+            top_probs, top_indices = torch.topk(probs_stack, top_k, dim=-1)
+            # 提取硬标签置信度的top-k（原始，temperature=1.0）
+            raw_top_probs, _ = torch.topk(raw_probs_stack, top_k, dim=-1)
         else:
-            # [num_tokens, vocab_size]
-            top_k = min(top_k, probs.size(-1))
-            top_probs, top_indices = torch.topk(probs, top_k, dim=-1)
+            top_probs, top_indices = torch.topk(probs_stack, top_k, dim=-1)
+            raw_top_probs, _ = torch.topk(raw_probs_stack, top_k, dim=-1)
 
         return {
-            'top_k_indices': top_indices,       # 🔧 top-k索引（增加到500）
-            'top_k_values': top_probs,          # 🔧 top-k概率（增加到500）
-            'top_k': top_k,                      # 记录k值
-            'vocab_size': probs.size(-1),        # 记录词表大小
+            'top_k_indices': top_indices,       # token IDs
+            'top_k_values': top_probs,          # ✅ 概率值（温度缩放后，用于软标签）
+            'raw_top_k_values': raw_top_probs,  # ✅ 原始概率值（temperature=1.0，用于硬标签置信度）
+            'temperature': temperature,         # 记录使用的温度
+            'top_k': top_k,
         }
 
     def _compute_confidence(self, logits_data: Dict) -> float:
@@ -1563,23 +1635,30 @@ class TeacherModel:
             return confidence
 
         elif 'top_k_values' in logits_data:
-            # 新格式：只有 top-k 概率
-            # top-k 中的最大值就是第一个（因为已经排序）
-            top_k_values = logits_data['top_k_values']
+            # 🔧 修复：优先使用原始概率值（temperature=1.0）计算硬标签置信度
+            # raw_top_k_values 是未经温度缩放的原始概率，代表模型的真实置信度
 
-            # 对每个位置，取第一个值（最大概率）
-            if top_k_values.dim() == 2:
+            # ✅ 优先使用 raw_top_k_values（temperature=1.0）
+            if 'raw_top_k_values' in logits_data:
+                top_k_probs = logits_data['raw_top_k_values']  # 原始概率（temperature=1.0）
+            else:
+                # 兼容旧数据
+                top_k_probs = logits_data['top_k_values']  # 可能是温度缩放后的概率
+
+            # 直接使用概率值（不需要softmax）
+            if top_k_probs.dim() == 2:
                 # [num_tokens, top_k]
-                max_probs = top_k_values[:, 0]
-            elif top_k_values.dim() == 3:
+                max_probs = top_k_probs[:, 0]  # top-k 已排序，第一个是最大的
+            elif top_k_probs.dim() == 3:
                 # [num_tokens, batch_size, top_k]
-                max_probs = top_k_values[:, 0, 0]
+                max_probs = top_k_probs[:, 0, 0]  # 第一个batch的第一个位置
             else:
                 # 单个位置
-                max_probs = top_k_values[0:1]
+                max_probs = top_k_probs[0]
 
-            # 返回平均置信度
-            confidence = max_probs.mean().item()
+            # 🔧 置信度 = 第一个token（答案）的最大概率
+            confidence = max_probs[0].item() if len(max_probs) > 0 else 0.5
+
             return confidence
 
         else:
@@ -1616,37 +1695,65 @@ class TeacherModel:
                     prob = probs[i, 0, token_id].item()  # batch_size=0
                     token_probs.append(prob)
 
-            return sum(token_probs) / len(token_probs) if token_probs else 0.0
+            # 🔧 修复：返回第一个token的概率，而不是平均值
+            if token_probs:
+                return token_probs[0]
+            else:
+                return 0.0
 
         elif 'top_k_indices' in logits_data:
-            # 新格式：只有 top-k 概率
+            # 🔧 修复：使用原始概率值（temperature=1.0）计算硬标签置信度
+            # raw_top_k_values 是未经温度缩放的原始概率，代表模型的真实置信度
             top_k_indices = logits_data['top_k_indices']
-            top_k_values = logits_data['top_k_values']
+
+            # ✅ 优先使用 raw_top_k_values（temperature=1.0），否则回退到 top_k_values
+            if 'raw_top_k_values' in logits_data:
+                top_k_probs = logits_data['raw_top_k_values']  # 原始概率（temperature=1.0）
+            else:
+                # 兼容旧数据
+                top_k_probs = logits_data['top_k_values']  # 可能是温度缩放后的概率
 
             token_probs = []
             for i, token_id in enumerate(token_ids):
                 # 检查 token 是否在 top-k 中
                 if i < top_k_indices.shape[0]:  # 确保不越界
-                    # 获取该位置的 top-k indices
+                    # 获取该位置的 top-k indices 和概率
                     if top_k_indices.dim() == 2:
                         # [num_tokens, top_k]
                         position_indices = top_k_indices[i]
-                        position_values = top_k_values[i]
+                        position_probs = top_k_probs[i]
                     elif top_k_indices.dim() == 3:
                         # [num_tokens, batch_size, top_k]
                         position_indices = top_k_indices[i, 0]
-                        position_values = top_k_values[i, 0]
+                        position_probs = top_k_probs[i, 0]
                     else:
                         continue
+
+                    # 🔧 调试：打印详细信息（第一个token）
+                    if i == 0:
+                        self.logger.info(f"[Confidence Debug] Position {i}:")
+                        self.logger.info(f"  Looking for token_id: {token_id}")
+                        self.logger.info(f"  Top-5 indices: {position_indices[:5].tolist()}")
+                        self.logger.info(f"  Top-5 probs (temperature=1.0): {position_probs[:5].tolist()}")
 
                     # 查找 token_id 是否在 top-k 中
                     mask = position_indices == token_id
                     if mask.any():
                         # 找到了，获取对应的概率
-                        prob = position_values[mask].item()
+                        prob = position_probs[mask].item()
                         token_probs.append(prob)
-                        self.logger.debug(f"Token {i} (ID={token_id}) found in top-k with prob {prob}")
+
+                        if i == 0:
+                            # 找到匹配的位置
+                            match_idx = mask.nonzero(as_tuple=True)[0][0].item()
+                            self.logger.info(f"  ✓ Found at position {match_idx} in top-k")
+                            self.logger.info(f"  Probability: {prob:.4f}")
                     else:
+                        # 🔧 调试：token不在top-k中
+                        if i == 0:
+                            self.logger.warning(f"  ✗ Token ID {token_id} not in top-k!")
+                            self.logger.warning(f"  Will try synonym/text matching...")
+
                         # 🔧 改进：检查同义词和不同形式的token
                         # 解码token看是什么
                         token_text = self.tokenizer.decode([token_id]).strip().lower()
@@ -1674,10 +1781,10 @@ class TeacherModel:
                                 word_clean = word.replace('▁', '').strip()
 
                                 if word_clean == synonym or word_clean == token_text:
-                                    prob = position_values[j].item()
+                                    prob = position_probs[j].item()
                                     token_probs.append(prob)
                                     found_match = True
-                                    self.logger.debug(f"Found synonym: '{token_text}' -> '{word_clean}' (ID={idx}) with prob {prob}")
+                                    self.logger.debug(f"Found synonym: '{token_text}' -> '{word_clean}' (ID={idx}) with prob {prob:.4f}")
                                     break
 
                         # 方法2：检查文本匹配（去掉前缀字符）
@@ -1690,10 +1797,10 @@ class TeacherModel:
 
                                 # 检查文本是否匹配
                                 if word_clean == token_text_clean:
-                                    prob = position_values[j].item()
+                                    prob = position_probs[j].item()
                                     token_probs.append(prob)
                                     found_match = True
-                                    self.logger.debug(f"Found text match: '{token_text_clean}' (ID={idx}) with prob {prob}")
+                                    self.logger.debug(f"Found text match: '{token_text_clean}' (ID={idx}) with prob {prob:.4f}")
                                     break
 
                         if not found_match:
@@ -1702,8 +1809,15 @@ class TeacherModel:
                             token_probs.append(0.001)
                             self.logger.warning(f"Token {i} (ID={token_id}, text='{token_text}') not found in top-k")
 
-            # 返回平均概率
-            return sum(token_probs) / len(token_probs) if token_probs else 0.0
+            # 🔧 修复：置信度 = 第一个token（答案开始）的概率
+            # 不使用平均值，因为后续token的概率不代表答案的置信度
+            if token_probs:
+                confidence = token_probs[0]  # 第一个token的概率
+                
+                self.logger.debug(f"Confidence (first token): {confidence:.4f}")
+                return confidence
+            else:
+                return 0.0
 
         else:
             # 既没有 probabilities 也没有 top_k_indices

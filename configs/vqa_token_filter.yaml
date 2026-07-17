@@ -1,0 +1,71 @@
+# VQA Token 过滤器配置
+# 所有配置使用简洁的JSON格式
+
+# 任务类型白名单（Task-aware Whitelists）
+task_whitelists: {
+  "count": ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"],
+  "color": ["red", "green", "blue", "yellow", "orange", "purple", "pink", "brown", "black", "white", "gray", "grey", "cyan", "magenta", "turquoise", "azure", "silver", "golden", "bronze", "maroon", "navy", "teal", "olive", "lime"],
+  "binary": ["yes", "no"]
+}
+
+# 等价Token映射（Equivalent Token Mapping）- 含多语言
+equivalent_tokens: {
+  # 数字类
+  "zero": ["0"],
+  "one": ["1", "a", "an", "single", "uno", "eins", "une", "un", "ones"],
+  "two": ["2", "double", "pair", "zwei", "dos", "deux", "due", "twos"],
+  "three": ["3", "triple", "drei", "tres", "trois", "tre", "threes"],
+  "four": ["4", "quadruple", "vier", "cuatro", "quatre", "quattro", "fours"],
+  "five": ["5", "quintuple", "fünf", "cinco", "cinq", "cinque", "fives"],
+  "six": ["6", "sechs", "seis"],
+  "seven": ["7", "sieben", "siete", "sept", "sette"],
+  "eight": ["8", "acht", "ocho", "huit", "otto"],
+  "nine": ["9", "neun", "nueve", "neuf", "nove"],
+  "ten": ["10", "zehn", "diez", "dix", "dieci"],
+  # 二元答案类
+  "yes": ["yeah", "yep", "sure", "likely", "possibly", "probably", "absolutely", "definitely", "correct", "right"],
+  "no": ["nos", "non", "nah", "nope", "never", "incorrect", "wrong"],
+  # 颜色类（含多语言）
+  "green": ["Green", "GREEN", "greens", "grün", "vert", "verde"],
+  "blue": ["Blue", "BLUE", "blues", "blau", "bleu", "azul"],
+  "red": ["Red", "RED", "reds", "rot", "rouge", "rojo", "rosso"],
+  "yellow": ["Yellow", "YELLOW", "yellows", "gelb", "jaune", "amarillo", "giallo"],
+  "orange": ["Orange", "ORANGE", "oranges"],
+  "purple": ["Purple", "PURPLE", "purples", "lila", "violet", "violeta", "viola"],
+  "pink": ["Pink", "PINK", "pinks", "rosa", "rose"],
+  "brown": ["Brown", "BROWN", "browns", "braun", "marron", "marrón", "marrone"],
+  "black": ["Black", "BLACK", "blacks", "schwarz", "noir", "negro", "nero"],
+  "white": ["White", "WHITE", "whites", "weiß", "blanc", "blanco", "bianco"],
+  "gray": ["Gray", "GRAY", "grey", "Grey", "GREY", "grays", "greys", "grau", "gris"],
+  "cyan": ["Cyan", "CYAN"],
+  "magenta": ["Magenta", "MAGENTA"],
+  "silver": ["Silver", "SILVER", "silber", "argent", "plata", "argento"],
+  "golden": ["Golden", "GOLDEN", "gold", "goldenen", "doré", "dorado", "dorato"]
+}
+
+# 黑名单配置（Blacklists）
+blacklists: {
+  "special_tokens": ["<pad>", "</s>", "<unk>", "<image>", "<bos>", "<eos>", "<s>", "</s>", "â", "<|startoftext|>", "<|im_start|>", "<|im_end|>", "<|im|>", "<|>", "ude", "ude", "ude", "[CLS]", "[SEP]", "ude", "[PAD]", "[UNK]"],
+  "whitespace": ["", " ", "  ", "   ", "\t", "\n", "\r"],
+  "punctuation": [".", ",", "!", "?", ";", ":", "\"", "'", "(", ")", "[", "]", "{", "}", "-", "_", "+", "=", "*", "&", "^", "%", "$", "#", "@", "~", "`", "|", "\\", "/", "<", ">"],
+  "symbol_only": ["@#", "$%", "^^", "***", "---", "___", "...", "!!!"],
+  "short_fragments": ["a", "i", "u", "e", "tw", "ur", "re", "al", "le", "er", "en", "ne", "an", "ar", "te", "ti", "it", "on", "wo", "ul", "us", "at", "of", "be", "ha", "wa", "wh", "ye", "aqu", "gre", "yel", "blu", "blk", "whi", "ora", "pur", "pin", "bro", "gra", "sil", "gol", "emer"],
+  "noise_words": ["the", "a", "an", "this", "that", "these", "those", "in", "on", "at", "to", "for", "of", "with", "by", "from", "up", "down", "over", "under", "it", "they", "he", "she", "we", "you", "i", "me", "him", "her", "and", "or", "but", "so", "because", "if", "when", "where", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would", "can", "could", "should", "may", "might", "must", "not", "very", "too", "also", "just", "only", "even", "there", "here", "what", "how", "why", "which", "who", "whose", "answer", "question", "image", "photo", "picture", "maybe", "none", "bool", "boolean", "true", "false"],
+  "multilingual_noise": ["zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun", "zehn", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez", "une", "deux", "trois", "quatre", "cinq", "sept", "huit", "neuf", "dix", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove", "dieci", "grün", "blau", "rot", "gelb", "lila", "rosa", "braun", "schwarz", "weiß", "grau", "vert", "bleu", "rouge", "jaune", "violet", "rose", "marron", "noir", "blanc", "gris", "verde", "azul", "rojo", "amarillo", "violeta", "negro", "blanco", "rosso", "giallo", "viola", "nero", "bianco"]
+}
+
+# 问题类型关键词
+question_keywords: {
+  "count": ["how many", "how much", "count", "number", "quantity", "多少", "几个", "数量"],
+  "color": ["what color", "color is", "what colour", "colour is", "颜色", "色彩"],
+  "binary": ["is there", "are there", "is it", "are they", "does", "do you", "can you", "could you", "是否", "有没有"]
+}
+
+# 过滤策略配置
+filtering: {
+  "enable_task_aware_filtering": true,
+  "preserve_hard_label": true,
+  "min_probability": 0.001,
+  "max_answers": 50,
+  "min_valid_tokens": 10
+}

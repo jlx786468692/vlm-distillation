@@ -319,34 +319,52 @@ class CoTGenerator:
             raw_reasoning: Raw reasoning text
 
         Returns:
-            Structured reasoning dictionary
+            Structured reasoning dictionary (只保留 observation, analysis, conclusion)
         """
         structured = {
             'observation': '',
             'analysis': '',
-            'reasoning': '',
             'conclusion': '',
         }
 
-        # Try to parse structured sections
-        sections = {
-            'observation': ['first', 'identify', 'observe', 'see', 'notice'],
-            'analysis': ['next', 'analyze', 'consider', 'examine'],
-            'reasoning': ['then', 'therefore', 'because', 'since', 'reason'],
-            'conclusion': ['finally', 'answer', 'result', 'conclusion'],
-        }
+        # 🔧 只提取 assistant 回答部分
+        if 'assistant' in raw_reasoning:
+            response_part = raw_reasoning.split('assistant')[-1]
+        else:
+            response_part = raw_reasoning
 
-        # Extract sections based on keywords
-        for section, keywords in sections.items():
-            for keyword in keywords:
-                if keyword in raw_reasoning.lower():
-                    # Find sentence containing keyword
-                    sentences = raw_reasoning.split('.')
-                    for sentence in sentences:
-                        if keyword in sentence.lower():
-                            structured[section] = sentence.strip()
-                            break
-                    break
+        # 按换行分割，按段落提取
+        lines = response_part.split('\n')
+
+        current_section = None
+        current_content = []
+
+        for line in lines:
+            line_lower = line.lower().strip()
+
+            # 检测步骤标记
+            if any(marker in line_lower for marker in ['step 1', '1.', 'what do you see', 'first']):
+                if current_section and current_content:
+                    structured[current_section] = ' '.join(current_content).strip()
+                current_section = 'observation'
+                current_content = [line.strip()] if line.strip() else []
+            elif any(marker in line_lower for marker in ['step 2', '2.', 'analyze', 'second']):
+                if current_section and current_content:
+                    structured[current_section] = ' '.join(current_content).strip()
+                current_section = 'analysis'
+                current_content = [line.strip()] if line.strip() else []
+            elif any(marker in line_lower for marker in ['step 3', '3.', 'conclusion', 'third', 'finally', 'draw conclusion']):
+                if current_section and current_content:
+                    structured[current_section] = ' '.join(current_content).strip()
+                current_section = 'conclusion'
+                current_content = [line.strip()] if line.strip() else []
+            elif current_section:
+                if line.strip():
+                    current_content.append(line.strip())
+
+        # 保存最后一个步骤
+        if current_section and current_content:
+            structured[current_section] = ' '.join(current_content).strip()
 
         return structured
 
@@ -413,20 +431,31 @@ class CoTGenerator:
             'verification': '',
         }
 
+        # 🔧 只提取 assistant 回答部分
+        if 'assistant' in raw_reasoning:
+            response_part = raw_reasoning.split('assistant')[-1]
+        else:
+            response_part = raw_reasoning
+
+        # 如果回答部分主要是 JSON（没有实际推理），返回空
+        if '```json' in response_part or response_part.strip().startswith('[') or response_part.strip().startswith('{'):
+            # 模型直接输出了 JSON，没有推理过程
+            return structured
+
         sections = {
-            'scanning_method': ['scan', 'search', 'look', 'first'],
-            'object_identification': ['identify', 'detect', 'find', 'object'],
+            'scanning_method': ['scan', 'search', 'look', 'first', 'overall scene'],
+            'object_identification': ['identify', 'detect', 'find', 'object', 'category'],
             'bbox_determination': ['bounding', 'box', 'coordinate', 'position', 'location'],
-            'classification': ['classify', 'category', 'type', 'class'],
-            'verification': ['verify', 'confirm', 'check', 'final'],
+            'classification': ['classify', 'category', 'type', 'class', 'label'],
+            'verification': ['verify', 'confirm', 'check', 'final', 'missed'],
         }
 
         for section, keywords in sections.items():
             for keyword in keywords:
-                if keyword in raw_reasoning.lower():
-                    sentences = raw_reasoning.split('.')
+                if keyword in response_part.lower():
+                    sentences = response_part.split('.')
                     for sentence in sentences:
-                        if keyword in sentence.lower():
+                        if keyword in sentence.lower() and len(sentence.strip()) > 10:
                             structured[section] = sentence.strip()
                             break
                     break
@@ -440,7 +469,7 @@ class CoTGenerator:
         """
         Extract individual reasoning steps.
 
-        改进：更好地处理Detection任务的JSON输出格式
+        改进：只处理 assistant 回答部分，排除 prompt 内容
 
         Args:
             raw_reasoning: Raw reasoning text
@@ -450,18 +479,34 @@ class CoTGenerator:
         """
         steps = []
 
+        # 🔧 只提取 assistant 回答部分
+        if 'assistant' in raw_reasoning:
+            response_part = raw_reasoning.split('assistant')[-1].strip()
+        else:
+            response_part = raw_reasoning
+
+        # 如果回答部分主要是 JSON，返回空（没有推理步骤）
+        if '```json' in response_part or response_part.strip().startswith('['):
+            # 模型直接输出 JSON，没有推理过程
+            steps.append({
+                'step_number': 1,
+                'marker': 'Note',
+                'content': 'Model provided direct JSON output without detailed reasoning'
+            })
+            return steps
+
         # Use regex to find step markers and their content
         # Pattern: (Marker)(optional comma)(content until next marker or end)
         pattern = r'(Step \d+|First|Next|Then|Finally|Therefore)[,:]?\s*'
 
         # Find all matches with their positions
-        matches = list(re.finditer(pattern, raw_reasoning, re.IGNORECASE))
+        matches = list(re.finditer(pattern, response_part, re.IGNORECASE))
 
         if not matches:
             # If no markers found, try to split by numbered steps
             # Pattern: "1. content" or "1) content"
             numbered_pattern = r'(\d+)[.\)]\s*'
-            numbered_matches = list(re.finditer(numbered_pattern, raw_reasoning))
+            numbered_matches = list(re.finditer(numbered_pattern, response_part))
 
             if numbered_matches:
                 for i, match in enumerate(numbered_matches):
@@ -469,14 +514,14 @@ class CoTGenerator:
                     if i + 1 < len(numbered_matches):
                         end_pos = numbered_matches[i + 1].start()
                     else:
-                        end_pos = len(raw_reasoning)
+                        end_pos = len(response_part)
 
-                    content = raw_reasoning[start_pos:end_pos].strip()
+                    content = response_part[start_pos:end_pos].strip()
                     # Clean up content
                     content = re.sub(r'[\.\,]\s*$', '', content)
                     content = content.strip()
 
-                    if content and len(content) > 5:  # Only add meaningful steps
+                    if content and len(content) > 10:  # Only add meaningful steps
                         steps.append({
                             'step_number': i + 1,
                             'marker': match.group(1),
@@ -487,9 +532,9 @@ class CoTGenerator:
                     return steps
 
             # If still no steps found, split by sentences
-            sentences = raw_reasoning.split('.')
+            sentences = response_part.split('.')
             for i, sentence in enumerate(sentences[:5]):  # Limit to 5 steps
-                if sentence.strip() and len(sentence.strip()) > 10:  # Only meaningful sentences
+                if sentence.strip() and len(sentence.strip()) > 15:  # Only meaningful sentences
                     steps.append({
                         'step_number': i + 1,
                         'marker': '',
@@ -506,22 +551,16 @@ class CoTGenerator:
             if i + 1 < len(matches):
                 end_pos = matches[i + 1].start()
             else:
-                end_pos = len(raw_reasoning)
+                end_pos = len(response_part)
 
-            content = raw_reasoning[start_pos:end_pos].strip()
+            content = response_part[start_pos:end_pos].strip()
 
-            # Clean up content: remove trailing punctuation and next step markers
-            # Remove trailing period, comma, or newline followed by numbers
-            content = re.sub(r'[\.\,]\s*(\n\s*\d+\.?)?\s*$', '', content)
-            content = re.sub(r'\n\s*\d+\.\s*', '', content)  # Remove "1." style markers
+            # Clean up content
+            content = re.sub(r'[\.\,]\s*$', '', content)
             content = content.strip()
 
-            # Remove leading comma if present (shouldn't happen with new logic, but safety check)
-            if content.startswith(',') or content.startswith(':'):
-                content = content[1:].strip()
-
             # Only add steps with meaningful content
-            if content and len(content) > 5:
+            if content and len(content) > 10:
                 steps.append({
                     'step_number': i + 1,
                     'marker': marker.strip(),

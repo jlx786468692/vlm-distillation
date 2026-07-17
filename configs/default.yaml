@@ -85,14 +85,14 @@ distillation:
   # Hard label configuration
   hard_labels:
     enabled: true
-    confidence_threshold: 0.7
+    confidence_threshold: 0.55
     save_format: "json"
 
   # Soft label configuration
   soft_labels:
     enabled: true  # 【重新启用】VQA和Detection软标签逻辑已修复
-    temperature: 1.5  # 【优化】从2.0降到1.5，减少KL散度，提高软标签与硬标签一致性
-    top_k_logits: 500  # 【优化】从100增加到500，确保包含低概率答案（如二元答案的对立答案）
+    temperature: 4  # 【优化】温度缩放参数，控制分布平滑度
+    top_k_logits: 50  # 🔧 Topk兜底策略：当白名单过滤后为空时，保留top-50作为兜底
     save_format: "json"
 
   # Chain-of-Thought configuration
@@ -170,6 +170,8 @@ cleaning:
     - "unclear"
     - "no answer"
     - "not sure"
+    - "indeterminate"
+    - " "
 
 # ============================================================
 # 数据可视化配置 (Visualization Configuration)
@@ -280,3 +282,10 @@ visualization:
     enabled: true
     filename: "visualization_report.html"
     include_summary: true
+
+# ============================================================
+# VQA Token 过滤器配置
+# ============================================================
+vqa_token_filter:
+  # 配置文件路径（独立的YAML文件）
+  config_file: "configs/vqa_token_filter.yaml"

@@ -231,13 +231,19 @@ class HardLabelGenerator:
             if confidence >= self.confidence_threshold:
                 filtered_objects.append(obj)
 
+        # 🔧 计算 confidence：使用 objects 的平均置信度
+        if filtered_objects:
+            avg_confidence = sum(obj.get('confidence', 0.9) for obj in filtered_objects) / len(filtered_objects)
+        else:
+            avg_confidence = 0.0
+
         hard_label = {
             'image_id': image_id,
             'task': 'detection',
             'objects': filtered_objects,
             'num_objects': len(filtered_objects),
             'total_detected': len(objects),
-            'confidence': result.get('confidence', 0.0),  # Add overall confidence
+            'confidence': avg_confidence,  # 使用计算的平均置信度
             'timestamp': datetime.now().isoformat(),
         }
 

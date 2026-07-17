@@ -3,10 +3,11 @@ JSON Exporter (重构版)
 ======================
 
 每个图片单独保存为JSON文件，文件名=image_id
-不再使用batch文件和archive归档
+不再保存logits到.pt文件，只保存最终结果
 """
 
 import json
+import torch
 from typing import Dict, Any, Optional
 from pathlib import Path
 from datetime import datetime
@@ -24,6 +25,7 @@ class JSONExporter:
     - 文件名使用image_id（如：391895.json）
     - 直接保存到merged目录，无需后续合并
     - 不使用batch文件和archive归档
+    - 不保存logits（只保存最终结果）
     """
 
     def __init__(
@@ -113,7 +115,7 @@ class JSONExporter:
 
             image_result['metadata']['save_timestamp'] = datetime.now().isoformat()
 
-            # 🔧 关键修复：转换Tensor为可序列化格式
+            # 🔧 转换Tensor为可序列化格式，移除logits
             serializable_result = self._make_serializable(image_result)
 
             # 保存JSON
@@ -253,8 +255,12 @@ class JSONExporter:
                 return None
 
         try:
+            # 加载JSON结果
             with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                result = json.load(f)
+
+            return result
+
         except Exception as e:
             self.logger.error(f"加载图片 {image_id} 结果失败: {e}")
             return None
