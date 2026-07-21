@@ -684,14 +684,9 @@ class CoTHallucinationValidator:
 
                 total_count += 1
 
-                # 从 quality_metrics 或 reasoning_steps 获取步骤数
+                # 从 quality_metrics 获取步骤数
                 quality = cot.get('quality_metrics', {})
                 step_count = quality.get('step_count', 0)
-
-                # 或者从 reasoning_steps 数组计算
-                steps = cot.get('reasoning_steps', [])
-                if steps:
-                    step_count = len(steps)
 
                 if step_count > 0:
                     step_counts.append(step_count)

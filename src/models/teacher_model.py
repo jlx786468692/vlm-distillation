@@ -67,7 +67,7 @@ class TeacherModel:
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load Qwen2.5-VL-7B-Instruct model and components."""
+        """Load Qwen2.5-VL model and components (supports AWQ 4bit)."""
         self.logger.info(f"Loading teacher model: {self.model_name}")
 
         try:
@@ -113,18 +113,39 @@ class TeacherModel:
                 trust_remote_code=True
             )
 
-            # Load model
-            self.logger.info(f"Loading model on {self.device} with {self.precision} precision...")
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                self.model_name,
-                torch_dtype=torch_dtype,
-                device_map=self.device,
-                trust_remote_code=True,
-            )
+            # 🔧 检查是否使用 AWQ 4bit 模型（从配置文件自动检测）
+            use_awq = self.config.get("model.use_awq", False)
+
+            if use_awq:
+                # AWQ 4bit 模型加载（模型配置中已包含量化信息）
+                self.logger.info(f"Loading AWQ 4bit model from {self.model_name}...")
+                self.logger.info("Note: AWQ model will use ~40GB VRAM on GPU")
+
+                # 直接加载，模型配置中已包含 quantization_config
+                self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    self.model_name,
+                    torch_dtype=torch_dtype,
+                    device_map="auto",  # 自动分配到可用设备
+                    trust_remote_code=True,
+                    # AWQ 模型不需要额外的量化配置
+                )
+            else:
+                # 标准 FP16/BF16 加载
+                self.logger.info(f"Loading model on {self.device} with {self.precision} precision...")
+                self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    self.model_name,
+                    torch_dtype=torch_dtype,
+                    device_map=self.device,
+                    trust_remote_code=True,
+                )
 
             self.logger.info("Teacher model loaded successfully")
             self.logger.info(f"Model device: {self.device}")
             self.logger.info(f"Model precision: {self.precision}")
+
+            # 显示模型参数量
+            total_params = sum(p.numel() for p in self.model.parameters())
+            self.logger.info(f"Total parameters: {total_params / 1e9:.2f}B")
 
         except Exception as e:
             self.logger.error(f"Failed to load model: {e}")
@@ -132,6 +153,7 @@ class TeacherModel:
             self.logger.error(f"  1. Use local model path in config: teacher.model_name")
             self.logger.error(f"  2. Use HuggingFace mirror: teacher.hf_mirror: 'https://hf-mirror.com'")
             self.logger.error(f"  3. Download model manually and use local path")
+            self.logger.error(f"  4. Ensure sufficient GPU memory (~40GB for 72B AWQ)")
             raise
 
     def inference_vqa(
@@ -139,7 +161,9 @@ class TeacherModel:
         image: Union[Image.Image, str, Path],
         question: str,
         return_logits: bool = False,
-        generate_cot: bool = False
+        generate_cot: bool = False,
+        primary_answer: Optional[str] = None,
+        allowed_answers: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Perform VQA inference.
@@ -149,18 +173,21 @@ class TeacherModel:
             question: Question string
             return_logits: Whether to return logits for soft labels
             generate_cot: Whether to generate Chain-of-Thought reasoning
+            primary_answer: Reference answer from hard_label (for CoT prompt)
+            allowed_answers: List of allowed answers from soft_label (for CoT prompt)
 
         Returns:
             Dictionary with answer, confidence, and optionally logits/cot
         """
         # Construct prompt
         if generate_cot:
-            prompt = self._construct_cot_prompt(question, task="vqa")
+            system_prompt, user_prompt = self._construct_cot_prompt(question, task="vqa", primary_answer=primary_answer, allowed_answers=allowed_answers)
         else:
-            prompt = self._construct_prompt(question, task="vqa")
+            system_prompt = None
+            user_prompt = self._construct_prompt(question, task="vqa")
 
         # Prepare inputs
-        inputs = self._prepare_inputs(image, prompt)
+        inputs = self._prepare_inputs(image, user_prompt, system_prompt=system_prompt)
 
         # Generate
         outputs = self._generate(inputs, return_logits=return_logits)
@@ -191,12 +218,13 @@ class TeacherModel:
         """
         # Construct prompt
         if generate_cot:
-            prompt = self._construct_cot_prompt("", task="captioning")
+            system_prompt, user_prompt = self._construct_cot_prompt("", task="captioning")
         else:
-            prompt = self._construct_prompt("", task="captioning")
+            system_prompt = None
+            user_prompt = self._construct_prompt("", task="captioning")
 
         # Prepare inputs
-        inputs = self._prepare_inputs(image, prompt)
+        inputs = self._prepare_inputs(image, user_prompt, system_prompt=system_prompt)
 
         # Generate multiple captions if requested
         captions = []
@@ -218,11 +246,6 @@ class TeacherModel:
         if return_logits:
             result['logits'] = all_logits
 
-        if generate_cot:
-            # Generate separate CoT
-            cot_result = self._generate_cot(image, task="captioning")
-            result['cot'] = cot_result
-
         return result
 
     def inference_detection(
@@ -238,7 +261,7 @@ class TeacherModel:
         Args:
             image: PIL Image or image path
             return_logits: Whether to return logits
-            generate_cot: Whether to generate CoT
+            generate_cot: Whether to generate CoT (returns text reasoning only)
             max_retries: Maximum retries if JSON parsing fails (default: 2)
 
         Returns:
@@ -246,14 +269,40 @@ class TeacherModel:
         """
         # Construct prompt
         if generate_cot:
-            prompt = self._construct_cot_prompt("", task="detection")
+            system_prompt, user_prompt = self._construct_cot_prompt("", task="detection")
         else:
-            prompt = self._construct_prompt("", task="detection")
+            system_prompt = None
+            user_prompt = self._construct_prompt("", task="detection")
 
         # Prepare inputs
-        inputs = self._prepare_inputs(image, prompt)
+        inputs = self._prepare_inputs(image, user_prompt, system_prompt=system_prompt)
 
-        # Try generation with retries
+        # Generate
+        outputs = self._generate(
+            inputs,
+            return_logits=return_logits,
+            max_new_tokens=self.max_detection_tokens,
+            temperature=self.detection_temperature,
+            top_p=self.detection_top_p
+        )
+
+        # 🔧 CoT模式：只返回纯文本推理，不解析JSON
+        if generate_cot:
+            generated_ids = outputs.sequences
+            generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+            result = {
+                'full_response': generated_text,
+                'objects': [],  # CoT模式不返回检测结果
+            }
+
+            if return_logits:
+                logits = self._process_logits(outputs.scores)
+                result['logits'] = logits
+
+            return result
+
+        # 🔧 非CoT模式：解析JSON获取检测结果
         for attempt in range(max_retries + 1):
             # Generate with optimized parameters for detection
             # Increase temperature slightly on retries for more diversity
@@ -310,17 +359,35 @@ class TeacherModel:
         """
         # Construct prompt
         if generate_cot:
-            prompt = self._construct_cot_prompt("", task="keypoints")
+            system_prompt, user_prompt = self._construct_cot_prompt("", task="keypoints")
         else:
-            prompt = self._construct_prompt("", task="keypoints")
+            system_prompt = None
+            user_prompt = self._construct_prompt("", task="keypoints")
 
         # Prepare inputs
-        inputs = self._prepare_inputs(image, prompt)
+        inputs = self._prepare_inputs(image, user_prompt, system_prompt=system_prompt)
 
         # Generate
         outputs = self._generate(inputs, return_logits=return_logits)
 
-        # Process outputs
+        # 🔧 CoT模式：只返回纯文本推理，不解析JSON
+        if generate_cot:
+            generated_ids = outputs.sequences
+            generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+            result = {
+                'full_response': generated_text,
+                'persons': [],  # CoT模式不返回检测结果
+                'num_persons': 0,
+            }
+
+            if return_logits:
+                logits = self._process_logits(outputs.scores)
+                result['logits'] = logits
+
+            return result
+
+        # 🔧 非CoT模式：解析JSON获取检测结果
         result = self._process_keypoints_outputs(outputs, return_logits)
 
         return result
@@ -346,57 +413,72 @@ class TeacherModel:
         self.logger.debug(f"Loading prompt for task '{task}' from config")
         self.logger.debug(f"Prompt template (first 100 chars): {prompt_template[:100]}")
 
-        # 支持变量插值（如 {question}）
+        # 支持变量插值 - 使用replace代替format避免大括号冲突
         try:
             if '{question}' in prompt_template:
-                prompt = prompt_template.format(question=question)
+                prompt = prompt_template.replace('{question}', question)
                 self.logger.debug(f"Formatted prompt with question: {question}")
             else:
                 prompt = prompt_template
-        except KeyError as e:
-            self.logger.warning(f"Prompt template missing variable: {e}")
+        except Exception as e:
+            self.logger.warning(f"Prompt template error: {e}")
             prompt = prompt_template
 
         return prompt.strip()
 
-    def _construct_cot_prompt(self, question: str, task: str) -> str:
+    def _construct_cot_prompt(self, question: str, task: str, primary_answer: Optional[str] = None, allowed_answers: Optional[List[str]] = None) -> tuple:
         """
-        Construct Chain-of-Thought prompt from configuration file.
+        Construct Chain-of-Thought prompt with system/user role separation.
+
+        🔧 核心拆分原则：
+        - YAML层：只存储纯文本内容，无角色标识
+        - 代码层：完成角色分配，规则作system消息，参数作user消息
 
         Args:
             question: Question for VQA
             task: Task type
+            primary_answer: Reference answer from hard_label (optional)
+            allowed_answers: List of allowed answers from soft_label (optional)
 
         Returns:
-            CoT-formatted prompt
+            (system_prompt, user_prompt) tuple
         """
-        # 从配置文件读取 CoT prompt
-        cot_template = self.config.get(
-            f'prompts.cot.{task}',
-            self.config.get('prompts.default.cot', "Analyze this image step by step.")
+        # 🔧 从配置读取 system 规则和 user 模板（分离存储）
+        system_template = self.config.get(
+            f'prompts.cot.{task}_system',
+            "Analyze this image step by step."
+        )
+        user_template = self.config.get(
+            f'prompts.cot.{task}_user',
+            "{question}"
         )
 
-        # 调试日志：显示实际使用的 prompt
         self.logger.debug(f"Loading CoT prompt for task '{task}' from config")
-        self.logger.debug(f"CoT template (first 100 chars): {cot_template[:100]}")
 
-        # 支持变量插值（如 {question}）
+        # 🔧 system 消息：通用硬性规则（无需变量替换）
+        system_prompt = system_template.strip()
+
+        # 🔧 user 消息：单条样本专属参数（需要变量替换）
+        user_prompt = user_template
         try:
-            if '{question}' in cot_template:
-                prompt = cot_template.format(question=question)
-                self.logger.debug(f"Formatted CoT prompt with question: {question}")
-            else:
-                prompt = cot_template
-        except KeyError as e:
-            self.logger.warning(f"CoT prompt template missing variable: {e}")
-            prompt = cot_template
+            if '{question}' in user_prompt:
+                user_prompt = user_prompt.replace('{question}', question)
+            if '{primary_answer}' in user_prompt and primary_answer:
+                user_prompt = user_prompt.replace('{primary_answer}', primary_answer)
+            if '{allowed_answers}' in user_prompt and allowed_answers:
+                answers_str = ', '.join(allowed_answers[:10])
+                user_prompt = user_prompt.replace('{allowed_answers}', answers_str)
+            self.logger.debug(f"Formatted user prompt for task '{task}'")
+        except Exception as e:
+            self.logger.warning(f"CoT user prompt error: {e}")
 
-        return prompt.strip()
+        return system_prompt, user_prompt.strip()
 
     def _prepare_inputs(
         self,
         image: Union[Image.Image, str, Path],
-        prompt: str
+        prompt: str,
+        system_prompt: Optional[str] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Prepare inputs for model inference.
@@ -413,15 +495,23 @@ class TeacherModel:
             image = Image.open(image).convert('RGB')
 
         # Construct message format for Qwen-VL
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ]
+        messages = []
+
+        # 🔧 添加 system 消息（如果提供）
+        if system_prompt:
+            messages.append({
+                "role": "system",
+                "content": system_prompt
+            })
+
+        # 添加 user 消息（包含图片和问题）
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": prompt},
+            ],
+        })
 
         # Apply chat template
         text = self.processor.apply_chat_template(
@@ -1191,7 +1281,11 @@ class TeacherModel:
             return objects
 
     def _parse_detection_response(self, text: str) -> List[Dict]:
-        """Parse detected objects from response.
+        """
+        Parse detected objects from response.
+
+        🔧 重要：此方法仅用于 detection hard_label 解析 JSON 输出
+        CoT 分支不应调用此方法，CoT 只输出纯文本推理
 
         Handles multiple formats:
         - Markdown code blocks: ```json [...] ```
@@ -1208,7 +1302,7 @@ class TeacherModel:
             import json
             import re
 
-            self.logger.debug(f"Attempting to parse detection response: {text[:200]}")
+            self.logger.debug(f"[Detection JSON解析] 尝试解析: {text[:200]}")
 
             # Method 1: Extract from markdown code blocks (most common for VLM outputs)
             # Pattern: ```json ... ``` or ``` ... ```
@@ -1442,13 +1536,14 @@ class TeacherModel:
                             objects = parsed['objects']
                         self.logger.debug(f"Successfully parsed {len(objects)} objects from balanced braces")
                     except json.JSONDecodeError as e:
-                        self.logger.warning(f"Failed to parse balanced JSON: {e}")
-                        self.logger.warning(f"Raw response that failed: {repr(text[start:end])}")
+                        # JSON解析失败，可能是模型输出格式问题
+                        self.logger.debug(f"[Detection JSON解析] 平衡括号解析失败: {e}")
+                        self.logger.debug(f"[Detection JSON解析] 失败内容: {repr(text[start:end])}")
 
             # Method 6: Manual extraction fallback
             if not objects:
-                self.logger.warning(f"No JSON objects found, trying manual extraction")
-                self.logger.warning(f"Full raw response text: {repr(text[:500])}")
+                self.logger.debug(f"[Detection JSON解析] 未找到JSON对象，尝试手动提取")
+                self.logger.debug(f"[Detection JSON解析] 原始文本: {repr(text[:500])}")
 
                 # Try to extract bbox patterns like [x, y, x, y] or (x, y, x, y)
                 bbox_pattern = r'\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
@@ -1467,14 +1562,14 @@ class TeacherModel:
                         'bbox': bbox,
                         'confidence': 0.5
                     })
-                    self.logger.debug(f"Manually extracted object: {category} at {bbox}")
+                    self.logger.debug(f"[Detection JSON解析] 手动提取对象: {category} at {bbox}")
 
                 if objects:
-                    self.logger.info(f"Extracted {len(objects)} objects using manual fallback")
+                    self.logger.debug(f"[Detection JSON解析] 手动提取到 {len(objects)} 个对象")
 
         except Exception as e:
-            self.logger.error(f"Unexpected error parsing detection response: {e}")
-            self.logger.warning(f"Raw response text: {repr(text[:500])}")
+            self.logger.error(f"[Detection JSON解析] 解析过程发生错误: {e}")
+            self.logger.debug(f"[Detection JSON解析] 原始文本: {repr(text[:500])}")
 
         return objects
 
@@ -1814,7 +1909,7 @@ class TeacherModel:
             if token_probs:
                 confidence = token_probs[0]  # 第一个token的概率
                 
-                self.logger.debug(f"Confidence (first token): {confidence:.4f}")
+                self.logger.error(f"Confidence (first token): {confidence:.4f}")
                 return confidence
             else:
                 return 0.0
@@ -1823,20 +1918,6 @@ class TeacherModel:
             # 既没有 probabilities 也没有 top_k_indices
             self.logger.warning("logits_data missing both 'probabilities' and 'top_k_indices'")
             return 0.0
-
-    def _generate_cot(
-        self,
-        image: Union[Image.Image, str, Path],
-        task: str
-    ) -> str:
-        """Generate Chain-of-Thought reasoning."""
-        cot_prompt = self._construct_cot_prompt("", task)
-        inputs = self._prepare_inputs(image, cot_prompt)
-
-        outputs = self._generate(inputs, max_new_tokens=512)
-        generated_text = self.tokenizer.decode(outputs.sequences[0], skip_special_tokens=True)
-
-        return generated_text
 
     def batch_inference(
         self,

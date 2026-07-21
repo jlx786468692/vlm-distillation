@@ -1,9 +1,9 @@
-# Token过滤策略详细说明
+# Token过滤完整指南
 
 ## 📋 目录
 
 1. [策略概述](#策略概述)
-2. [三层防护逻辑（最新修复）](#三层防护逻辑最新修复)
+2. [三层防护逻辑](#三层防护逻辑)
 3. [设计思路](#设计思路)
 4. [完整处理流程](#完整处理流程)
 5. [核心实现步骤](#核心实现步骤)
@@ -11,8 +11,10 @@
 7. [等价Token合并](#等价token合并)
 8. [配置参数说明](#配置参数说明)
 9. [效果示例](#效果示例)
-10. [测试验证](#测试验证)
-11. [相关文件](#相关文件)
+10. [问题诊断与修复](#问题诊断与修复)
+11. [测试验证](#测试验证)
+12. [性能影响](#性能影响)
+13. [相关文件](#相关文件)
 
 ---
 
@@ -68,7 +70,7 @@
 
 ---
 
-## 三层防护逻辑（最新修复）
+## 三层防护逻辑
 
 > **修复日期**: 2026-07-17  
 > **修复原因**: 根据业界标准的VQA过滤实践（Blacklist + Hard Label Protection + Top-K Fallback），完善了代码实现
@@ -216,103 +218,6 @@ if num_valid < min_valid_tokens and num_valid > 0:
 | **Top-K兜底** | ❌ 仅在"全部过滤"时触发 | ✅ 少于10个时补充 |
 | **特殊Token黑名单** | ❌ 不完整 | ✅ 完整黑名单 |
 
-### 代码修改详情
-
-#### 修改文件1: `src/utils/vqa_token_filter.py`
-
-**新增黑名单**（第20-48行）：
-
-```python
-# ===== 🔧 第一层：黑名单（核心防线） =====
-
-# 1. 特殊Token黑名单（模型内部Token）
-self.special_token_blacklist = {
-    '<pad>', '</s>', '<unk>', '<image>', '<bos>', '<eos>',
-    '<s>', '</s>', '
-```
-
-**修改 `is_valid_token` 方法**（第279-353行）：
-
-```python
-def is_valid_token(self, token: str, question: Optional[str] = None) -> bool:
-    """
-    判断token是否为有效答案
-
-    🔧 三层防护策略：
-    第一层：黑名单（核心防线）- 拦截不可能作为单字答案的Token
-    第二层：上下文感知过滤 - 根据问题类型筛选有效答案
-    第三层：兜底策略 - 确保不至于过度过滤
-    """
-    token_lower = token.lower().strip()
-
-    # ===== 第一层：黑名单过滤（核心防线） =====
-    # 1. 空token
-    if not token_lower:
-        return False
-
-    # 2. 纯空格/空字符串
-    if token_lower in self.whitespace_blacklist:
-        return False
-
-    # 3. 特殊Token
-    if token_lower in self.special_token_blacklist:
-        return False
-
-    # 4. 标点符号
-    if token_lower in self.punctuation_blacklist:
-        return False
-
-    # 5. 纯符号组合
-    if token_lower in self.symbol_only_blacklist:
-        return False
-
-    # 6. BPE子词碎片（关键）
-    if token.startswith('Ġ') or token.startswith('Ġ'):
-        return False
-
-    # ... 其余逻辑 ...
-```
-
-#### 修改文件2: `src/distillation/soft_label_gen.py`
-
-**修改 `_process_vqa_logits` 方法**（第620-692行）：
-
-关键改进：
-1. 第二层保护前移到Token ID层级
-2. 第三层改为"少于10个token时补充"
-
-```python
-# ===== 🔧 三层防护策略（VQA过滤标准实践） =====
-
-# 第二层：硬标签保护（Token ID层级）
-hard_label_token_ids = set()
-if primary_answer_lower:
-    try:
-        encoded_ids = self.teacher.tokenizer.encode(primary_answer_lower, add_special_tokens=False)
-        hard_label_token_ids = set(encoded_ids)
-    except Exception as e:
-        self.logger.warning(f"[Hard Label Protection] Failed: {e}")
-
-# 第一层 + 第二层：黑名单 + 硬标签保护
-for i, token_id in enumerate(first_token_indices):
-    # 第二层：硬标签保护（优先）
-    if token_id.item() in hard_label_token_ids:
-        valid_token_mask[i] = True
-        continue
-    
-    # 第一层：黑名单过滤
-    if self.token_filter.is_valid_token(token_str, question):
-        valid_token_mask[i] = True
-
-# 第三层：Top-K兜底（多样性保障）
-min_valid_tokens = 10
-num_valid = valid_token_mask.sum().item()
-
-if num_valid < min_valid_tokens and num_valid > 0:
-    # 从Top-K补充（使用较宽松的过滤策略）
-    # ...
-```
-
 ---
 
 ## 设计思路
@@ -438,17 +343,6 @@ if num_valid < min_valid_tokens and num_valid > 0:
 | **第一层：黑名单** | 拦截明确噪音 | ✅ 必要：BPE碎片、标点符号等绝不可能是答案 |
 | **第二层：硬标签保护** | 保护正确答案 | ✅ 必要：防止误过滤，确保数据质量 |
 | **第三层：Top-K兜底** | 多样性保障 | ✅ 必要：防止过度过滤，保留候选集 |
-
-### 与白名单策略的对比
-
-| 对比项 | 白名单策略 | 三层防护策略（本项目） |
-|--------|-----------|------------------------|
-| **核心思路** | 只保留预定义的有效答案 | 拦截明确噪音 + 保护正确答案 |
-| **上下文感知** | 根据问题类型使用不同白名单 | 黑名单无上下文，硬标签保护无上下文 |
-| **适用场景** | 答案类型有限且明确 | VQA答案多样，难以预定义 |
-| **遗漏风险** | 高（未预定义的有效答案会被过滤） | 低（只过滤明确噪音） |
-| **噪音保留** | 低（精准过滤） | 中等（可能保留少量噪音） |
-| **实现复杂度** | 中等（需要维护多个白名单） | 低（维护一个黑名单即可） |
 
 ### 设计优势
 
@@ -755,42 +649,6 @@ token_probs = torch.softmax(scaled_logits_filtered, dim=-1)
 - 当 `x_i = -1e9` 时，`exp(-1e9) ≈ 0`
 - 无效token的概率接近0，自然被剔除
 
-### Step 6-9: 后处理
-
-**位置**: `src/distillation/soft_label_gen.py:729-766`
-
-```python
-# Step 6: 解码并过滤低概率token
-items = []
-for idx, prob_val in zip(first_token_indices, token_probs):
-    if prob_val < 0.001:  # 过滤概率 < 0.1%
-        continue
-    word = self.teacher.tokenizer.decode([idx.item()]).strip().lower()
-    if word and word not in ['<s>', '</s>', '<pad>', ...]:
-        items.append((word, float(prob_val)))
-
-# Step 7: 合并等价token
-word_probs = {}
-for word, prob in items:
-    canonical = token_filter.get_canonical_token(word)
-    if canonical in word_probs:
-        word_probs[canonical] += prob  # 合并概率
-    else:
-        word_probs[canonical] = prob
-
-# Step 8: 归一化
-total_prob = sum(word_probs.values())
-if total_prob > 0:
-    word_probs = {k: v/total_prob for k, v in word_probs.items()}
-
-# Step 9: 字符串层级二次过滤（安全网）
-distribution = token_filter.filter_distribution(
-    distribution=word_probs,
-    question=question,
-    primary_answer=primary_answer
-)
-```
-
 ---
 
 ## 代码实现详解
@@ -1007,6 +865,14 @@ distillation:
 - `top_k_logits` 是兜底参数，不是默认使用
 - 三层防护是主策略，top_k只是备选
 
+### 推荐配置值
+
+| 场景 | temperature | top_k_logits | 说明 |
+|------|-------------|--------------|------|
+| **快速测试** | 4 | 20-30 | 减少计算开销 |
+| **生产环境** | 4 | 50 | 默认推荐值 |
+| **高质量蒸馏** | 4-8 | 100-200 | 更多候选答案，计算开销增加 |
+
 ---
 
 ## 效果示例
@@ -1079,38 +945,7 @@ distillation:
   + 7个补充的低概率token
 ```
 
-### 示例3：极端情况（第三层Top-K兜底）
-
-```
-问题: "What is the shape of this object?"
-
-原始Logits分布:
-  'round': 0.35
-  'square': 0.30
-  'triangle': 0.20
-  'Ġt': 0.10        ✗ 噪音（BPE碎片）
-  '.': 0.05         ✗ 噪音（标点符号）
-
-第一层：黑名单过滤:
-  过滤掉: Ġt, .（明确噪音）
-  保留: round, square, triangle
-
-有效token数 = 3 < 10
-
-第三层：Top-K补充:
-  从Top-100补充到至少10个token
-  使用宽松过滤策略（不使用上下文感知）
-
-最终分布:
-  'round': 0.35
-  'square': 0.30
-  'triangle': 0.20
-  'oval': 0.08      （补充）
-  'circle': 0.05    （补充）
-  ...               （补充5个低概率token）
-```
-
-### 示例4：硬标签保护生效（关键示例）
+### 示例3：硬标签保护生效（关键示例）
 
 ```
 问题: "How many apples are there?"
@@ -1143,15 +978,219 @@ distillation:
 ✅ 硬标签保护确保正确答案永不丢失
 ```
 
-### 关键对比：有无硬标签保护
+---
 
-| 场景 | 无硬标签保护 | 有硬标签保护 |
-|------|-------------|-------------|
-| 正常情况 | ✅ 正确答案保留 | ✅ 正确答案保留 |
-| 黑名单误伤 | ❌ 正确答案丢失（灾难性） | ✅ 正确答案保留（安全网） |
-| 编码问题 | ❌ 可能丢失 | ✅ Token ID层级保护 |
+## 问题诊断与修复
 
-**结论**：硬标签保护是必要的安全网，防止误过滤导致的数据质量问题。
+### 问题1：噪音Token未被过滤
+
+**问题描述**：
+
+在计数题的分布中，发现以下噪音token未被过滤：
+
+```json
+{
+  "one": 0.3308,
+  "two": 0.2694,
+  "yes": 0.1192,    // ❌ 应该被过滤（二元答案）
+  "no": 0.0717,     // ❌ 应该被过滤（二元答案）
+  "three": 0.0683,
+  "zero": 0.0587,
+  "four": 0.0359,
+  "five": 0.0232,
+  "tw": 0.0122,     // ❌ 应该被过滤（碎片token）
+  "six": 0.0106
+}
+```
+
+**问题原因**：
+
+1. **"tw" 未在黑名单中**
+   - 原因: `tw` 碎片token未添加到 `short_fragments` 黑名单
+   - 解决: 已添加到配置文件
+
+2. **"yes/no" 未被任务适配过滤**
+   - 可能原因：
+     - 任务适配过滤未执行
+     - 配置文件路径错误
+     - 任务类型推断错误
+
+**修复方案**：
+
+#### 修复1：添加碎片Token到黑名单
+
+```yaml
+# configs/vqa_token_filter.yaml
+"short_fragments": ["a", "i", "u", "e", "tw", ...]
+```
+
+#### 修复2：检查VQATokenFilter初始化
+
+```python
+# ❌ 错误：初始化失败
+self.token_filter = VQATokenFilter()
+
+# ✅ 正确：带异常处理
+try:
+    self.token_filter = VQATokenFilter()
+    self.logger.info("✓ VQA Token过滤器初始化成功")
+except Exception as e:
+    self.logger.warning(f"VQA Token过滤器初始化失败: {e}")
+    self.token_filter = None
+```
+
+#### 修复3：检查配置文件路径
+
+```yaml
+# configs/default.yaml
+vqa_token_filter:
+  config_file: "configs/vqa_token_filter.yaml"  # 确保路径正确
+```
+
+**验证测试**：
+
+```bash
+# 测试计数题过滤
+python scripts/test_counting_filter.py
+
+# 测试配置加载
+python scripts/test_config_loading.py
+
+# 运行实际数据处理
+python scripts/run_pipeline.py --max_samples 10 --steps distillation
+```
+
+---
+
+### 问题2：Top-K配置未生效
+
+**问题描述**：
+
+日志显示：
+```
+[Blacklist Filter] 389/500 tokens passed blacklist filter
+```
+
+但配置文件中 `top_k_logits` 设置为 50：
+```yaml
+distillation:
+  soft_labels:
+    top_k_logits: 50  # 配置值为 50
+```
+
+预期应该是：`389/50 tokens passed blacklist filter`
+
+**问题原因**：
+
+在 `src/models/teacher_model.py` 中：
+
+```python
+# 第1591行 - 错误的代码
+top_k = self.config.get('distillation.soft_labels.top_k', 500)  # ❌ 默认值是 500
+```
+
+问题：
+1. **配置键错误**: 使用了 `'distillation.soft_labels.top_k'` 而不是 `'distillation.soft_labels.top_k_logits'`
+2. **默认值错误**: 默认值硬编码为 500，而不是从配置文件读取
+
+**影响分析**：
+
+| 影响类型 | 说明 |
+|---------|------|
+| **内存使用** | 处理 500 个 tokens 而不是 50 个，内存占用增加 10 倍 |
+| **计算时间** | Blacklist filter 检查 500 个 tokens，耗时增加 10 倍 |
+| **日志可读性** | 显示 "500 tokens" 让用户困惑配置是否生效 |
+| **数据质量** | 无影响（最终保留数量由 `max_answers` 控制） |
+
+**修复方案**：
+
+```python
+# 修复前
+top_k = self.config.get('distillation.soft_labels.top_k', 500)
+
+# 修复后
+top_k = self.config.get('distillation.soft_labels.top_k_logits', 50)  # ✓ 使用正确的配置键和默认值
+```
+
+**验证测试**：
+
+```bash
+# 测试配置读取
+python scripts/test_top_k_config.py
+
+# 运行实际数据处理
+python scripts/run_pipeline.py --steps distillation --max_samples 10
+```
+
+预期日志：
+```
+[Blacklist Filter] 38/50 tokens passed blacklist filter  # ✓ 现在是 50 个 tokens
+```
+
+**性能对比**：
+
+| 指标 | 修复前 (top_k=500) | 修复后 (top_k=50) | 提升 |
+|------|-------------------|------------------|------|
+| 内存使用 | ~2KB/sample | ~0.2KB/sample | 10倍 |
+| Blacklist检查 | 500 tokens | 50 tokens | 10倍 |
+
+---
+
+### 问题3：Prompt模板大括号冲突
+
+**问题描述**：
+
+JSON 格式示例中的大括号 `{}` 被 Python 的 `.format()` 误解析为格式化占位符。
+
+**修复方案**：
+
+将 `.format()` 改为 `.replace()` 方法：
+
+```python
+# 修复前（有问题）
+prompt = cot_template.format(**format_kwargs)
+
+# 修复后（正确）
+prompt = cot_template
+if '{question}' in prompt:
+    prompt = prompt.replace('{question}', question)
+if '{primary_answer}' in prompt and primary_answer:
+    prompt = prompt.replace('{primary_answer}', primary_answer)
+if '{allowed_answers}' in prompt and allowed_answers:
+    prompt = prompt.replace('{allowed_answers}', answers_str)
+```
+
+**位置**: `src/models/teacher_model.py:430-442`
+
+---
+
+### 问题4：CoT输出过于简洁
+
+**问题描述**：
+
+`Observation` 输出过于简洁（如只输出 "White"）。
+
+**问题原因**：
+
+Prompt 模板中 `Observation:` 后没有指导内容，模型不知道应该写什么。
+
+**修复方案**：
+
+添加明确的写作指导：
+
+```yaml
+# 修复前
+Observation:
+Analysis:
+Conclusion:
+
+# 修复后
+Observation: Describe what you see in the image - the main objects, their colors, positions, quantities, and key visual features. Be specific and factual.
+Analysis: Analyze how these observations relate to the question. Compare visual evidence and rule out uncertain details.
+Conclusion: Summarize the reasoning and provide the Final Answer matching the reference answer exactly.
+```
+
+**位置**: `configs/prompts_en.yaml:82-84`
 
 ---
 
@@ -1159,29 +1198,67 @@ distillation:
 
 ### 测试脚本
 
-创建了测试脚本 `scripts/test_three_layer_filter.py`，包含以下测试：
-
-#### 1. 第一层测试：黑名单过滤
+#### 1. 三层防护验证
 
 ```bash
 python scripts/test_three_layer_filter.py
 ```
 
 验证内容：
-- ✅ BPE子词碎片过滤（'Ġt', 'Ġa', 'ur'等）
-- ✅ 标点符号、特殊Token、纯空格
+- ✅ 第一层：黑名单过滤（BPE碎片、标点符号等）
+- ✅ 第二层：硬标签保护
+- ✅ 第三层：Top-K兜底
 
-#### 2. 第二层测试：硬标签保护
+#### 2. 黑名单策略对比
 
-验证内容：
-- ✅ 主答案被强制保留，即使被黑名单误伤
+```bash
+python scripts/test_blacklist_strategy.py
+```
 
-#### 3. 第三层测试：Top-K兜底
+#### 3. 等价Token合并测试
 
-验证内容：
-- ✅ 当过滤后Token少于10个时，自动补充
+```bash
+python scripts/test_merge_quick.py
+```
 
-### 运行测试
+#### 4. 计数题过滤测试
+
+```bash
+python scripts/test_counting_filter.py
+```
+
+预期输出：
+```
+✓ 'tw' 被正确识别为无效token（噪音）
+✓ 'yes' 在 binary 白名单中: True
+✓ 'no' 在 binary 白名单中: True
+✓ 'yes' 在 count 白名单中: False
+✓ 'no' 在 count 白名单中: False
+```
+
+#### 5. 配置加载测试
+
+```bash
+python scripts/test_config_loading.py
+```
+
+预期输出：
+```
+Step 1: 黑名单过滤
+  ✓ 'tw' 已被黑名单过滤
+
+Step 2: 任务适配过滤
+  ✓ 'yes' 已被过滤
+  ✓ 'no' 已被过滤
+
+最终分布：
+  one: 0.3308
+  two: 0.2694
+  three: 0.0683
+  ...
+```
+
+### 运行完整测试
 
 ```bash
 # 验证三层防护逻辑
@@ -1192,16 +1269,9 @@ python scripts/visualize_logits_comparison.py
 
 # 测试等价token合并
 python scripts/test_merge_quick.py
-```
 
-### 预期输出
-
-```
-✓ 所有测试通过！
-三层防护逻辑验证成功：
-  ✓ 第一层：黑名单过滤正常工作
-  ✓ 第二层：硬标签保护正常工作
-  ✓ 第三层：Top-K兜底正常工作
+# 验证黑名单策略对比
+python scripts/test_blacklist_strategy.py
 ```
 
 ---
@@ -1222,56 +1292,27 @@ python scripts/test_merge_quick.py
 
 ---
 
-## 兼容性
-
-### 向后兼容
-
-- ✅ 是（不影响已有的硬标签数据）
-
-### 配置文件
-
-- ✅ 无需修改配置
-
-### 依赖库
-
-- ✅ 无新增依赖
-
----
-
-## 后续工作
-
-1. 在实际数据集上验证过滤效果
-2. 调整 `min_valid_tokens` 参数（当前为10）
-3. 收集更多BPE子词碎片模式，持续完善黑名单
-4. 添加更多测试用例，覆盖边缘情况
-
----
-
 ## 相关文件
 
 ### 核心实现文件
 
 | 文件 | 功能 | 关键行号 |
 |------|------|---------|
-| [`src/utils/vqa_token_filter.py`](src/utils/vqa_token_filter.py) | Token过滤器实现（三层防护） | 20-48, 279-353 |
-| [`src/distillation/soft_label_gen.py`](src/distillation/soft_label_gen.py) | 软标签生成器（三层防护） | 620-692 |
-| [`src/models/teacher_model.py`](src/models/teacher_model.py) | Teacher模型推理 | 137-637 |
-| [`configs/default.yaml`](configs/default.yaml) | 配置文件 | 91-96 |
+| [src/utils/vqa_token_filter.py](../src/utils/vqa_token_filter.py) | Token过滤器实现（三层防护） | 20-48, 279-353 |
+| [src/distillation/soft_label_gen.py](../src/distillation/soft_label_gen.py) | 软标签生成器（三层防护） | 620-692 |
+| [src/models/teacher_model.py](../src/models/teacher_model.py) | Teacher模型推理 | 137-637 |
+| [configs/default.yaml](../configs/default.yaml) | 配置文件 | 91-96 |
+| [configs/vqa_token_filter.yaml](../configs/vqa_token_filter.yaml) | Token过滤配置 | - |
 
 ### 测试和可视化脚本
 
 | 文件 | 功能 |
 |------|------|
-| [`scripts/test_three_layer_filter.py`](scripts/test_three_layer_filter.py) | 三层防护验证测试 |
-| [`scripts/test_blacklist_strategy.py`](scripts/test_blacklist_strategy.py) | 黑名单策略对比测试 |
-| [`scripts/visualize_logits_comparison.py`](scripts/visualize_logits_comparison.py) | Logits处理可视化 |
-| [`scripts/test_merge_quick.py`](scripts/test_merge_quick.py) | 等价token合并测试 |
-
-### 文档
-
-| 文件 | 功能 |
-|------|------|
-| 本文档 | Token过滤策略详细说明 |
+| [scripts/test_three_layer_filter.py](../scripts/test_three_layer_filter.py) | 三层防护验证测试 |
+| [scripts/test_blacklist_strategy.py](../scripts/test_blacklist_strategy.py) | 黑名单策略对比测试 |
+| [scripts/visualize_logits_comparison.py](../scripts/visualize_logits_comparison.py) | Logits处理可视化 |
+| [scripts/test_merge_quick.py](../scripts/test_merge_quick.py) | 等价token合并测试 |
+| [scripts/test_counting_filter.py](../scripts/test_counting_filter.py) | 计数题过滤测试 |
 
 ---
 
@@ -1291,6 +1332,12 @@ python scripts/visualize_logits_comparison.py
 
 # 测试等价token合并
 python scripts/test_merge_quick.py
+
+# 测试计数题过滤
+python scripts/test_counting_filter.py
+
+# 测试配置加载
+python scripts/test_config_loading.py
 ```
 
 ### 调整配置
@@ -1327,49 +1374,26 @@ distillation:
 | **实现简单** | 维护一个黑名单即可，无需维护多个白名单 |
 | **配置灵活** | 通过配置文件调整参数 |
 
-### 与白名单策略的对比
+---
 
-| 对比项 | 白名单策略 | 三层防护策略（本项目） |
-|--------|-----------|------------------------|
-| **核心思路** | 只保留预定义的有效答案 | 拦截明确噪音 + 保护正确答案 |
-| **遗漏风险** | 高（未预定义的有效答案会被过滤） | 低（只过滤明确噪音） |
-| **噪音保留** | 低（精准过滤） | 中等（可能保留少量噪音） |
-| **实现复杂度** | 中等（需要维护多个白名单） | 低（维护一个黑名单） |
-| **适用场景** | 答案类型有限且明确 | VQA答案多样，难以预定义 |
+## 更新日志
 
-### 适用场景
+### v4.0 (2026-07-21)
+- 合并 `Token过滤策略说明.md`、`VQA_Token过滤问题诊断.md`、`Top-K配置问题修复.md`
+- 整合为完整的 Token 过滤指南
+- 添加问题诊断与修复章节
 
-- ✅ VQA任务软标签生成
-- ✅ 知识蒸馏中的Teacher模型输出处理
-- ✅ 需要精准过滤噪音token的场景
-- ✅ 答案类型多样，难以预定义的场景
-- ✅ 需要等价token合并的场景
+### v3.1 (2026-07-21)
+- 修复 `.format()` 大括号冲突问题，改用 `.replace()` 方法
+- 优化 VQA CoT prompt 模板，增强 Observation 输出质量
+- 添加 CoT 解析调试日志，便于诊断模型输出问题
+- 排除 `allowed_answers` 字段，不保存到 JSON 输出
 
-### 关键改进
-
-#### 修复前的问题
-
-1. **黑名单不完整**：缺少对BPE子词碎片（'Ġ'开头）的过滤
-2. **硬标签保护位置错误**：在字符串层级保护，而不是Token ID层级
-3. **Top-K兜底逻辑缺陷**：只在"所有token被过滤"时触发，而不是"少于N个"
-
-#### 修复后的改进
-
-1. **黑名单完善**：增加了BPE碎片、特殊Token、标点符号的完整黑名单
-2. **硬标签保护前置**：在Token ID层级就进行硬标签保护，避免编码问题
-3. **Top-K兜底优化**：改为"少于10个token时补充"，保留多样性
+### v3.0 (2026-07-17)
+- 从白名单策略改为黑名单+硬标签保护+Top-K兜底的三层防护策略
 
 ---
 
-## 参考资料
-
-- VQA数据集论文：Goyal et al., 2017
-- Knowledge Distillation：Hinton et al., 2015
-- BPE分词算法：Sennrich et al., 2016
-
----
-
-**文档版本**: v3.0（三层防护策略）  
-**最后更新**: 2026-07-17  
-**重大更新**: 从白名单策略改为黑名单+硬标签保护+Top-K兜底的三层防护策略  
+**文档版本**: v4.0（完整合并版）
+**最后更新**: 2026-07-21
 **维护者**: VLM Distillation Team

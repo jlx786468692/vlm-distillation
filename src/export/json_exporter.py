@@ -92,7 +92,7 @@ class JSONExporter:
             self.logger.warning(f"图片 {image_id} 结果结构无效，跳过保存")
             return False
 
-        # 关键改进：从image_path提取原始文件名
+        # 🔧 修复：从image_path提取原始文件名
         # 例如：/data/coco/val2014/COCO_val2014_000000391895.jpg -> COCO_val2014_000000391895
         image_path = image_result.get('image_path', '')
 
@@ -102,14 +102,21 @@ class JSONExporter:
             filename = PathLib(image_path).stem  # 去掉.jpg扩展名
             json_filename = f"{filename}.json"
         else:
-            # 如果没有image_path，使用image_id
-            json_filename = f"{image_id}.json"
+            # 如果没有image_path，使用image_id构建COCO格式文件名
+            # 假设image_id是整数或字符串形式的数字
+            try:
+                # 尝试格式化为COCO格式
+                image_id_int = int(image_id)
+                json_filename = f"COCO_val2014_{image_id_int:012d}.json"
+            except (ValueError, TypeError):
+                # 如果转换失败，直接使用image_id
+                json_filename = f"{image_id}.json"
 
         # 构建文件路径：merged/{filename}.json
         output_path = self.merged_dir / json_filename
 
         try:
-            # 添加保存时间戳
+            # 添加保存时间戳到metadata
             if 'metadata' not in image_result:
                 image_result['metadata'] = {}
 
@@ -141,7 +148,7 @@ class JSONExporter:
         Args:
             batch_results: 批处理结果，包含:
                 - batch_id: 批次ID
-                - images: 图片结果列表
+                - images: 图片结果列表（每个元素是完整的图片结果字典）
 
         Returns:
             保存统计信息
@@ -160,6 +167,7 @@ class JSONExporter:
         failed_count = 0
 
         for image_result in images:
+            # 🔧 修复：image_result现在是完整的图片结果，包含image_id, image_path, tasks等
             image_id = image_result.get('image_id')
 
             if self.save_image_result(image_result, image_id):
@@ -195,7 +203,7 @@ class JSONExporter:
         Returns:
             True if valid
         """
-        # 必需的顶级字段
+        # 必需的顶级字段（修复：不再需要task字段，改为tasks）
         required_keys = ['image_id']
 
         for key in required_keys:
@@ -213,6 +221,13 @@ class JSONExporter:
                 if not isinstance(task_data, dict):
                     self.logger.warning(f"任务 {task_name} 数据应为字典类型")
                     return False
+
+                # 验证task_data中不应包含image_id和task字段（这些应该在顶层）
+                if 'image_id' in task_data or 'task' in task_data:
+                    self.logger.warning(
+                        f"任务 {task_name} 包含冗余字段 (image_id/task)，"
+                        f"这些字段应该在顶层"
+                    )
 
         return True
 
@@ -335,9 +350,11 @@ class JSONExporter:
             # topk数据：用于内部概率计算
             # logits相关：模型输出的原始logits数据
             # token_ids：答案token序列，用于置信度计算
+            # allowed_answers：仅用于构建CoT prompt，不需要保存
             excluded_keys = {
                 'top_k_indices', 'top_k_values', 'top_k', 'vocab_size',  # topk数据
                 'logits', 'answer_token_ids',  # logits相关数据
+                'allowed_answers',  # 仅用于prompt构建，无需保存
             }
             return {
                 k: self._make_serializable(v)

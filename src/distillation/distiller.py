@@ -243,18 +243,32 @@ class Distiller:
             image_id = img_data['id']
             image_path = img_data['path']
 
+            self.logger.info(f"Processing image {image_id}")
+
+            # 🔧 修复：一个图片所有task的结果合并到一个文件中
+            # 目标JSON结构：
+            # {
+            #   "image_id": 45687,
+            #   "image_path": "data/coco/val2014/COCO_val2014_000000045687.jpg",
+            #   "tasks": {
+            #     "vqa": { "question": "...", "timestamp": "...", "hard_label": {...}, "soft_label": {...}, "cot_reasoning": {...} },
+            #     "detection": { "timestamp": "...", "hard_label": {...}, "soft_label": {...}, "cot_reasoning": {...} }
+            #   },
+            #   "metadata": { ... }
+            # }
+
+            # 初始化图片结果
             image_result = {
                 'image_id': image_id,
                 'image_path': image_path,
                 'tasks': {},
             }
 
-            self.logger.info(f"Processing image {image_id}")
+            # 记录处理开始时间
+            process_start_time = time.time()
 
             # Generate for each task
             for task in self.tasks:
-                task_result = {}
-
                 # 🔧 新方案：Hard Label + Soft Label 用一次推理，CoT 单独推理
                 #
                 # 推理 1: Standard Prompt → hard_label + soft_label
@@ -265,52 +279,74 @@ class Distiller:
                 #   - 使用推理 prompt，获取详细推理过程
                 #   - 答案可能与 hard_label 不同，这是正常的
                 #
+                # 🔧 修复：将task结果嵌套到tasks对象中，而不是顶层
+
+                # 初始化task结果
+                task_result = {}
+
+                # 对于VQA，添加question字段
+                if task == 'vqa':
+                    questions = batch_data['annotations']['vqa'].get(image_id, [])
+                    if questions:
+                        task_result['question'] = questions[0].get('question', '')
+
+                # 添加时间戳
+                task_result['timestamp'] = datetime.now().isoformat()
 
                 # Step 1: 生成 Hard Label（获取 logits 供 Soft Label 使用）
                 if self.enable_hard_labels:
-                    start_time = time.time()
                     hard_labels = self._generate_task_hard_labels(
                         task, batch_data, image_id, image_path,
                         cot_result=None  # 不从 CoT 提取，单独推理
                     )
                     task_result['hard_label'] = hard_labels
-                    task_result['hard_label_time'] = time.time() - start_time
 
                 # Step 2: 生成 Soft Label（使用 hard_label 的 logits）
                 if self.enable_soft_labels:
-                    start_time = time.time()
                     hard_label_for_soft = task_result.get('hard_label') if self.enable_hard_labels else None
                     soft_labels = self._generate_task_soft_labels(
                         task, batch_data, image_id, image_path,
                         hard_label_result=hard_label_for_soft
                     )
                     task_result['soft_label'] = soft_labels
-                    task_result['soft_label_time'] = time.time() - start_time
 
                 # Step 3: 生成 CoT（单独推理）
                 if self.enable_cot:
-                    start_time = time.time()
+                    # 🔧 第一层重构：从 soft_label 获取 primary_answer 和合法答案列表
+                    primary_answer = None
+                    allowed_answers = None
+                    if task == 'vqa':
+                        # 优先使用 soft_label 的数据（包含合法答案列表）
+                        if self.enable_soft_labels and task_result.get('soft_label'):
+                            soft_label_data = task_result['soft_label']
+                            primary_answer = soft_label_data.get('primary_answer', '')
+                            allowed_answers = soft_label_data.get('allowed_answers', [])
+                        # 备选：使用 hard_label 的 answer
+                        elif self.enable_hard_labels and 'answer' in task_result.get('hard_label', {}):
+                            primary_answer = task_result['hard_label']['answer']
+                            allowed_answers = [primary_answer]  # 单一答案
+
                     cot = self._generate_task_cot(
-                        task, batch_data, image_id, image_path
+                        task, batch_data, image_id, image_path,
+                        primary_answer=primary_answer,
+                        allowed_answers=allowed_answers
                     )
                     task_result['cot_reasoning'] = cot
-                    task_result['cot_time'] = time.time() - start_time
 
+                # 将task结果添加到tasks对象中
                 image_result['tasks'][task] = task_result
 
-            # Add metadata
+            # 添加metadata
+            process_end_time = time.time()
             image_result['metadata'] = {
                 'teacher_model': self.teacher.model_name,
                 'processing_timestamp': datetime.now().isoformat(),
-                'total_time': sum(
-                    t.get('hard_label_time', 0) +
-                    t.get('soft_label_time', 0) +
-                    t.get('cot_time', 0)
-                    for t in image_result['tasks'].values()
-                ),
+                'total_time': process_end_time - process_start_time,
             }
 
-            batch_results['images'].append(image_result)
+            # 🔧 修复：一个图片只保存一次，包含所有task的结果
+            self.exporter.save_image_result(image_result, image_id)
+            batch_results['images'].append(image_result)  # 保存完整结果用于统计
 
         return batch_results
 
@@ -325,9 +361,10 @@ class Distiller:
         """
         Generate hard labels for specific task.
 
-        新方案：直接推理获取 hard_label，不从 CoT 提取
+        新方案：直接推理获取 hard_label + logits，避免重复推理
         - 使用 Standard prompt，获取准确答案
         - 获取 logits 供 soft_label 使用
+        - 返回包含 logits 的完整结果
 
         Args:
             task: Task type
@@ -337,90 +374,108 @@ class Distiller:
             cot_result: 保留参数兼容，但不再使用
 
         Returns:
-            Hard label dictionary
+            Hard label dictionary with logits
         """
-        # 直接调用模型推理
+        # 🔧 新方案：直接调用 teacher model，避免重复推理
         if task == 'vqa':
             questions = batch_data['annotations']['vqa'].get(image_id, [])
             if questions:
                 question = questions[0].get('question', '')
-                return self.hard_label_gen.generate_vqa_hard_labels(
-                    image_path=image_path,
+
+                # 一次推理获取所有需要的数据
+                result = self.teacher.inference_vqa(
+                    image=image_path,
                     question=question,
-                    image_id=str(image_id)
+                    return_logits=True,  # 获取 logits
+                    generate_cot=False
                 )
+
+                # 构建 hard_label
+                hard_label = {
+                    'answer': result.get('answer', ''),
+                    'confidence': result.get('confidence', 0.0),
+                    'logits': result.get('logits', {})  # 包含 logits 供 soft_label 使用
+                }
+
+                # 应用置信度过滤
+                if hard_label['confidence'] < self.hard_label_gen.confidence_threshold:
+                    hard_label['filtered'] = True
+
+                return hard_label
             return {}
 
         elif task == 'captioning':
-            return self.hard_label_gen.generate_captioning_hard_labels(
-                image_path=image_path,
-                num_captions=3,
-                image_id=str(image_id)
+            result = self.teacher.inference_captioning(
+                image=image_path,
+                return_logits=True,
+                generate_cot=False,
+                num_captions=3
             )
+
+            captions = result.get('captions', [])
+            hard_label = {
+                'captions': captions,
+                'num_captions': len(captions),
+                'primary_caption': captions[0] if captions else '',
+                'confidence': result.get('confidence', 0.0),
+                'logits': result.get('logits', {})
+            }
+            return hard_label
 
         elif task == 'detection':
-            return self.hard_label_gen.generate_detection_hard_labels(
-                image_path=image_path,
-                image_id=str(image_id)
+            result = self.teacher.inference_detection(
+                image=image_path,
+                return_logits=True,  # 获取 logits
+                generate_cot=False
             )
+
+            objects = result.get('objects', [])
+
+            # 应用置信度过滤
+            filtered_objects = [
+                obj for obj in objects
+                if obj.get('confidence', 1.0) >= self.hard_label_gen.confidence_threshold
+            ]
+
+            # 计算平均置信度
+            avg_confidence = (
+                sum(obj.get('confidence', 0.9) for obj in filtered_objects) / len(filtered_objects)
+                if filtered_objects else 0.0
+            )
+
+            hard_label = {
+                'objects': filtered_objects,
+                'num_objects': len(filtered_objects),
+                'total_detected': len(objects),
+                'confidence': avg_confidence,
+                'logits': result.get('logits', {})
+            }
+            return hard_label
 
         elif task == 'keypoints':
-            return self.hard_label_gen.generate_keypoints_hard_labels(
-                image_path=image_path,
-                image_id=str(image_id)
+            result = self.teacher.inference_keypoints(
+                image=image_path,
+                return_logits=True,
+                generate_cot=False
             )
 
+            persons = result.get('persons', [])
+
+            # 过滤可见关键点不足的人
+            filtered_persons = [
+                person for person in persons
+                if sum(1 for kp in person.get('keypoints', []) if kp.get('visibility', 0) >= 2) >= 5
+            ]
+
+            hard_label = {
+                'persons': filtered_persons,
+                'num_persons': len(filtered_persons),
+                'total_detected': len(persons),
+                'logits': result.get('logits', {})
+            }
+            return hard_label
+
         return {}
-
-    def _extract_objects_from_cot(self, raw_reasoning: str) -> Optional[List[Dict]]:
-        """
-        从CoT推理结果中提取检测到的物体。
-
-        Args:
-            raw_reasoning: CoT推理的完整文本
-
-        Returns:
-            检测到的物体列表，如果解析失败返回None
-        """
-        import json
-        import re
-
-        # 查找JSON块（通常在```json ... ```中）
-        json_pattern = r'```(?:json)?\s*\n?(.*?)\n?```'
-        match = re.search(json_pattern, raw_reasoning, re.DOTALL)
-
-        if match:
-            json_content = match.group(1).strip()
-
-            try:
-                parsed = json.loads(json_content)
-
-                # 处理不同的格式
-                objects = []
-                if isinstance(parsed, list):
-                    objects = parsed
-                elif isinstance(parsed, dict) and 'objects' in parsed:
-                    objects = parsed['objects']
-
-                # 规范化字段名
-                for obj in objects:
-                    if 'bbox_2d' in obj:
-                        obj['bbox'] = obj.pop('bbox_2d')
-                    if 'label' in obj and 'category' not in obj:
-                        obj['category'] = obj.pop('label')
-                    if 'confidence' not in obj:
-                        obj['confidence'] = 0.9
-
-                self.logger.debug(f"Successfully extracted {len(objects)} objects from CoT JSON")
-                return objects  # 返回列表（可能为空）
-
-            except json.JSONDecodeError as e:
-                self.logger.debug(f"Failed to parse JSON from CoT: {e}")
-                return None  # 解析失败
-
-        # 没有找到JSON块
-        self.logger.debug("No JSON block found in CoT reasoning")
-        return None  # 解析失败
 
     def _generate_task_soft_labels(
         self,
@@ -485,9 +540,21 @@ class Distiller:
         task: str,
         batch_data: Dict,
         image_id: int,
-        image_path: str
+        image_path: str,
+        primary_answer: Optional[str] = None,
+        allowed_answers: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """Generate CoT for specific task."""
+        """
+        Generate CoT for specific task.
+
+        Args:
+            task: Task type
+            batch_data: Batch data
+            image_id: Image ID
+            image_path: Image path
+            primary_answer: Reference answer from hard_label (for VQA CoT)
+            allowed_answers: List of allowed answers from soft_label (for VQA CoT)
+        """
         if task == 'vqa':
             questions = batch_data['annotations']['vqa'].get(image_id, [])
             if questions:
@@ -495,7 +562,9 @@ class Distiller:
                 return self.cot_gen.generate_vqa_cot(
                     image_path=image_path,
                     question=question,
-                    image_id=str(image_id)
+                    image_id=str(image_id),
+                    primary_answer=primary_answer,
+                    allowed_answers=allowed_answers
                 )
             return {}
 

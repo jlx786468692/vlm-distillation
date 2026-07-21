@@ -48,12 +48,12 @@ class CoTGenerator:
         self.structured_output = self.config.get("distillation.cot.structured_output", True)
 
         # Required keywords for reasoning validation - task-specific
-        # Detection使用STEP格式，不同于VQA的First/Next/Then格式
+        # 🔧 新方案：匹配纯文本三段格式
         self.required_keywords_by_task = {
-            'vqa': ['first', 'next', 'then', 'finally', 'therefore', 'because', 'so'],
-            'captioning': ['first', 'next', 'then', 'finally', 'describe', 'identify'],
-            'detection': ['step', 'scan', 'verify', 'check', 'format', 'json'],  # Detection使用STEP标记
-            'keypoints': ['first', 'identify', 'locate', 'estimate', 'finally']
+            'vqa': ['observation', 'analysis', 'conclusion', 'final answer'],
+            'captioning': ['subject', 'attributes', 'scene'],
+            'detection': ['scanning', 'objects', 'verification'],
+            'keypoints': ['persons', 'keypoints', 'summary']
         }
         # 通用关键词（用于向后兼容）
         self.required_keywords = self.required_keywords_by_task['vqa']
@@ -62,7 +62,9 @@ class CoTGenerator:
         self,
         image_path: str,
         question: str,
-        image_id: Optional[str] = None
+        image_id: Optional[str] = None,
+        primary_answer: Optional[str] = None,
+        allowed_answers: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Generate CoT reasoning for VQA.
@@ -71,6 +73,8 @@ class CoTGenerator:
             image_path: Path to image
             question: Question text
             image_id: Image identifier
+            primary_answer: Reference answer from hard_label (for CoT prompt)
+            allowed_answers: List of allowed answers from soft_label (for CoT prompt)
 
         Returns:
             CoT reasoning dictionary
@@ -78,37 +82,32 @@ class CoTGenerator:
         self.logger.debug(f"Generating VQA CoT for image {image_id}")
 
         # Get teacher model inference with CoT
-        # 🔧 新方案：CoT 单独推理，不需要 logits
+        # 🔧 第一层：传入 primary_answer 和 allowed_answers
         result = self.teacher.inference_vqa(
             image=image_path,
             question=question,
             return_logits=False,  # 不需要 logits
-            generate_cot=True
+            generate_cot=True,
+            primary_answer=primary_answer,
+            allowed_answers=allowed_answers
         )
 
         # Extract and structure CoT
         full_response = result.get('full_response', '')
 
-        cot_data = {
-            'image_id': image_id,
-            'task': 'vqa',
-            'question': question,
-            'raw_reasoning': full_response,
-            'timestamp': datetime.now().isoformat(),
-        }
+        cot_data = {}
 
         # Structure the reasoning
         if self.structured_output:
             structured = self._structure_vqa_reasoning(full_response)
             cot_data['structured_reasoning'] = structured
 
-        # Extract steps
-        if self.include_intermediate_steps:
-            steps = self._extract_reasoning_steps(full_response)
-            cot_data['reasoning_steps'] = steps
-
         # Validate reasoning quality
-        cot_data['quality_metrics'] = self._validate_reasoning_quality(full_response, task='vqa')
+        quality_metrics = self._validate_reasoning_quality(full_response, task='vqa')
+        # 🔧 修复：将is_valid放入quality_metrics对象中
+        cot_data['quality_metrics'] = {
+            'is_valid': quality_metrics.get('is_valid', False)
+        }
 
         return cot_data
 
@@ -141,25 +140,19 @@ class CoTGenerator:
         full_response = result.get('full_response', '')
         cot_response = result.get('cot', full_response)
 
-        cot_data = {
-            'image_id': image_id,
-            'task': 'captioning',
-            'raw_reasoning': cot_response,
-            'timestamp': datetime.now().isoformat(),
-        }
+        cot_data = {}
 
         # Structure reasoning
         if self.structured_output:
             structured = self._structure_captioning_reasoning(cot_response)
             cot_data['structured_reasoning'] = structured
 
-        # Extract steps
-        if self.include_intermediate_steps:
-            steps = self._extract_reasoning_steps(cot_response)
-            cot_data['reasoning_steps'] = steps
-
         # Quality metrics
-        cot_data['quality_metrics'] = self._validate_reasoning_quality(cot_response, task='captioning')
+        quality_metrics = self._validate_reasoning_quality(cot_response, task='captioning')
+        # 🔧 修复：将is_valid放入quality_metrics对象中
+        cot_data['quality_metrics'] = {
+            'is_valid': quality_metrics.get('is_valid', False)
+        }
 
         return cot_data
 
@@ -189,33 +182,20 @@ class CoTGenerator:
 
         full_response = result.get('full_response', '')
 
-        cot_data = {
-            'image_id': image_id,
-            'task': 'detection',
-            'raw_reasoning': full_response,
-            'timestamp': datetime.now().isoformat(),
-        }
+        cot_data = {}
 
         # Structure reasoning
         if self.structured_output:
             structured = self._structure_detection_reasoning(full_response)
-            # 🔧 最小修复：如果结构化推理全部为空，不保存空字段
-            if structured and any(v for v in structured.values() if v):
-                cot_data['structured_reasoning'] = structured
-            else:
-                cot_data['structured_reasoning'] = {"note": "Model returned direct JSON output without step-by-step reasoning"}
-
-        # Extract steps
-        if self.include_intermediate_steps:
-            steps = self._extract_reasoning_steps(full_response)
-            # 🔧 最小修复：如果没有有效步骤，标记原因
-            if steps and len(steps) == 1 and steps[0].get('content') == 'No reasoning provided':
-                cot_data['reasoning_steps'] = [{'step_number': 1, 'marker': 'Note', 'content': 'Model provided direct JSON output without detailed reasoning'}]
-            else:
-                cot_data['reasoning_steps'] = steps
+            # 🔧 _structure_detection_reasoning 已经会处理空的情况，直接使用
+            cot_data['structured_reasoning'] = structured
 
         # Quality metrics
-        cot_data['quality_metrics'] = self._validate_reasoning_quality(full_response, task='detection')
+        quality_metrics = self._validate_reasoning_quality(full_response, task='detection')
+        # 🔧 修复：将is_valid放入quality_metrics对象中
+        cot_data['quality_metrics'] = {
+            'is_valid': quality_metrics.get('is_valid', False)
+        }
 
         return cot_data
 
@@ -245,25 +225,19 @@ class CoTGenerator:
 
         full_response = result.get('full_response', '')
 
-        cot_data = {
-            'image_id': image_id,
-            'task': 'keypoints',
-            'raw_reasoning': full_response,
-            'timestamp': datetime.now().isoformat(),
-        }
+        cot_data = {}
 
         # Structure reasoning
         if self.structured_output:
             structured = self._structure_keypoints_reasoning(full_response)
             cot_data['structured_reasoning'] = structured
 
-        # Extract steps
-        if self.include_intermediate_steps:
-            steps = self._extract_reasoning_steps(full_response)
-            cot_data['reasoning_steps'] = steps
-
         # Quality metrics
-        cot_data['quality_metrics'] = self._validate_reasoning_quality(full_response, task='keypoints')
+        quality_metrics = self._validate_reasoning_quality(full_response, task='keypoints')
+        # 🔧 修复：将is_valid放入quality_metrics对象中
+        cot_data['quality_metrics'] = {
+            'is_valid': quality_metrics.get('is_valid', False)
+        }
 
         return cot_data
 
@@ -274,6 +248,17 @@ class CoTGenerator:
         """
         Structure keypoints reasoning.
 
+        🔧 新方案：解析纯三段自然文本格式
+        格式：
+        Persons:
+        [段落内容]
+
+        Keypoints:
+        [段落内容]
+
+        Summary:
+        [段落内容]
+
         Args:
             raw_reasoning: Raw reasoning text
 
@@ -281,30 +266,77 @@ class CoTGenerator:
             Structured reasoning
         """
         structured = {
-            'person_detection': '',
-            'head_face_keypoints': '',
-            'upper_body_keypoints': '',
-            'lower_body_keypoints': '',
-            'pose_summary': '',
+            'persons': '',
+            'keypoints': '',
+            'summary': '',
         }
 
-        sections = {
-            'person_detection': ['person', 'people', 'detect', 'identify', 'first'],
-            'head_face_keypoints': ['head', 'face', 'nose', 'eye', 'ear'],
-            'upper_body_keypoints': ['shoulder', 'elbow', 'wrist', 'arm', 'upper'],
-            'lower_body_keypoints': ['hip', 'knee', 'ankle', 'leg', 'lower'],
-            'pose_summary': ['pose', 'complete', 'final', 'summary', 'finally'],
+        # 提取assistant回复
+        if 'assistant' in raw_reasoning:
+            response_part = raw_reasoning.split('assistant')[-1]
+        else:
+            response_part = raw_reasoning
+
+        # 定义标签映射
+        label_patterns = {
+            'persons': [
+                r'Persons\s*:',
+                r'Step\s*1\s*:',
+            ],
+            'keypoints': [
+                r'Keypoints\s*:',
+                r'Step\s*2\s*:',
+            ],
+            'summary': [
+                r'Summary\s*:',
+                r'Step\s*3\s*:',
+            ],
         }
 
-        for section, keywords in sections.items():
-            for keyword in keywords:
-                if keyword in raw_reasoning.lower():
-                    sentences = raw_reasoning.split('.')
-                    for sentence in sentences:
-                        if keyword in sentence.lower():
-                            structured[section] = sentence.strip()
-                            break
-                    break
+        import re
+
+        for section, patterns in label_patterns.items():
+            for pattern in patterns:
+                regex = rf'{pattern}\s*(.*?)(?=(?:Persons|Keypoints|Summary|Step)\s*:|$)'
+                match = re.search(regex, response_part, re.DOTALL | re.IGNORECASE)
+                if match:
+                    content = match.group(1).strip()
+                    if content:
+                        content = self._clean_reasoning_text(content)
+                        structured[section] = content
+                        break
+
+        # 如果正则没有匹配到，尝试按行解析
+        if not any(structured.values()):
+            lines = response_part.split('\n')
+            current_section = None
+            current_content = []
+
+            for line in lines:
+                line_lower = line.lower().strip()
+
+                if 'persons' in line_lower or 'step 1' in line_lower:
+                    if current_section and current_content:
+                        structured[current_section] = ' '.join(current_content).strip()
+                    current_section = 'persons'
+                    current_content = []
+                elif 'keypoints' in line_lower or 'step 2' in line_lower:
+                    if current_section and current_content:
+                        structured[current_section] = ' '.join(current_content).strip()
+                    current_section = 'keypoints'
+                    current_content = []
+                elif 'summary' in line_lower or 'step 3' in line_lower:
+                    if current_section and current_content:
+                        structured[current_section] = ' '.join(current_content).strip()
+                    current_section = 'summary'
+                    current_content = []
+                elif current_section:
+                    cleaned_line = line.strip()
+                    if cleaned_line and not cleaned_line.startswith('```') and not cleaned_line.startswith('{'):
+                        current_content.append(cleaned_line)
+
+            if current_section and current_content:
+                structured[current_section] = ' '.join(current_content).strip()
 
         return structured
 
@@ -315,11 +347,22 @@ class CoTGenerator:
         """
         Structure VQA reasoning into components.
 
+        🔧 新方案：解析纯三段自然文本格式
+        格式：
+        Observation:
+        [段落内容]
+
+        Analysis:
+        [段落内容]
+
+        Conclusion:
+        [段落内容]
+
         Args:
             raw_reasoning: Raw reasoning text
 
         Returns:
-            Structured reasoning dictionary (只保留 observation, analysis, conclusion)
+            Structured reasoning dictionary (observation, analysis, conclusion)
         """
         structured = {
             'observation': '',
@@ -327,14 +370,130 @@ class CoTGenerator:
             'conclusion': '',
         }
 
-        # 🔧 只提取 assistant 回答部分
+        # 提取assistant回复
         if 'assistant' in raw_reasoning:
             response_part = raw_reasoning.split('assistant')[-1]
         else:
             response_part = raw_reasoning
 
-        # 按换行分割，按段落提取
-        lines = response_part.split('\n')
+        # 🔧 调试：显示原始回复内容（前500字符）
+        self.logger.debug(f"[CoT解析] 原始回复长度: {len(raw_reasoning)}")
+        self.logger.debug(f"[CoT解析] 处理后回复 (前500字符): {response_part[:500]}")
+
+        # 🔧 核心逻辑：按标签分割三段文本
+        # 匹配模式：Label: 后面跟着段落内容
+        # 支持多种标签格式：Observation/Analysis/Conclusion 或 Segment 1/2/3
+
+        # 定义标签映射
+        label_patterns = {
+            'observation': [
+                r'Observation\s*:',
+                r'Segment\s*1\s*:',
+                r'Step\s*1\s*:',
+                r'1\.\s*Observation',
+            ],
+            'analysis': [
+                r'Analysis\s*:',
+                r'Segment\s*2\s*:',
+                r'Step\s*2\s*:',
+                r'2\.\s*Analysis',
+            ],
+            'conclusion': [
+                r'Conclusion\s*:',
+                r'Segment\s*3\s*:',
+                r'Step\s*3\s*:',
+                r'3\.\s*Conclusion',
+            ],
+        }
+
+        # 使用正则表达式提取每段内容
+        import re
+
+        for section, patterns in label_patterns.items():
+            for pattern in patterns:
+                # 匹配：标签: 后面的内容（直到下一个标签或文本结束）
+                # 使用非贪婪匹配，避免跨段落
+                regex = rf'{pattern}\s*(.*?)(?=(?:Observation|Analysis|Conclusion|Segment|Step)\s*:|$)'
+                match = re.search(regex, response_part, re.DOTALL | re.IGNORECASE)
+                if match:
+                    content = match.group(1).strip()
+                    if content:
+                        # 清理内容：移除可能的JSON格式符号
+                        content = self._clean_reasoning_text(content)
+                        if content:  # 清理后再次检查
+                            structured[section] = content
+                            self.logger.debug(f"[CoT解析] {section}: 匹配成功，长度={len(content)}")
+                            break
+
+        # 如果正则没有匹配到，尝试按行解析
+        if not any(structured.values()):
+            self.logger.debug(f"[CoT解析] 正则匹配失败，尝试按行解析")
+            structured = self._parse_reasoning_by_lines(response_part)
+
+        # 🔧 如果仍然为空，记录警告并显示实际内容
+        if not any(structured.values()):
+            self.logger.warning(f"[CoT解析] 所有字段为空，模型可能没有按格式输出")
+            self.logger.warning(f"[CoT解析] 实际回复内容 (前200字符): {response_part[:200]}")
+
+        return structured
+
+    def _clean_reasoning_text(self, text: str) -> str:
+        """
+        清理推理文本，移除JSON格式符号。
+
+        Args:
+            text: 原始文本
+
+        Returns:
+            清理后的纯文本
+        """
+        import re
+
+        original_text = text  # 保存原始文本用于调试
+
+        # 移除开头的标签示例（如 "Observation:" 本身）
+        text = re.sub(r'^(Observation|Analysis|Conclusion|Segment\s*\d+)\s*:\s*', '', text, flags=re.IGNORECASE)
+
+        # 移除可能的JSON格式符号
+        # 但保留 "Final Answer: xxx" 这样的自然文本
+
+        # 移除单独的 {} 符号
+        text = re.sub(r'\{[^{}]*\}', '', text)
+
+        # 移除 ```json ... ``` 代码块
+        text = re.sub(r'```json\s*.*?```', '', text, flags=re.DOTALL)
+        text = re.sub(r'```\s*.*?```', '', text, flags=re.DOTALL)
+
+        # 移除多余的空白行
+        text = re.sub(r'\n\s*\n', '\n', text)
+
+        # 清理开头和结尾的空白
+        text = text.strip()
+
+        # 🔧 如果清理后为空，返回原始文本
+        if not text:
+            self.logger.debug(f"[CoT清理] 清理后文本为空，返回原始文本")
+            return original_text.strip()
+
+        return text
+
+    def _parse_reasoning_by_lines(self, text: str) -> Dict[str, str]:
+        """
+        按行解析推理文本（备用方法）。
+
+        Args:
+            text: 原始文本
+
+        Returns:
+            结构化的推理字典
+        """
+        structured = {
+            'observation': '',
+            'analysis': '',
+            'conclusion': '',
+        }
+
+        lines = text.split('\n')
 
         current_section = None
         current_content = []
@@ -342,27 +501,29 @@ class CoTGenerator:
         for line in lines:
             line_lower = line.lower().strip()
 
-            # 检测步骤标记
-            if any(marker in line_lower for marker in ['step 1', '1.', 'what do you see', 'first']):
+            # 检测段落标签
+            if 'observation' in line_lower or 'segment 1' in line_lower or 'step 1' in line_lower:
                 if current_section and current_content:
                     structured[current_section] = ' '.join(current_content).strip()
                 current_section = 'observation'
-                current_content = [line.strip()] if line.strip() else []
-            elif any(marker in line_lower for marker in ['step 2', '2.', 'analyze', 'second']):
+                current_content = []
+            elif 'analysis' in line_lower or 'segment 2' in line_lower or 'step 2' in line_lower:
                 if current_section and current_content:
                     structured[current_section] = ' '.join(current_content).strip()
                 current_section = 'analysis'
-                current_content = [line.strip()] if line.strip() else []
-            elif any(marker in line_lower for marker in ['step 3', '3.', 'conclusion', 'third', 'finally', 'draw conclusion']):
+                current_content = []
+            elif 'conclusion' in line_lower or 'segment 3' in line_lower or 'step 3' in line_lower:
                 if current_section and current_content:
                     structured[current_section] = ' '.join(current_content).strip()
                 current_section = 'conclusion'
-                current_content = [line.strip()] if line.strip() else []
+                current_content = []
             elif current_section:
-                if line.strip():
-                    current_content.append(line.strip())
+                # 收集当前段落的内容
+                cleaned_line = line.strip()
+                if cleaned_line and not cleaned_line.startswith('```') and not cleaned_line.startswith('{'):
+                    current_content.append(cleaned_line)
 
-        # 保存最后一个步骤
+        # 保存最后一个段落
         if current_section and current_content:
             structured[current_section] = ' '.join(current_content).strip()
 
@@ -375,6 +536,17 @@ class CoTGenerator:
         """
         Structure captioning reasoning.
 
+        🔧 新方案：解析纯三段自然文本格式
+        格式：
+        Subject:
+        [段落内容]
+
+        Attributes:
+        [段落内容]
+
+        Scene:
+        [段落内容]
+
         Args:
             raw_reasoning: Raw reasoning text
 
@@ -382,31 +554,77 @@ class CoTGenerator:
             Structured reasoning
         """
         structured = {
-            'subject_identification': '',
-            'attribute_description': '',
-            'scene_description': '',
-            'action_description': '',
-            'final_caption': '',
+            'subject': '',
+            'attributes': '',
+            'scene': '',
         }
 
-        # Extract components
-        sections = {
-            'subject_identification': ['main subject', 'object', 'person', 'first'],
-            'attribute_description': ['attribute', 'color', 'size', 'shape', 'next'],
-            'scene_description': ['scene', 'background', 'setting', 'location', 'then'],
-            'action_description': ['action', 'activity', 'doing', 'movement'],
-            'final_caption': ['caption', 'description', 'final', 'finally'],
+        # 提取assistant回复
+        if 'assistant' in raw_reasoning:
+            response_part = raw_reasoning.split('assistant')[-1]
+        else:
+            response_part = raw_reasoning
+
+        # 定义标签映射
+        label_patterns = {
+            'subject': [
+                r'Subject\s*:',
+                r'Step\s*1\s*:',
+            ],
+            'attributes': [
+                r'Attributes\s*:',
+                r'Step\s*2\s*:',
+            ],
+            'scene': [
+                r'Scene\s*:',
+                r'Step\s*3\s*:',
+            ],
         }
 
-        for section, keywords in sections.items():
-            for keyword in keywords:
-                if keyword in raw_reasoning.lower():
-                    sentences = raw_reasoning.split('.')
-                    for sentence in sentences:
-                        if keyword in sentence.lower():
-                            structured[section] = sentence.strip()
-                            break
-                    break
+        import re
+
+        for section, patterns in label_patterns.items():
+            for pattern in patterns:
+                regex = rf'{pattern}\s*(.*?)(?=(?:Subject|Attributes|Scene|Step)\s*:|$)'
+                match = re.search(regex, response_part, re.DOTALL | re.IGNORECASE)
+                if match:
+                    content = match.group(1).strip()
+                    if content:
+                        content = self._clean_reasoning_text(content)
+                        structured[section] = content
+                        break
+
+        # 如果正则没有匹配到，尝试按行解析
+        if not any(structured.values()):
+            lines = response_part.split('\n')
+            current_section = None
+            current_content = []
+
+            for line in lines:
+                line_lower = line.lower().strip()
+
+                if 'subject' in line_lower or 'step 1' in line_lower:
+                    if current_section and current_content:
+                        structured[current_section] = ' '.join(current_content).strip()
+                    current_section = 'subject'
+                    current_content = []
+                elif 'attributes' in line_lower or 'step 2' in line_lower:
+                    if current_section and current_content:
+                        structured[current_section] = ' '.join(current_content).strip()
+                    current_section = 'attributes'
+                    current_content = []
+                elif 'scene' in line_lower or 'step 3' in line_lower:
+                    if current_section and current_content:
+                        structured[current_section] = ' '.join(current_content).strip()
+                    current_section = 'scene'
+                    current_content = []
+                elif current_section:
+                    cleaned_line = line.strip()
+                    if cleaned_line and not cleaned_line.startswith('```') and not cleaned_line.startswith('{'):
+                        current_content.append(cleaned_line)
+
+            if current_section and current_content:
+                structured[current_section] = ' '.join(current_content).strip()
 
         return structured
 
@@ -417,6 +635,17 @@ class CoTGenerator:
         """
         Structure detection reasoning.
 
+        🔧 新方案：解析纯三段自然文本格式
+        格式：
+        Scanning:
+        [段落内容]
+
+        Objects:
+        [段落内容]
+
+        Verification:
+        [段落内容]
+
         Args:
             raw_reasoning: Raw reasoning text
 
@@ -424,150 +653,83 @@ class CoTGenerator:
             Structured reasoning
         """
         structured = {
-            'scanning_method': '',
-            'object_identification': '',
-            'bbox_determination': '',
-            'classification': '',
+            'scanning': '',
+            'objects': '',
             'verification': '',
         }
 
-        # 🔧 只提取 assistant 回答部分
+        # 提取assistant回复
         if 'assistant' in raw_reasoning:
             response_part = raw_reasoning.split('assistant')[-1]
         else:
             response_part = raw_reasoning
 
-        # 如果回答部分主要是 JSON（没有实际推理），返回空
+        # 🔧 如果回答部分主要是JSON，返回说明
         if '```json' in response_part or response_part.strip().startswith('[') or response_part.strip().startswith('{'):
-            # 模型直接输出了 JSON，没有推理过程
-            return structured
+            return {"note": "Model returned direct JSON output without step-by-step reasoning"}
 
-        sections = {
-            'scanning_method': ['scan', 'search', 'look', 'first', 'overall scene'],
-            'object_identification': ['identify', 'detect', 'find', 'object', 'category'],
-            'bbox_determination': ['bounding', 'box', 'coordinate', 'position', 'location'],
-            'classification': ['classify', 'category', 'type', 'class', 'label'],
-            'verification': ['verify', 'confirm', 'check', 'final', 'missed'],
+        # 定义标签映射
+        label_patterns = {
+            'scanning': [
+                r'Scanning\s*:',
+                r'Step\s*1\s*:',
+            ],
+            'objects': [
+                r'Objects\s*:',
+                r'Step\s*2\s*:',
+            ],
+            'verification': [
+                r'Verification\s*:',
+                r'Step\s*3\s*:',
+            ],
         }
 
-        for section, keywords in sections.items():
-            for keyword in keywords:
-                if keyword in response_part.lower():
-                    sentences = response_part.split('.')
-                    for sentence in sentences:
-                        if keyword in sentence.lower() and len(sentence.strip()) > 10:
-                            structured[section] = sentence.strip()
-                            break
-                    break
+        import re
+
+        for section, patterns in label_patterns.items():
+            for pattern in patterns:
+                regex = rf'{pattern}\s*(.*?)(?=(?:Scanning|Objects|Verification|Step)\s*:|$)'
+                match = re.search(regex, response_part, re.DOTALL | re.IGNORECASE)
+                if match:
+                    content = match.group(1).strip()
+                    if content:
+                        content = self._clean_reasoning_text(content)
+                        structured[section] = content
+                        break
+
+        # 如果正则没有匹配到，尝试按行解析
+        if not any(structured.values()):
+            lines = response_part.split('\n')
+            current_section = None
+            current_content = []
+
+            for line in lines:
+                line_lower = line.lower().strip()
+
+                if 'scanning' in line_lower or 'step 1' in line_lower:
+                    if current_section and current_content:
+                        structured[current_section] = ' '.join(current_content).strip()
+                    current_section = 'scanning'
+                    current_content = []
+                elif 'objects' in line_lower or 'step 2' in line_lower:
+                    if current_section and current_content:
+                        structured[current_section] = ' '.join(current_content).strip()
+                    current_section = 'objects'
+                    current_content = []
+                elif 'verification' in line_lower or 'step 3' in line_lower:
+                    if current_section and current_content:
+                        structured[current_section] = ' '.join(current_content).strip()
+                    current_section = 'verification'
+                    current_content = []
+                elif current_section:
+                    cleaned_line = line.strip()
+                    if cleaned_line and not cleaned_line.startswith('```') and not cleaned_line.startswith('{'):
+                        current_content.append(cleaned_line)
+
+            if current_section and current_content:
+                structured[current_section] = ' '.join(current_content).strip()
 
         return structured
-
-    def _extract_reasoning_steps(
-        self,
-        raw_reasoning: str
-    ) -> List[Dict[str, str]]:
-        """
-        Extract individual reasoning steps.
-
-        改进：只处理 assistant 回答部分，排除 prompt 内容
-
-        Args:
-            raw_reasoning: Raw reasoning text
-
-        Returns:
-            List of reasoning step dictionaries
-        """
-        steps = []
-
-        # 🔧 只提取 assistant 回答部分
-        if 'assistant' in raw_reasoning:
-            response_part = raw_reasoning.split('assistant')[-1].strip()
-        else:
-            response_part = raw_reasoning
-
-        # 如果回答部分主要是 JSON，返回空（没有推理步骤）
-        if '```json' in response_part or response_part.strip().startswith('['):
-            # 模型直接输出 JSON，没有推理过程
-            steps.append({
-                'step_number': 1,
-                'marker': 'Note',
-                'content': 'Model provided direct JSON output without detailed reasoning'
-            })
-            return steps
-
-        # Use regex to find step markers and their content
-        # Pattern: (Marker)(optional comma)(content until next marker or end)
-        pattern = r'(Step \d+|First|Next|Then|Finally|Therefore)[,:]?\s*'
-
-        # Find all matches with their positions
-        matches = list(re.finditer(pattern, response_part, re.IGNORECASE))
-
-        if not matches:
-            # If no markers found, try to split by numbered steps
-            # Pattern: "1. content" or "1) content"
-            numbered_pattern = r'(\d+)[.\)]\s*'
-            numbered_matches = list(re.finditer(numbered_pattern, response_part))
-
-            if numbered_matches:
-                for i, match in enumerate(numbered_matches):
-                    start_pos = match.end()
-                    if i + 1 < len(numbered_matches):
-                        end_pos = numbered_matches[i + 1].start()
-                    else:
-                        end_pos = len(response_part)
-
-                    content = response_part[start_pos:end_pos].strip()
-                    # Clean up content
-                    content = re.sub(r'[\.\,]\s*$', '', content)
-                    content = content.strip()
-
-                    if content and len(content) > 10:  # Only add meaningful steps
-                        steps.append({
-                            'step_number': i + 1,
-                            'marker': match.group(1),
-                            'content': content,
-                        })
-
-                if steps:
-                    return steps
-
-            # If still no steps found, split by sentences
-            sentences = response_part.split('.')
-            for i, sentence in enumerate(sentences[:5]):  # Limit to 5 steps
-                if sentence.strip() and len(sentence.strip()) > 15:  # Only meaningful sentences
-                    steps.append({
-                        'step_number': i + 1,
-                        'marker': '',
-                        'content': sentence.strip(),
-                    })
-            return steps
-
-        # Extract content between markers
-        for i, match in enumerate(matches):
-            marker = match.group(1)
-
-            # Get content from current marker to next marker (or end)
-            start_pos = match.end()
-            if i + 1 < len(matches):
-                end_pos = matches[i + 1].start()
-            else:
-                end_pos = len(response_part)
-
-            content = response_part[start_pos:end_pos].strip()
-
-            # Clean up content
-            content = re.sub(r'[\.\,]\s*$', '', content)
-            content = content.strip()
-
-            # Only add steps with meaningful content
-            if content and len(content) > 10:
-                steps.append({
-                    'step_number': i + 1,
-                    'marker': marker.strip(),
-                    'content': content,
-                })
-
-        return steps
 
     def _validate_reasoning_quality(
         self,
@@ -577,9 +739,11 @@ class CoTGenerator:
         """
         Validate quality of reasoning chain.
 
-        改进：支持不同任务的CoT格式
-        - VQA/Captioning: First, Next, Then, Finally
-        - Detection: STEP 1, STEP 2, STEP 3, STEP 4
+        🔧 新方案：验证纯文本三段格式
+        - VQA: Observation, Analysis, Conclusion
+        - Captioning: Subject, Attributes, Scene
+        - Detection: Scanning, Objects, Verification
+        - Keypoints: Persons, Keypoints, Summary
 
         Args:
             reasoning: Reasoning text
@@ -606,13 +770,14 @@ class CoTGenerator:
         metrics['keyword_count'] = keyword_count
         metrics['has_required_keywords'] = keyword_count >= 2
 
-        # Estimate step count - 支持多种格式
-        # Pattern 1: "STEP 1", "STEP 2" (Detection)
-        # Pattern 2: "First", "Next", "Then", "Finally" (VQA)
-        # Pattern 3: "1.", "2." (Numbered)
+        # Estimate step count - 检测段落标签数量
+        # VQA: Observation, Analysis, Conclusion
+        # Detection: Scanning, Objects, Verification
         step_patterns = [
-            r'STEP\s*\d+',          # STEP 1, STEP 2
-            r'(?:First|Next|Then|Finally|Therefore)',  # VQA markers
+            r'(?:Observation|Analysis|Conclusion)',
+            r'(?:Scanning|Objects|Verification)',
+            r'(?:Subject|Attributes|Scene)',
+            r'(?:Persons|Keypoints|Summary)',
         ]
 
         max_step_count = 0
@@ -620,12 +785,9 @@ class CoTGenerator:
             matches = re.findall(pattern, reasoning, re.IGNORECASE)
             max_step_count = max(max_step_count, len(matches))
 
-        # Also use extracted steps
-        steps = self._extract_reasoning_steps(reasoning)
-        metrics['step_count'] = max(max_step_count, len(steps))
+        metrics['step_count'] = max_step_count
 
-        # Compute logical flow score - 更宽松的评分
-        # 有步骤 + 有关键词 + 长度合理 = 高分
+        # Compute logical flow score
         score = 0.0
 
         # 长度得分 (最多0.3)
@@ -643,21 +805,19 @@ class CoTGenerator:
             score += 0.1
 
         # 步骤数得分 (最多0.4)
-        if metrics['step_count'] >= 4:
+        if metrics['step_count'] >= 3:
             score += 0.4
-        elif metrics['step_count'] >= 3:
-            score += 0.3
         elif metrics['step_count'] >= 2:
-            score += 0.2
+            score += 0.3
         elif metrics['step_count'] >= 1:
-            score += 0.1
+            score += 0.2
 
         metrics['logical_flow_score'] = min(score, 1.0)
 
-        # Determine validity - 降低阈值使更多数据通过
+        # Determine validity - 有关键词且有合理长度
         metrics['is_valid'] = (
-            metrics['length'] >= 50 and  # 降低从30到50
-            (metrics['has_required_keywords'] or metrics['step_count'] >= 2)  # 更灵活的条件
+            metrics['length'] >= 50 and
+            metrics['has_required_keywords']
         )
 
         return metrics

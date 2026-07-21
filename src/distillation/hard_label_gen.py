@@ -73,20 +73,9 @@ class HardLabelGenerator:
 
         # Extract hard label
         hard_label = {
-            'image_id': image_id,
-            'task': 'vqa',
-            'question': question,
             'answer': result.get('answer', ''),
             'confidence': result.get('confidence', 0.0),
-            'full_response': result.get('full_response', ''),
-            'timestamp': datetime.now().isoformat(),
         }
-
-        # 🔧 添加 logits 供 soft_label 使用（会在 json_exporter 中被过滤，不保存到 JSON）
-        if 'logits' in result:
-            hard_label['logits'] = result['logits']
-        if 'answer_token_ids' in result:
-            hard_label['answer_token_ids'] = result['answer_token_ids']
 
         # Filter by confidence if needed
         if hard_label['confidence'] < self.confidence_threshold:
@@ -94,63 +83,6 @@ class HardLabelGenerator:
             self.logger.debug(f"VQA result filtered: confidence {hard_label['confidence']} < threshold {self.confidence_threshold}")
 
         return hard_label
-
-    def _extract_answer_distribution_from_logits(
-        self,
-        probs: 'torch.Tensor',
-        answer_token_ids: List[int],
-        top_k: int = 10
-    ) -> Dict[str, float]:
-        """
-        从logits中提取答案的概率分布。
-
-        Args:
-            probs: 概率张量（shape: [num_tokens, vocab_size]）
-            answer_token_ids: 答案token ID列表
-            top_k: 保留top-k个最高概率的词
-
-        Returns:
-            答案概率分布（词 -> 概率）
-        """
-        import torch
-
-        if not answer_token_ids:
-            return {}
-
-        # 对于答案的第一个token，提取top-k概率
-        first_token_idx = 0  # 第一个生成位置的索引
-
-        if probs.dim() == 3:
-            # probs shape: [num_tokens, batch_size, vocab_size]
-            token_probs = probs[first_token_idx, 0, :]  # 第一个token的概率分布
-        elif probs.dim() == 2:
-            # probs shape: [num_tokens, vocab_size]
-            token_probs = probs[first_token_idx, :]
-        else:
-            # probs shape: [vocab_size]
-            token_probs = probs
-
-        # 获取top-k概率及其索引
-        top_k = min(top_k, token_probs.size(-1))
-        top_probs, top_indices = torch.topk(token_probs, top_k)
-
-        # 构建分布字典
-        distribution = {}
-        for idx, prob in zip(top_indices.tolist(), top_probs.tolist()):
-            # 解码token为词
-            word = self.teacher.tokenizer.decode([idx])
-            word = word.strip().lower()
-
-            # 过滤无效词
-            if word and len(word) > 0 and not word.startswith('<'):
-                distribution[word] = prob
-
-        # 归一化（确保总和为1）
-        total = sum(distribution.values())
-        if total > 0:
-            distribution = {k: v / total for k, v in distribution.items()}
-
-        return distribution
 
     def generate_captioning_hard_labels(
         self,
@@ -183,13 +115,10 @@ class HardLabelGenerator:
         captions = result.get('captions', [])
 
         hard_label = {
-            'image_id': image_id,
-            'task': 'captioning',
             'captions': captions,
             'num_captions': len(captions),
             'primary_caption': captions[0] if captions else '',
             'confidence': result.get('confidence', 0.0),  # Add confidence
-            'timestamp': datetime.now().isoformat(),
         }
 
         # Add caption scores/quality metrics (placeholder)
@@ -238,13 +167,10 @@ class HardLabelGenerator:
             avg_confidence = 0.0
 
         hard_label = {
-            'image_id': image_id,
-            'task': 'detection',
             'objects': filtered_objects,
             'num_objects': len(filtered_objects),
             'total_detected': len(objects),
             'confidence': avg_confidence,  # 使用计算的平均置信度
-            'timestamp': datetime.now().isoformat(),
         }
 
         return hard_label
@@ -285,12 +211,9 @@ class HardLabelGenerator:
                 filtered_persons.append(person)
 
         hard_label = {
-            'image_id': image_id,
-            'task': 'keypoints',
             'persons': filtered_persons,
             'num_persons': len(filtered_persons),
             'total_detected': len(persons),
-            'timestamp': datetime.now().isoformat(),
         }
 
         return hard_label

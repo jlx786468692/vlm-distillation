@@ -1,7 +1,7 @@
-# Qwen2.5-VL-7B-Instruct Model Configuration
+# Qwen2.5-VL-72B-Instruct-AWQ Model Configuration
 
 model:
-  name: "Qwen/Qwen2.5-VL-7B-Instruct"
+  name: "models/Qwen2.5-VL-72B-Instruct-AWQ"
   type: "vlm"
   family: "qwen"
 
@@ -30,10 +30,11 @@ model:
   use_flash_attention: true  # Enable if supported
   device_map: "auto"  # Automatic device mapping
 
-  # Precision settings
+  # Precision settings for AWQ 4bit
   torch_dtype: "bfloat16"
-  load_in_8bit: false  # Use 8-bit quantization if needed
-  load_in_4bit: false  # Use 4-bit quantization if needed
+  load_in_8bit: false
+  load_in_4bit: true  # AWQ is 4-bit quantized
+  use_awq: true  # Enable AWQ loading
 
 # Task-specific prompts
 prompts:

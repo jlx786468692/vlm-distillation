@@ -84,49 +84,44 @@ class SoftLabelGenerator:
         """
         self.logger.debug(f"Generating VQA soft labels for image {image_id}")
 
-        soft_label = {
-            'image_id': image_id,
-            'task': 'vqa',
-            'question': question,
-            'temperature': self.temperature,
-            'timestamp': datetime.now().isoformat(),
-        }
-
         # 🔧 从 hard_label 获取 logits 和答案信息
         if hard_label_result and 'logits' in hard_label_result:
             logits_data = hard_label_result['logits']
             primary_answer = hard_label_result.get('answer', '')
-            confidence = hard_label_result.get('confidence', 0.5)
 
-            # 🔧 传入 primary_answer 和 confidence，确保分布合理
+            # 🔧 传入 primary_answer，确保分布合理
             # 🔧 新增：传入question用于上下文感知过滤
             distribution = self._process_vqa_logits(
                 logits_data,
                 answer_candidates,
                 primary_answer=primary_answer,
-                confidence=confidence,
                 question=question
             )
-            soft_label['answer_distribution'] = distribution
-            soft_label['primary_answer'] = primary_answer
-            soft_label['confidence'] = confidence
-            soft_label['source'] = 'hard_label_logits'
+
+            # 🔧 提取合法答案列表（用于 CoT 限定答案范围）
+            allowed_answers = list(distribution.keys())
+
+            soft_label = {
+                'answer_distribution': distribution,
+                'primary_answer': primary_answer,
+                'allowed_answers': allowed_answers  # 🔧 新增：合法答案列表
+            }
             return soft_label
 
         # 如果没有 logits，调用模型获取
         if hard_label_result and 'answer' in hard_label_result:
             primary_answer = hard_label_result['answer']
-            confidence = hard_label_result.get('confidence', 0.5)
-
-            soft_label['primary_answer'] = primary_answer
-            soft_label['confidence'] = confidence
-            soft_label['source'] = 'hard_label_derived'
 
             # 简化分布
+            confidence = hard_label_result.get('confidence', 0.5)
             main_prob = min(confidence, 0.98)
-            soft_label['answer_distribution'] = {
-                primary_answer.lower(): main_prob,
-                'other': 1.0 - main_prob
+
+            soft_label = {
+                'answer_distribution': {
+                    primary_answer.lower(): main_prob,
+                    'other': 1.0 - main_prob
+                },
+                'primary_answer': primary_answer
             }
             return soft_label
 
@@ -139,9 +134,7 @@ class SoftLabelGenerator:
             generate_cot=False
         )
 
-        soft_label['primary_answer'] = result.get('answer', '')
-        soft_label['confidence'] = result.get('confidence', 0.0)
-        soft_label['source'] = 'teacher_logits'
+        primary_answer = result.get('answer', '')
 
         if 'logits' in result:
             logits_data = result['logits']
@@ -151,17 +144,17 @@ class SoftLabelGenerator:
                 answer_candidates,
                 question=question
             )
-            soft_label['answer_distribution'] = distribution
-        else:
-            soft_label['answer_distribution'] = {
-                result.get('answer', 'unknown').lower(): 1.0
+            soft_label = {
+                'answer_distribution': distribution,
+                'primary_answer': primary_answer
             }
-
-        return soft_label
-
-        # Add primary answer for reference
-        soft_label['primary_answer'] = result.get('answer', '')
-        soft_label['confidence'] = result.get('confidence', 0.0)
+        else:
+            soft_label = {
+                'answer_distribution': {
+                    result.get('answer', 'unknown').lower(): 1.0
+                },
+                'primary_answer': primary_answer
+            }
 
         return soft_label
 
@@ -193,10 +186,7 @@ class SoftLabelGenerator:
         )
 
         soft_label = {
-            'image_id': image_id,
-            'task': 'captioning',
             'temperature': self.temperature,
-            'timestamp': datetime.now().isoformat(),
         }
 
         # Process caption logits
@@ -253,10 +243,7 @@ class SoftLabelGenerator:
             objects = result.get('objects', [])
 
         soft_label = {
-            'image_id': image_id,
-            'task': 'detection',
             'temperature': self.temperature,
-            'timestamp': datetime.now().isoformat(),
         }
 
         # 基于检测结果生成分布
@@ -415,76 +402,6 @@ class SoftLabelGenerator:
 
         return similar_map.get(category.lower(), [])
 
-    def _generate_answer_distribution_from_hard_label(
-        self,
-        answer: str,
-        confidence: float,
-        temperature: float = 1.5
-    ) -> Dict[str, float]:
-        """
-        基于hard_label答案生成概率分布。
-
-        Args:
-            answer: 硬标签答案
-            confidence: 置信度
-            temperature: 温度参数
-
-        Returns:
-            答案概率分布
-        """
-        distribution = {}
-
-        # 🔧 修复：直接使用confidence作为主答案概率，保持一致性
-        # 不再人为放大，确保 confidence 和 distribution 一致
-        main_prob = min(confidence, 0.98)  # 上限改为0.98，留2%给其他候选
-        distribution[answer.lower()] = main_prob
-
-        # 为相似答案分配剩余概率
-        remaining_prob = 1.0 - main_prob
-
-        # 根据答案类型生成相似的候选
-        if answer.lower() in ['yes', 'no']:
-            # 二元答案：给相反答案分配小概率
-            opposite = 'no' if answer.lower() == 'yes' else 'yes'
-            distribution[opposite] = remaining_prob * 0.7
-            # 其他少量分配
-            distribution['maybe'] = remaining_prob * 0.3
-
-        elif answer.isdigit():
-            # 数字答案：给相似数字分配小概率
-            num = int(answer)
-            for offset in [-1, 1]:
-                neighbor_num = str(num + offset)
-                if neighbor_num not in distribution:
-                    distribution[neighbor_num] = remaining_prob * 0.3
-            # 文字形式也可能
-            word_forms = {'1': 'one', '2': 'two', '3': 'three', '4': 'four', '5': 'five'}
-            if answer in word_forms:
-                distribution[word_forms[answer]] = remaining_prob * 0.2
-
-        elif answer.lower() in ['one', 'two', 'three', 'four', 'five']:
-            # 文字数字：给数字形式分配小概率
-            num_forms = {'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5'}
-            if answer.lower() in num_forms:
-                distribution[num_forms[answer.lower()]] = remaining_prob
-
-        else:
-            # 🔧 修复：普通答案（颜色、物体等），分配剩余概率给"other"
-            # 这样可以反映概率分布的不确定性
-            distribution['other'] = remaining_prob * 0.5
-            distribution['unknown'] = remaining_prob * 0.5
-
-        # 如果还有剩余概率，归一化到主答案
-        total = sum(distribution.values())
-        if total < 1.0:
-            # 剩余概率归给主答案
-            distribution[answer.lower()] += (1.0 - total)
-        elif total > 1.0:
-            # 归一化
-            distribution = {k: v / total for k, v in distribution.items()}
-
-        return distribution
-
     def generate_keypoints_soft_labels(
         self,
         image_path: str,
@@ -510,10 +427,7 @@ class SoftLabelGenerator:
         )
 
         soft_label = {
-            'image_id': image_id,
-            'task': 'keypoints',
             'temperature': self.temperature,
-            'timestamp': datetime.now().isoformat(),
         }
 
         # Process keypoints logits

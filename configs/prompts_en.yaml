@@ -1,9 +1,10 @@
 # Prompt Configuration (English)
 # ====================
 #
-# Prompts optimized for Qwen2.5-VL-7B model
-# - Concise and clear
-# - Clear format requirements
+# Prompts optimized for Qwen2.5-VL model
+# - 核心拆分原则：YAML存纯文本,代码层分配角色
+# - system: 通用硬性规则
+# - user: 单条样本参数
 #
 
 prompts:
@@ -12,7 +13,6 @@ prompts:
   # ==================
 
   standard:
-    # VQA Task
     vqa: |
       Look at the image and answer: {question}
 
@@ -23,7 +23,6 @@ prompts:
 
       Answer:
 
-    # Captioning Task
     captioning: |
       Describe this image in detail:
       - Main objects and their positions
@@ -32,103 +31,117 @@ prompts:
 
       Caption:
 
-    # Detection Task
     detection: |
       Detect all objects in this image. Output JSON only.
 
-      Format: {"objects": [{"category": "name", "bbox": [x1,y1,x2,y2], "confidence": 0.9}]}
+      Format: {{'objects': [{{'category': 'name', 'bbox': [x1,y1,x2,y2], 'confidence': 0.9}}]}}
 
       Rules:
       - bbox: [x1, y1, x2, y2] coordinates
       - confidence: 0.5-1.0
       - ONLY JSON, no other text
 
-      Example:
-      {"objects": [
-        {"category": "person", "bbox": [100,50,200,300], "confidence": 0.95},
-        {"category": "car", "bbox": [250,150,400,280], "confidence": 0.9}
-      ]}
-
       JSON:
 
-    # Keypoints Task
     keypoints: |
-      Detect all persons with 17 keypoints.
+      Detect all persons with 17 keypoints coordinates.
 
       JSON format:
-      {"persons": [{"bbox": [x,y,w,h], "keypoints": [{"name": "nose", "x": 100, "y": 200, "visibility": 2}]}]}
-
-      Keypoints: nose, left_eye, right_eye, left_ear, right_ear, left_shoulder, right_shoulder, left_elbow, right_elbow, left_wrist, right_wrist, left_hip, right_hip, left_knee, right_knee, left_ankle, right_ankle
-
-      visibility: 0=not visible, 1=occluded, 2=visible
+      {{'persons': [{{'bbox': [x,y,w,h], 'keypoints': [{{'name': 'nose', 'x': 100, 'y': 200, 'visibility': 2}}]}}]}}
 
       JSON:
 
   # ==================
-  # CoT Prompt
+  # CoT Prompt (system + user 分离)
   # ==================
 
   cot:
-    # VQA CoT
-    vqa: |
-      Analyze the image step by step to answer: {question}
+    vqa_system: |
+      # TOP PRIORITY FORBIDDEN WORDS (all variants cannot appear)
+      appear, seem, look like, might, likely, possible, probably, suggest, typical, characteristic, resemble, align with
 
-      Steps:
-      1. What do you see?
-      2. Analyze details
-      3. Draw conclusion
+      # EXECUTION RULES
+      1. Follow all constraints first, do not copy fixed sentences mechanically.
+      2. Describe only visible image content; never fabricate features to match answers.
+      3. Blocked/unclear target parts write cannot recognize only; ban blurry, perspective, hard to see.
+      4. Only focus on features the question asks for; never mix reasoning logic of different question types.
+      5. MANDATORY DETAIL BRANCH: Observation MUST contain two parts: exposed target features + blocked parts / temporary interference. Cannot omit either segment.
 
-      Let's analyze:
+      # TASK BOUNDARY
+      Complete three-step visual reasoning only.
+      Do not infer commercial/industrial usage, equipment internal structure or scene purpose.
+      Ignore irrelevant background: stage, laptop, podium, surfer, wave, splash.
+      Surface marks, slots, attachments = temporary interference, skip extra details.
 
-    # Captioning CoT
-    captioning: |
-      Describe this image systematically:
+      # FIXED 3-PARAGRAPH OUTPUT
+      1. Observation
+        Must include two segments:
+        Segment1: Fully exposed features of the question target.
+        Segment2: Separately state blocked parts (cannot recognize) or surface temporary interference.
+        Do not write irrelevant background.
+      2. Analysis
+        Compare visible target features against allowed answers.
+        Must clearly mention temporary interference or blocked parts are ignored for judgment; no speculative explanation.
+      3. Conclusion (fixed format, cannot alter)
+        Write a complete, independent objective visual matching sentence (cannot be ultra-short single phrase).
+        New line, strictly output: Final Answer: {primary_answer}
+        Single word without preceding complete reasoning sentence is prohibited.
 
-      Steps:
-      1. Identify subjects
-      2. Describe attributes
-      3. Note the scene
-      4. Summarize
+      # GLOBAL HARD RULES
+      1. Core rule: Final Answer fully matches {primary_answer}, only select words in {allowed_answers}. No cross-task answer mixing.
+        Note: Paragraph text cannot use Arabic numerals 0/1/2/3; use one/two/three instead. Final Answer must be text word from candidate list.
+      2. Color limit: Do not use mixed or tone-modified color words: greenish-blue, light red, dark blue, bright yellow.
+      3. Symbol ban: No JSON, braces, single/double quotes, use plain sentences only.
 
-      Let's analyze:
+    vqa_user: |
+      Question: {question}
+      Allowed answers: {allowed_answers}
+      Mandatory Final Answer word: {primary_answer}
+      Reminder: Observation must have two parts: exposed target features and blocked/interference note. Analysis must mention interference/blocked parts are ignored. Do not generate overly brief single-sentence reasoning. Avoid all forbidden words listed in system rules.
+    # ===== Captioning =====
+    captioning_system: |
+      Describe the image in three paragraphs with fixed labels.
+      No JSON, no braces, no quotes.
 
-    # Detection CoT
-    detection: |
-      Detect objects in this image systematically:
+    captioning_user: |
+      Subject:
+      [Describe main subject in 1-2 sentences.]
 
-      Analyze step by step:
-      1. Describe the overall scene
-      2. Scan from left to right, top to bottom
-      3. For each object, note:
-         - Category (e.g., person, car, dog)
-         - Approximate position (e.g., left side, center)
-         - Bounding box [x1, y1, x2, y2]
-      4. Check for missed objects
+      Attributes:
+      [Describe colors, sizes, positions in 1-2 sentences.]
 
-      After analysis, output JSON format:
-      {"objects": [{"category": "name", "bbox": [x1,y1,x2,y2], "confidence": 0.9}]}
+      Scene:
+      [Describe background in 1-2 sentences.]
 
-      Note:
-      - bbox: pixel coordinates [x1, y1, x2, y2]
-      - confidence: 0.5-1.0
-      - Output ONLY JSON, do not include analysis
+    # ===== Detection =====
+    detection_system: |
+      Detect objects through three paragraphs.
+      No JSON output in reasoning text.
 
-      JSON:
+    detection_user: |
+      Scanning:
+      [Describe scene scanning in 1-2 sentences.]
 
-    # Keypoints CoT
-    keypoints: |
-      Detect human poses systematically:
+      Objects:
+      [List detected objects with positions in 1-2 sentences.]
 
-      Analyze step by step:
-      1. Find all persons in the image
-      2. For each person, describe their pose (standing, sitting, moving)
-      3. Locate 17 keypoints: nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles
-      4. Mark visibility for each keypoint (0=not visible, 1=occluded, 2=visible)
+      Verification:
+      [Confirm all objects found in 1 sentence.]
 
-      After analysis, output JSON format:
-      {"persons": [{"bbox": [x,y,w,h], "keypoints": [{"name": "nose", "x": 100, "y": 200, "visibility": 2}]}]}
+    # ===== Keypoints =====
+    keypoints_system: |
+      Detect human poses through three paragraphs.
+      No JSON output in reasoning text.
 
-      JSON:
+    keypoints_user: |
+      Persons:
+      [Count persons and describe poses.]
+
+      Keypoints:
+      [Describe visible body parts.]
+
+      Summary:
+      [Summarize detection results.]
 
   # ==================
   # Default Prompt
@@ -136,4 +149,5 @@ prompts:
 
   default:
     standard: "Analyze this image."
-    cot: "Analyze this image step by step."
+    cot_system: "Analyze this image step by step."
+    cot_user: "Provide your analysis."
