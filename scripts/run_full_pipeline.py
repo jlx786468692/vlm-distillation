@@ -59,6 +59,20 @@ Usage:
     - visualization: 输入来自 cleaned_dir，对比数据来自 merged_dir
 """
 
+# 🔧 关键：在所有导入之前设置 multiprocessing 为 spawn 模式
+# vLLM 多 GPU 推理（tensor_parallel）需要 spawn 模式，不能使用默认的 fork
+# 必须在主程序入口设置，不能在被导入的模块中设置
+import multiprocessing
+try:
+    multiprocessing.set_start_method('spawn')
+except RuntimeError:
+    pass  # Already set
+
+# 🔧 可选：设置 vLLM 日志级别（抑制大量内部日志）
+# 如需调试，可改为 INFO 或 DEBUG
+import os
+os.environ.setdefault('VLLM_LOGGING_LEVEL', 'WARNING')
+
 import argparse
 import sys
 import json

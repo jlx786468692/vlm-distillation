@@ -1,7 +1,7 @@
 project:
   name: "vlm-distillation"
   version: "1.0.0"
-  description: "VLM data distillation pipeline using Qwen2.5-VL-7B-Instruct"
+  description: "VLM data distillation pipeline using Qwen2.5-VL-32B-Instruct-AWQ as teacher"
 
 # Prompt 配置文件路径
 # prompts_config: "configs/prompts.yaml"  # 原版本（已删除）
@@ -26,10 +26,25 @@ pipeline:
   dry_run: false
 
 teacher:
-  model_name: "models/Qwen2.5-VL-7B-Instruct"
+  # 🔧 GPU选择：设置CUDA_VISIBLE_DEVICES环境变量
+  # 使用GPU 1（如果GPU 0被占用）：cuda_devices: "1"
+  # 使用双卡张量并行：cuda_devices: "0,1" 且 tensor_parallel_size: 2
+  # 留空则使用所有可见GPU
+  cuda_devices: "0"  # 单卡运行（32B-AWQ约20GB显存）
+
+  # 🔧 模型选择（Qwen2.5-VL 系列）
+  # 3B: ~6GB 显存，单卡
+  # 7B-AWQ: ~12GB 显存，单卡
+  # 32B-AWQ: ~20GB 显存，单卡推荐
+  # 32B-FP16: ~40GB 显存，双卡
+  model_name: "models/Qwen2.5-VL-32B-Instruct-AWQ"
   device: "cuda"
-  precision: "bf16"  # bfloat16 for efficiency
+  precision: "4bit"  # AWQ 4-bit quantization
   max_length: 2048
+  use_awq: true  # 使用 transformers 原生 AWQ 支持（4.51+）
+
+  # vLLM 配置（Qwen2.5-VL 多模态有 bug，禁用）
+  use_vllm: false
 
   # 通用生成参数（适用于VQA、Captioning等任务）
   # 【知识蒸馏优化】使用贪婪解码（temperature=0）
@@ -85,7 +100,7 @@ distillation:
   # Hard label configuration
   hard_labels:
     enabled: true
-    confidence_threshold: 0.55
+    confidence_threshold: 0.7
     save_format: "json"
 
   # Soft label configuration
@@ -289,3 +304,117 @@ visualization:
 vqa_token_filter:
   # 配置文件路径（独立的YAML文件）
   config_file: "configs/vqa_token_filter.yaml"
+
+# ============================================================
+# Detection 软标签配置
+# ============================================================
+detect:
+  # Detection类别白名单（COCO 80类 + background）
+  # 这些是软标签中允许保留的类别
+  categories:
+    # COCO 80类
+    - person
+    - bicycle
+    - car
+    - motorcycle
+    - airplane
+    - bus
+    - train
+    - truck
+    - boat
+    - traffic light
+    - fire hydrant
+    - stop sign
+    - parking meter
+    - bench
+    - bird
+    - cat
+    - dog
+    - horse
+    - sheep
+    - cow
+    - elephant
+    - bear
+    - zebra
+    - giraffe
+    - backpack
+    - umbrella
+    - handbag
+    - tie
+    - suitcase
+    - frisbee
+    - skis
+    - snowboard
+    - sports ball
+    - kite
+    - baseball bat
+    - baseball glove
+    - skateboard
+    - surfboard
+    - tennis racket
+    - bottle
+    - wine glass
+    - cup
+    - fork
+    - knife
+    - spoon
+    - bowl
+    - banana
+    - apple
+    - sandwich
+    - orange
+    - broccoli
+    - carrot
+    - hot dog
+    - pizza
+    - donut
+    - cake
+    - chair
+    - couch
+    - potted plant
+    - bed
+    - dining table
+    - toilet
+    - tv
+    - laptop
+    - mouse
+    - remote
+    - keyboard
+    - cell phone
+    - microwave
+    - oven
+    - toaster
+    - sink
+    - refrigerator
+    - book
+    - clock
+    - vase
+    - scissors
+    - teddy bear
+    - hair drier
+    - toothbrush
+    # 🔧 关键：background类别（用于无目标场景）
+    - background
+
+  # 回归头软标签配置
+  bbox_soft_label:
+    enabled: true                   # 是否启用bbox回归头软标签
+    teacher_weight: 0.7             # Teacher bbox的权重（0.7表示70%来自Teacher，30%来自GT）
+    fusion_method: "weighted"       # 融合方法：weighted（加权）, gaussian（高斯分布）
+
+    # 高斯分布参数（当fusion_method="gaussian"时使用）
+    gaussian:
+      sigma_scale: 0.1              # 基于bbox尺寸的sigma缩放因子
+
+  # 候选框过滤配置
+  box_filtering:
+    min_confidence: 0.3             # 最低置信度阈值（低于此值的框会被过滤）
+    max_boxes_per_image: 100        # 每张图最多保留的框数（防止内存爆炸）
+    nms_enabled: false              # 是否应用NMS（非极大值抑制）
+    nms_iou_threshold: 0.5          # NMS的IoU阈值
+
+  # 白名单过滤配置
+  whitelist_filtering:
+    strict_mode: true               # 严格模式：只允许白名单内的类别
+    preserve_hard_label: true       # 硬标签保底：确保GT类别永远不被过滤
+    fallback_to_background: true    # 如果过滤后为空，回退到background类别

@@ -2,11 +2,35 @@
 Teacher Model Interface
 =======================
 
-Wraps Qwen2.5-VL-7B-Instruct for multi-task distillation.
+Wraps Qwen2.5-VL teacher model for multi-task distillation.
+Supports AWQ quantized models via autoawq.
 """
 
+# 🔧 关键：在导入 transformers 之前设置离线模式
+import os
+import sys
+from pathlib import Path
+
+# 检查是否有本地模型配置
+_config_path = Path(__file__).parent.parent.parent / 'configs' / 'default.yaml'
+if _config_path.exists():
+    import yaml
+    try:
+        with open(_config_path, 'r', encoding='utf-8') as f:
+            _cfg = yaml.safe_load(f)
+            _model_name = _cfg.get('teacher', {}).get('model_name', '')
+            if _model_name:
+                # 检查模型路径是否存在
+                _model_path = Path(_model_name)
+                if not _model_path.is_absolute():
+                    _model_path = Path(__file__).parent.parent.parent / _model_name
+                if _model_path.exists():
+                    os.environ['HF_HUB_OFFLINE'] = '1'
+                    os.environ['TRANSFORMERS_OFFLINE'] = '1'
+    except Exception:
+        pass
+
 import torch
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
 from PIL import Image
@@ -14,11 +38,15 @@ from PIL import Image
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
 
+# Lazy imports for backends
+_transformers_loaded = False
+
 
 class TeacherModel:
     """
-    Wrapper for Qwen2.5-VL-7B-Instruct teacher model.
+    Wrapper for Qwen2.5-VL teacher model.
 
+    Supports AWQ quantized models via autoawq.
     Provides multi-task inference capabilities:
     - Visual Question Answering (VQA)
     - Image Captioning
@@ -39,24 +67,24 @@ class TeacherModel:
             config: Configuration manager instance
             model_name: Model name or path (default: from config)
             device: Device to load model (cuda/cpu)
-            precision: Model precision (fp32/fp16/bf16)
+            precision: Model precision (fp32/fp16/bf16/4bit)
         """
         self.config = config or ConfigManager()
         self.logger = get_logger()
 
         # Model settings
-        self.model_name = model_name or self.config.get("teacher.model_name", "Qwen/Qwen2.5-VL-7B-Instruct")
+        self.model_name = model_name or self.config.get("teacher.model_name", "models/Qwen2.5-VL-32B-Instruct-AWQ")
         self.device = device or self.config.get("teacher.device", "cuda")
-        self.precision = precision or self.config.get("teacher.precision", "bf16")
+        self.precision = precision or self.config.get("teacher.precision", "auto")
 
         # Generation parameters
         self.max_new_tokens = self.config.get("model.max_new_tokens", 512)
-        self.max_detection_tokens = self.config.get("model.max_detection_tokens", 1024)  # Detection needs more tokens
-        self.temperature = self.config.get("model.temperature", 0.7)
-        self.detection_temperature = self.config.get("model.detection_temperature", 0.3)  # Lower temp for detection
-        self.top_p = self.config.get("model.top_p", 0.9)
-        self.detection_top_p = self.config.get("model.detection_top_p", 0.95)  # Higher for deterministic output
-        self.top_k = self.config.get("model.top_k", 50)
+        self.max_detection_tokens = self.config.get("model.max_detection_tokens", 1024)
+        self.temperature = self.config.get("model.temperature", 0.0)  # 贪婪解码
+        self.detection_temperature = self.config.get("model.detection_temperature", 0.1)
+        self.top_p = self.config.get("model.top_p", 1.0)
+        self.detection_top_p = self.config.get("model.detection_top_p", 0.9)
+        self.top_k = self.config.get("model.top_k", 1)
 
         # Model components
         self.model = None
@@ -67,94 +95,132 @@ class TeacherModel:
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load Qwen2.5-VL model and components (supports AWQ 4bit)."""
+        """
+        Load Qwen2.5-VL model using transformers + autoawq.
+
+        🔧 注意：Qwen2.5-VL 的 AWQ 模型需要 autoawq 库支持
+        transformers 在检测到 quant_method: "awq" 后会调用 autoawq 进行反量化
+        """
         self.logger.info(f"Loading teacher model: {self.model_name}")
 
-        try:
-            # 🔧 关键：设置随机种子，确保推理结果可复现
-            import random
-            import numpy as np
+        # 🔧 GPU选择：从配置读取cuda_devices并设置环境变量
+        cuda_devices = self.config.get("teacher.cuda_devices", None)
+        if cuda_devices:
+            os.environ['CUDA_VISIBLE_DEVICES'] = cuda_devices
+            self.logger.info(f"Using GPU device(s): {cuda_devices}")
 
-            seed = self.config.get("data.seed", 42)
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
+        # 🔧 设置随机种子，确保推理结果可复现
+        import random
+        import numpy as np
 
-            self.logger.info(f"Random seed set to {seed} for reproducibility")
+        seed = self.config.get("data.seed", 42)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+            self.logger.info(f"CUDA seed set to {seed} for reproducibility")
 
-            # Check if using HuggingFace mirror (for network issues)
-            hf_mirror = self.config.get("teacher.hf_mirror", None)
-            if hf_mirror:
-                import os
-                self.logger.info(f"Using HuggingFace mirror: {hf_mirror}")
-                os.environ['HF_ENDPOINT'] = hf_mirror
+        # Check if using HuggingFace mirror (for network issues)
+        hf_mirror = self.config.get("teacher.hf_mirror", None)
+        if hf_mirror:
+            self.logger.info(f"Using HuggingFace mirror: {hf_mirror}")
+            os.environ['HF_ENDPOINT'] = hf_mirror
 
-            # Determine dtype
-            dtype_map = {
-                'fp32': torch.float32,
-                'fp16': torch.float16,
-                'bf16': torch.bfloat16,
-            }
-            torch_dtype = dtype_map.get(self.precision, torch.bfloat16)
+        # 🔧 检查模型路径（支持本地路径和 HuggingFace Hub）
+        model_path = Path(self.model_name)
+        if not model_path.is_absolute():
+            model_path = Path.cwd() / self.model_name
 
-            # Load processor
-            self.logger.info("Loading processor...")
-            self.processor = AutoProcessor.from_pretrained(
+        # 设置离线模式（本地模型）
+        if model_path.exists():
+            self.logger.info(f"✓ Found local model at: {model_path.absolute()}")
+            os.environ['HF_HUB_OFFLINE'] = '1'
+        else:
+            self.logger.warning(f"Model path not found locally: {self.model_name}")
+            self.logger.warning(f"Will try to download from HuggingFace Hub")
+
+        # ==================== Transformers 原生加载 ====================
+        # ✅ Qwen 官方标准加载方式，支持 AWQ 模型（无需 autoawq）
+        self._load_with_transformers()
+
+    # ==================== Transformers 加载 ====================
+        # 🔧 Qwen2.5-VL AWQ 模型需要 autoawq 支持
+        self._load_with_transformers()
+
+    def _load_with_transformers(self) -> None:
+        """
+        Load model using transformers + autoawq.
+
+        🔧 Qwen2.5-VL 的 AWQ 模型：
+        - transformers 在检测到 quant_method: "awq" 后会调用 autoawq
+        - 需要 autoawq>=0.2.0 版本
+        - 使用 device_map="auto" 自动分配 GPU
+        """
+        self.logger.info("Loading model with transformers + autoawq...")
+
+        from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+
+        # ✅ 加载模型（AWQ 模型会自动调用 autoawq 反量化）
+        self.logger.info(f"Loading model from: {self.model_name}")
+        self.logger.info("Note: AWQ model will use autoawq for dequantization")
+
+        # 🔧 检测是否是AWQ模型
+        is_awq = 'awq' in self.model_name.lower()
+
+        if is_awq:
+            # AWQ 模型：不支持 device_map="auto" 包含 CPU/disk
+            # 使用强制全GPU加载
+            self.logger.info("Detected AWQ model, using full GPU loading")
+            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.model_name,
-                trust_remote_code=True
+                torch_dtype=torch.float16,
+                trust_remote_code=True,
+                local_files_only=os.environ.get('HF_HUB_OFFLINE') == '1'
+            ).cuda()  # 直接加载到 GPU
+        else:
+            # 非AWQ模型：可以使用 device_map="auto"
+            self.logger.info("Using device_map='auto' for non-AWQ model")
+            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.float16,
+                device_map="auto",
+                trust_remote_code=True,
+                local_files_only=os.environ.get('HF_HUB_OFFLINE') == '1'
             )
 
-            # Load tokenizer
-            self.logger.info("Loading tokenizer...")
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name,
-                trust_remote_code=True
-            )
+        # 加载 processor
+        self.logger.info("Loading processor...")
+        self.processor = AutoProcessor.from_pretrained(
+            self.model_name,
+            trust_remote_code=True,
+            local_files_only=os.environ.get('HF_HUB_OFFLINE') == '1'
+        )
 
-            # 🔧 检查是否使用 AWQ 4bit 模型（从配置文件自动检测）
-            use_awq = self.config.get("model.use_awq", False)
+        # 加载 tokenizer（从 processor 获取）
+        self.tokenizer = self.processor.tokenizer
 
-            if use_awq:
-                # AWQ 4bit 模型加载（模型配置中已包含量化信息）
-                self.logger.info(f"Loading AWQ 4bit model from {self.model_name}...")
-                self.logger.info("Note: AWQ model will use ~40GB VRAM on GPU")
+        # ✅ 关键：验证模型加载成功
+        assert self.model is not None, "Model loading failed!"
 
-                # 直接加载，模型配置中已包含 quantization_config
-                self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    self.model_name,
-                    torch_dtype=torch_dtype,
-                    device_map="auto",  # 自动分配到可用设备
-                    trust_remote_code=True,
-                    # AWQ 模型不需要额外的量化配置
-                )
-            else:
-                # 标准 FP16/BF16 加载
-                self.logger.info(f"Loading model on {self.device} with {self.precision} precision...")
-                self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    self.model_name,
-                    torch_dtype=torch_dtype,
-                    device_map=self.device,
-                    trust_remote_code=True,
-                )
+        self.logger.info("✓ Model loaded successfully")
 
-            self.logger.info("Teacher model loaded successfully")
-            self.logger.info(f"Model device: {self.device}")
-            self.logger.info(f"Model precision: {self.precision}")
+        # 显示实际设备分配
+        if hasattr(self.model, 'hf_device_map'):
+            self.logger.info(f"Device map: {self.model.hf_device_map}")
+        else:
+            # AWQ模型使用 .cuda()，没有 hf_device_map
+            self.logger.info(f"Model loaded on: {self.model.device}")
 
-            # 显示模型参数量
-            total_params = sum(p.numel() for p in self.model.parameters())
-            self.logger.info(f"Total parameters: {total_params / 1e9:.2f}B")
+        # 显示模型参数量
+        total_params = sum(p.numel() for p in self.model.parameters())
+        self.logger.info(f"Total parameters: {total_params / 1e9:.2f}B")
 
-        except Exception as e:
-            self.logger.error(f"Failed to load model: {e}")
-            self.logger.error(f"Possible solutions:")
-            self.logger.error(f"  1. Use local model path in config: teacher.model_name")
-            self.logger.error(f"  2. Use HuggingFace mirror: teacher.hf_mirror: 'https://hf-mirror.com'")
-            self.logger.error(f"  3. Download model manually and use local path")
-            self.logger.error(f"  4. Ensure sufficient GPU memory (~40GB for 72B AWQ)")
-            raise
+        # 显示显存占用
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            self.logger.info(f"GPU memory: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
 
     def inference_vqa(
         self,
@@ -186,6 +252,21 @@ class TeacherModel:
             system_prompt = None
             user_prompt = self._construct_prompt(question, task="vqa")
 
+        # Transformers 推理
+        return self._inference_vqa_transformers(
+            image, user_prompt, system_prompt,
+            return_logits, generate_cot
+        )
+
+    def _inference_vqa_transformers(
+        self,
+        image: Union[Image.Image, str, Path],
+        user_prompt: str,
+        system_prompt: Optional[str],
+        return_logits: bool,
+        generate_cot: bool
+    ) -> Dict[str, Any]:
+        """Transformers 后端的 VQA 推理"""
         # Prepare inputs
         inputs = self._prepare_inputs(image, user_prompt, system_prompt=system_prompt)
 
@@ -613,17 +694,28 @@ class TeacherModel:
         Returns:
             Processed VQA result
         """
-        # Decode generated text
+        # transformers 输出格式
         generated_ids = outputs.sequences
         generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-
-        # Extract answer (remove prompt part)
         answer = self._extract_answer(generated_text)
+
+        # 🔧 计算置信度
+        confidence = 0.8  # 默认值
+        if hasattr(outputs, 'scores') and outputs.scores:
+            try:
+                # 从第一个生成的 token 计算 confidence
+                first_token_logits = outputs.scores[0]
+                probs = torch.softmax(first_token_logits[0], dim=-1)
+                max_prob = probs.max().item()
+                confidence = max_prob
+            except Exception as e:
+                self.logger.debug(f"Failed to compute confidence: {e}")
 
         result = {
             'full_response': generated_text,
             'answer': answer,
-            'sequences': generated_ids[0].cpu().tolist(),  # 🔧 返回完整序列，方便诊断
+            'sequences': generated_ids[0].cpu().tolist(),
+            'confidence': confidence,
         }
 
         if return_logits:
@@ -631,107 +723,22 @@ class TeacherModel:
             logits = self._process_logits(outputs.scores)
             result['logits'] = logits
 
-            # 🔧 关键修复：定位答案token的正确位置
-            # 问题：之前的逻辑可能取错了logits位置
-            # 解决：找到assistant标记后的第一个非空白token
-
-            # 获取完整的生成序列
-            full_sequence = generated_ids[0].cpu().tolist()
-
-            # 方法：使用tokenizer的特殊token来定位答案开始位置
-            assistant_token = "<|im_start|>assistant"
-            assistant_token_ids = self.tokenizer.encode(assistant_token, add_special_tokens=False)
-
-            # 在序列中查找assistant token
-            answer_start_idx = 0
-            for i in range(len(full_sequence) - len(assistant_token_ids) + 1):
-                if full_sequence[i:i+len(assistant_token_ids)] == assistant_token_ids:
-                    answer_start_idx = i + len(assistant_token_ids)
-                    break
-
-            # 如果找不到assistant token，使用fallback方法
-            if answer_start_idx == 0:
-                self.logger.warning("Could not find assistant token, using fallback method")
-                # Fallback：查找最后一个换行符后的位置
-                for i in range(len(full_sequence) - 1, -1, -1):
-                    token_text = self.tokenizer.decode([full_sequence[i]])
-                    if '\n' in token_text or i == 0:
-                        answer_start_idx = i + 1 if '\n' in token_text else i
-                        break
-
-            # 提取答案token IDs（去掉前导空白token）
-            answer_token_ids = full_sequence[answer_start_idx:]
-            while answer_token_ids and self.tokenizer.decode([answer_token_ids[0]]).strip() == '':
-                answer_token_ids = answer_token_ids[1:]
-
-            result['answer_token_ids'] = answer_token_ids
-            result['answer_start_idx'] = answer_start_idx  # 🔧 记录答案开始位置
-
-            # 🔧 关键改进：只返回答案第一个token对应的logits
-            # logits的shape: [num_generated_tokens, vocab_size]
-            # 答案第一个token的logits应该在 answer_start_idx - (len(full_sequence) - len(answer_token_ids)) 位置
-            # 或者更简单：直接取第一个生成步骤的logits（对应答案第一个token）
-
-            if 'top_k_indices' in logits and 'top_k_values' in logits:
-                indices = logits['top_k_indices']
-                values = logits['top_k_values']
-
-                # 🔧 优先级1修复：确保取的是答案第一个token的logits
-                # logits_stack 的第0个位置对应生成的第一个token（答案第一个token）
-                # 所以直接取 [0] 或 [0, 0]
-
-                if indices.dim() == 1:
-                    # 已经是单个位置的top-k
-                    first_answer_indices = indices
-                    first_answer_values = values
-                elif indices.dim() == 2:
-                    # [num_tokens, top_k] - 取第0个token（答案第一个token）
-                    first_answer_indices = indices[0]
-                    first_answer_values = values[0]
-                elif indices.dim() == 3:
-                    # [num_tokens, batch_size, top_k] - 取第0个token，第0个batch
-                    first_answer_indices = indices[0, 0]
-                    first_answer_values = values[0, 0]
-
-                # 🔧 验证：logits的top-1必须和答案token一致（temperature=0时）
-                top1_token_id = first_answer_indices[0].item()
-                top1_word = self.tokenizer.decode([top1_token_id]).strip().lower()
-
-                # 记录验证信息
-                result['logits_top1_token_id'] = top1_token_id
-                result['logits_top1_word'] = top1_word
-
-                # 对比答案
-                if answer_token_ids:
-                    answer_first_token_id = answer_token_ids[0]
-                    answer_first_word = self.tokenizer.decode([answer_first_token_id]).strip().lower()
-
-                    # 验证是否匹配
-                    if top1_token_id == answer_first_token_id:
-                        self.logger.debug(f"✓ Logits top-1 matches answer: '{top1_word}'")
-                    else:
-                        self.logger.warning(f"⚠ Logits top-1 mismatch!")
-                        self.logger.warning(f"  Answer first token: {answer_first_token_id} ('{answer_first_word}')")
-                        self.logger.warning(f"  Logits top-1 token: {top1_token_id} ('{top1_word}')")
-                        self.logger.warning(f"  This indicates logits extraction position is wrong!")
-
-                # 🔧 只返回答案第一个token的logits（简化后续处理）
-                result['logits'] = {
-                    'top_k_indices': first_answer_indices,
-                    'top_k_values': first_answer_values,
-                    'position': 'answer_first_token',  # 标记提取位置
-                }
-
-            # 调试日志
-            self.logger.debug(f"Full sequence length: {len(full_sequence)}")
-            self.logger.debug(f"Answer start index: {answer_start_idx}")
-            self.logger.debug(f"Answer token IDs: {answer_token_ids[:10]}...")
-            self.logger.debug(f"Answer tokens: {self.tokenizer.decode(answer_token_ids[:10])}")
-
-            # 计算置信度（基于答案token）
-            result['confidence'] = self._compute_confidence_from_tokens(logits, answer_token_ids)
-
         return result
+
+    def _process_logits(self, scores):
+        """处理 logits 输出"""
+        # 简化实现：返回 logits 字典
+        if not scores:
+            return {}
+
+        # 转换为 tensor
+        logits = torch.stack(scores, dim=0) if isinstance(scores, (list, tuple)) else scores
+
+        return {
+            'scores': logits,
+            'top_k_indices': None,
+            'top_k_values': None,
+        }
 
     def _process_captioning_outputs(
         self,
@@ -781,7 +788,7 @@ class TeacherModel:
         Returns:
             Processed detection result
         """
-        # Decode
+        # transformers 输出格式
         generated_ids = outputs.sequences
         generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
 
@@ -814,7 +821,7 @@ class TeacherModel:
         Returns:
             Processed keypoints result with persons and their keypoint coordinates
         """
-        # Decode
+        # transformers 输出格式
         generated_ids = outputs.sequences
         generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
 

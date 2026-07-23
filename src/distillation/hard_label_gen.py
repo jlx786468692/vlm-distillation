@@ -13,6 +13,7 @@ from datetime import datetime
 from ..models.teacher_model import TeacherModel
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
+from ..utils.answer_normalizer import normalize_answer
 
 
 class HardLabelGenerator:
@@ -72,8 +73,17 @@ class HardLabelGenerator:
         )
 
         # Extract hard label
+        answer_raw = result.get('answer', '')
+
+        # 🔧 标准化答案格式：将数字转换为英文单词，确保与软标签一致
+        # 例如：'1' -> 'one', '2' -> 'two'
+        answer = normalize_answer(answer_raw, target_format='word')
+
+        if answer != answer_raw:
+            self.logger.debug(f"[Answer Normalization] Hard label: '{answer_raw}' -> '{answer}'")
+
         hard_label = {
-            'answer': result.get('answer', ''),
+            'answer': answer,
             'confidence': result.get('confidence', 0.0),
         }
 

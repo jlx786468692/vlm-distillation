@@ -1,27 +1,70 @@
-# Core dependencies
-torch>=2.0.0
-transformers>=4.40.0
-accelerate>=0.27.0
-datasets
-qwen-vl-utils
+# ============================================
+# VLM Distillation 环境依赖
+# 环境文档: docs/环境依赖说明.md
+# ============================================
 
-# COCO dataset utilities
-pycocotools
-Pillow
+# ============================================
+# PyTorch (需单独安装，见下方说明)
+# ============================================
+# 推荐使用 conda 安装:
+# conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia
+#
+# 或使用 pip:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-# Data processing
-numpy
-pandas
+# torch>=2.5.0
+# torchvision>=0.20.0
+# torchaudio>=2.5.0
 
-# Configuration and utilities
-pyyaml
-tqdm
-python-dotenv
+# ============================================
+# Transformers 和推理引擎
+# ============================================
+transformers>=4.49.0          # Qwen2.5-VL 支持(当前 4.49.0 是 Qwen2.5-VL AWQ 的唯一稳定版本，升级到 4.50+ 会触发 triton 编译错误。)
+accelerate>=1.14.0           # 模型加载优化，device_map="auto"
 
-# Optional: For visualization and analysis
-matplotlib
-seaborn
+# AWQ 量化支持（Qwen2.5-VL AWQ 模型需要）
+autoawq>=0.2.7.post3               # AWQ 量化库（transformers 加载 AWQ VL 模型时需要）
+                                    #当前 0.2.7.post3 是和 transformers 4.49.0 兼容的唯一版本，升级后会强制要求 transformers<=4.45。
+# vLLM (备选，Qwen2.5-VL 多模态支持有问题，暂不推荐)
+# vllm>=0.6.0
 
-# Optional: For advanced features
-scikit-learn
-scipy
+# ============================================
+# 数据处理
+# ============================================
+numpy>=2.2.0                 # 数值计算
+scipy>=1.15.0                # 科学计算
+pillow>=12.0.0               # 图像处理
+opencv-python>=4.10.0        # 图像处理（检测任务）
+pycocotools                  # COCO 数据集工具
+pandas>=2.0.0                # 数据分析
+
+# ============================================
+# 工具库
+# ============================================
+tqdm>=4.69.0                 # 进度条
+pyyaml>=6.0                  # YAML 配置文件
+requests>=2.32.0             # HTTP 请求
+python-dotenv>=1.0.0         # 环境变量管理
+
+# ============================================
+# 可选依赖
+# ============================================
+matplotlib>=3.9.0            # 可视化
+seaborn>=0.13.0              # 统计可视化
+scikit-learn>=1.5.0          # 机器学习工具
+
+# Qwen-VL 工具
+qwen-vl-utils                # Qwen-VL 视觉处理工具
+
+# ============================================
+# DSPy (可选，用于 prompt 优化)
+# ============================================
+# dspy-ai>=2.5.0
+
+# ============================================
+# 开发依赖 (可选)
+# ============================================
+# pytest>=8.0.0
+# black>=24.0.0
+# isort>=5.13.0
+# mypy>=1.8.0

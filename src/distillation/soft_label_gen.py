@@ -16,6 +16,7 @@ from ..models.teacher_model import TeacherModel
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
 from ..utils.vqa_token_filter import VQATokenFilter
+from ..utils.answer_normalizer import normalize_answer
 
 
 class SoftLabelGenerator:
@@ -87,7 +88,14 @@ class SoftLabelGenerator:
         # 🔧 从 hard_label 获取 logits 和答案信息
         if hard_label_result and 'logits' in hard_label_result:
             logits_data = hard_label_result['logits']
-            primary_answer = hard_label_result.get('answer', '')
+            primary_answer_raw = hard_label_result.get('answer', '')
+
+            # 🔧 标准化答案格式：将数字转换为英文单词，确保与 answer_distribution 键一致
+            # 例如：'1' -> 'one', '2' -> 'two'
+            primary_answer = normalize_answer(primary_answer_raw, target_format='word')
+
+            if primary_answer != primary_answer_raw:
+                self.logger.debug(f"[Answer Normalization] '{primary_answer_raw}' -> '{primary_answer}'")
 
             # 🔧 传入 primary_answer，确保分布合理
             # 🔧 新增：传入question用于上下文感知过滤
@@ -110,18 +118,28 @@ class SoftLabelGenerator:
 
         # 如果没有 logits，调用模型获取
         if hard_label_result and 'answer' in hard_label_result:
-            primary_answer = hard_label_result['answer']
+            primary_answer_raw = hard_label_result['answer']
+
+            # 🔧 标准化答案格式：将数字转换为英文单词
+            primary_answer = normalize_answer(primary_answer_raw, target_format='word')
+
+            if primary_answer != primary_answer_raw:
+                self.logger.debug(f"[Answer Normalization] '{primary_answer_raw}' -> '{primary_answer}'")
 
             # 简化分布
             confidence = hard_label_result.get('confidence', 0.5)
             main_prob = min(confidence, 0.98)
 
+            distribution = {
+                primary_answer.lower(): main_prob,
+                'other': 1.0 - main_prob
+            }
+            allowed_answers = list(distribution.keys())  # ✅ 添加 allowed_answers
+
             soft_label = {
-                'answer_distribution': {
-                    primary_answer.lower(): main_prob,
-                    'other': 1.0 - main_prob
-                },
-                'primary_answer': primary_answer
+                'answer_distribution': distribution,
+                'primary_answer': primary_answer,
+                'allowed_answers': allowed_answers  # ✅ 同源
             }
             return soft_label
 
@@ -144,16 +162,23 @@ class SoftLabelGenerator:
                 answer_candidates,
                 question=question
             )
+            allowed_answers = list(distribution.keys())  # ✅ 同源
+
             soft_label = {
                 'answer_distribution': distribution,
-                'primary_answer': primary_answer
+                'primary_answer': primary_answer,
+                'allowed_answers': allowed_answers  # ✅ 添加
             }
         else:
+            distribution = {
+                result.get('answer', 'unknown').lower(): 1.0
+            }
+            allowed_answers = list(distribution.keys())  # ✅ 同源
+
             soft_label = {
-                'answer_distribution': {
-                    result.get('answer', 'unknown').lower(): 1.0
-                },
-                'primary_answer': primary_answer
+                'answer_distribution': distribution,
+                'primary_answer': primary_answer,
+                'allowed_answers': allowed_answers  # ✅ 添加
             }
 
         return soft_label
@@ -509,6 +534,11 @@ class SoftLabelGenerator:
         if 'top_k_indices' in logits_data and 'top_k_values' in logits_data:
             token_indices = logits_data['top_k_indices']
             token_logits = logits_data['top_k_values']  # 🔧 现在是logits，不是概率
+
+            # 🔧 修复3：空值防护，阻断 None.dim() 崩溃
+            if token_indices is None or token_logits is None:
+                self.logger.warning("[VQA Logits] token_indices or token_logits is None, returning empty distribution")
+                return distribution
 
             # 🔧 修复：正确处理不同维度的tensor
             # 期望形状：[num_tokens, top_k] 或 [top_k]
