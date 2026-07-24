@@ -4,6 +4,9 @@ VQA Token 过滤器
 
 用于剔除VQA软标签中的噪音token，只保留有效答案。
 配置路径从主配置文件(default.yaml)读取，配置内容在独立的YAML文件中。
+
+新增功能：
+- 词干归一化（Stemming）：将 animal/animals 视为同一候选
 """
 
 import re
@@ -18,6 +21,9 @@ class VQATokenFilter:
 
     根据问题类型和答案特征，智能过滤噪音token
     配置路径从主配置文件读取，配置内容在独立的YAML文件中
+
+    新增功能：
+    - 词干归一化（Stemming）：统一处理单复数形式
     """
 
     def __init__(self, config_path: Optional[Union[str, Path]] = None):
@@ -34,6 +40,9 @@ class VQATokenFilter:
 
         # 初始化所有配置
         self._init_all_configs()
+
+        # 🔧 新增：词干归一化配置
+        self.enable_stemming = self.config.get('stemming', {}).get('enabled', True)
 
     def _load_config(self) -> Dict:
         """
@@ -507,6 +516,64 @@ class VQATokenFilter:
 
         return filtered
 
+    def _stem_word(self, word: str) -> str:
+        """
+        词干归一化（Stemming）
+
+        将单词转换为词干形式，统一处理单复数等变体。
+        使用简单规则，避免引入nltk等重量级依赖。
+
+        Args:
+            word: 输入单词
+
+        Returns:
+            词干形式
+
+        Examples:
+            animals -> animal
+            dogs -> dog
+            cats -> cat
+            watches -> watch
+            boxes -> box
+        """
+        if not word or len(word) < 3:
+            return word
+
+        # 常见复数规则（按优先级排序）
+        # 1. -ies -> -y (babies -> baby)
+        if word.endswith('ies') and len(word) > 4:
+            return word[:-3] + 'y'
+
+        # 2. -es -> 去掉es (boxes -> box, watches -> watch)
+        if word.endswith('es') and len(word) > 3:
+            # 但要避免误处理如: cheese, geese
+            if word.endswith('ses') or word.endswith('xes') or word.endswith('zes') or \
+               word.endswith('ches') or word.endswith('shes'):
+                return word[:-2]
+
+        # 3. -s -> 去掉s (dogs -> dog, cats -> cat)
+        if word.endswith('s') and not word.endswith('ss'):
+            return word[:-1]
+
+        return word
+
+    def _get_stemmed_token(self, token: str) -> str:
+        """
+        获取token的词干形式（带缓存）
+
+        Args:
+            token: 输入token
+
+        Returns:
+            词干形式
+        """
+        if not self.enable_stemming:
+            return token
+
+        # 简单缓存（可选）
+        token_lower = token.lower().strip()
+        return self._stem_word(token_lower)
+
     def get_canonical_token(self, token: str) -> str:
         """
         获取token的标准形式（用于合并等价token）
@@ -536,6 +603,8 @@ class VQATokenFilter:
         """
         合并等价token的概率
 
+        新增功能：应用词干归一化，将 animal/animals 视为同一候选
+
         Args:
             distribution: 原始答案分布
 
@@ -545,12 +614,19 @@ class VQATokenFilter:
         merged = {}
 
         for token, prob in distribution.items():
+            # Step 1: 获取标准形式（等价token映射）
             canonical = self.get_canonical_token(token)
 
-            if canonical in merged:
-                merged[canonical] += prob
+            # Step 2: 应用词干归一化（如果启用）
+            if self.enable_stemming:
+                stemmed = self._get_stemmed_token(canonical)
             else:
-                merged[canonical] = prob
+                stemmed = canonical
+
+            if stemmed in merged:
+                merged[stemmed] += prob
+            else:
+                merged[stemmed] = prob
 
         # 归一化
         total = sum(merged.values())

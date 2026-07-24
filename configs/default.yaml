@@ -104,7 +104,7 @@ distillation:
   # Hard label configuration
   hard_labels:
     enabled: true
-    confidence_threshold: 0.4
+    confidence_threshold: 0.4  # 🔧 置信度阈值：低于此值将跳过soft_label和CoT生成（性能优化）
     save_format: "json"
 
   # Soft label configuration

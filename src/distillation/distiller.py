@@ -306,6 +306,22 @@ class Distiller:
                     )
                     task_result['hard_label'] = hard_labels
 
+                    # 🔧 新增：置信度拦截（在数据入口处过滤低质量样本）
+                    # 如果硬标签置信度低于阈值，跳过后续标签生成
+                    confidence = hard_labels.get('confidence', 0.0)
+                    if confidence < self.hard_label_gen.confidence_threshold:
+                        self.logger.warning(
+                            f"[Low Confidence Filter] Image {image_id}, task {task}: "
+                            f"confidence {confidence:.4f} < {self.hard_label_gen.confidence_threshold}, "
+                            f"skipping soft_label and CoT generation"
+                        )
+                        # 标记为已过滤
+                        task_result['hard_label']['filtered'] = True
+                        # 跳过后续标签生成，直接进入下一个task
+                        # 注意：仍然保存hard_label，但soft_label和CoT不生成
+                        image_result['tasks'][task] = task_result
+                        continue
+
                 # Step 2: 生成 Soft Label（使用 hard_label 的 logits）
                 if self.enable_soft_labels:
                     hard_label_for_soft = task_result.get('hard_label') if self.enable_hard_labels else None
