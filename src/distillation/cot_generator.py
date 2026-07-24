@@ -83,13 +83,17 @@ class CoTGenerator:
 
         # Get teacher model inference with CoT
         # 🔧 第一层：传入 primary_answer 和 allowed_answers
+        # 🔧 优化：使用缓存的视觉特征（第二次推理）
         result = self.teacher.inference_vqa(
             image=image_path,
             question=question,
             return_logits=False,  # 不需要 logits
             generate_cot=True,
             primary_answer=primary_answer,
-            allowed_answers=allowed_answers
+            allowed_answers=allowed_answers,
+            cache_visual=False,  # 不需要再次缓存
+            use_cached_visual=True,  # 🔧 使用第一次缓存的视觉特征
+            image_id=image_id  # 提供image_id用于缓存查找
         )
 
         # Extract and structure CoT

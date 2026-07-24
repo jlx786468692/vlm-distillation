@@ -91,6 +91,11 @@ class TeacherModel:
         self.tokenizer = None
         self.processor = None
 
+        # 🔧 视觉特征缓存（性能优化）
+        self._visual_cache = {}  # {image_id: visual_features}
+        self._cache_enabled = self.config.get("teacher.cache_visual_features", True)
+        self._cache_max_size = self.config.get("teacher.cache_max_size", 1000)
+
         # Load model
         self._load_model()
 
@@ -229,7 +234,10 @@ class TeacherModel:
         return_logits: bool = False,
         generate_cot: bool = False,
         primary_answer: Optional[str] = None,
-        allowed_answers: Optional[List[str]] = None
+        allowed_answers: Optional[List[str]] = None,
+        cache_visual: bool = True,  # 🔧 新增：是否缓存视觉特征
+        use_cached_visual: bool = False,  # 🔧 新增：是否使用缓存的视觉特征
+        image_id: Optional[str] = None  # 🔧 新增：图像ID（用于缓存）
     ) -> Dict[str, Any]:
         """
         Perform VQA inference.
@@ -241,6 +249,9 @@ class TeacherModel:
             generate_cot: Whether to generate Chain-of-Thought reasoning
             primary_answer: Reference answer from hard_label (for CoT prompt)
             allowed_answers: List of allowed answers from soft_label (for CoT prompt)
+            cache_visual: Whether to cache visual features (default: True)
+            use_cached_visual: Whether to use cached visual features (default: False)
+            image_id: Image ID for caching (auto-extracted from path if not provided)
 
         Returns:
             Dictionary with answer, confidence, and optionally logits/cot
@@ -255,7 +266,10 @@ class TeacherModel:
         # Transformers 推理
         return self._inference_vqa_transformers(
             image, user_prompt, system_prompt,
-            return_logits, generate_cot
+            return_logits, generate_cot,
+            cache_visual=cache_visual,
+            use_cached_visual=use_cached_visual,
+            image_id=image_id
         )
 
     def _inference_vqa_transformers(
@@ -264,11 +278,18 @@ class TeacherModel:
         user_prompt: str,
         system_prompt: Optional[str],
         return_logits: bool,
-        generate_cot: bool
+        generate_cot: bool,
+        cache_visual: bool = True,  # 🔧 新增参数
+        use_cached_visual: bool = False,  # 🔧 新增参数
+        image_id: Optional[str] = None  # 🔧 新增参数
     ) -> Dict[str, Any]:
         """Transformers 后端的 VQA 推理"""
         # Prepare inputs
-        inputs = self._prepare_inputs(image, user_prompt, system_prompt=system_prompt)
+        inputs = self._prepare_inputs(
+            image, user_prompt, system_prompt=system_prompt,
+            use_cached_visual=use_cached_visual,  # 🔧 使用缓存参数
+            image_id=image_id if cache_visual or use_cached_visual else None
+        )
 
         # Generate
         outputs = self._generate(inputs, return_logits=return_logits)
@@ -559,7 +580,9 @@ class TeacherModel:
         self,
         image: Union[Image.Image, str, Path],
         prompt: str,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        use_cached_visual: bool = False,
+        image_id: Optional[str] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Prepare inputs for model inference.
@@ -567,18 +590,37 @@ class TeacherModel:
         Args:
             image: PIL Image or path
             prompt: Text prompt
+            system_prompt: Optional system prompt
+            use_cached_visual: Whether to use cached visual features (default: False)
+            image_id: Image ID for caching (optional)
 
         Returns:
             Dictionary of input tensors
         """
         # Load image if path provided
         if isinstance(image, (str, Path)):
+            # 🔧 自动提取image_id（如果未提供）
+            if not image_id:
+                image_id = Path(str(image)).stem
+
+            # 加载图像
             image = Image.open(image).convert('RGB')
 
-        # Construct message format for Qwen-VL
+        # 🔧 检查缓存（如果启用）
+        if use_cached_visual and image_id and image_id in self._visual_cache:
+            self.logger.debug(f"[Cache] Using cached visual features for image {image_id}")
+            cached_features = self._visual_cache[image_id]
+
+            # 使用缓存的视觉特征，只处理文本
+            inputs = self._prepare_text_inputs(prompt, system_prompt)
+            inputs.update(cached_features)
+
+            return inputs
+
+        # 🔧 正常处理（无缓存或缓存未命中）
         messages = []
 
-        # 🔧 添加 system 消息（如果提供）
+        # 添加 system 消息（如果提供）
         if system_prompt:
             messages.append({
                 "role": "system",
@@ -612,7 +654,119 @@ class TeacherModel:
         # Move to device
         inputs = {k: v.to(self.device) if hasattr(v, 'to') else v for k, v in inputs.items()}
 
+        # 🔧 缓存视觉特征（如果启用且未命中）
+        if self._cache_enabled and image_id and image_id not in self._visual_cache:
+            visual_features = self._extract_visual_features(inputs)
+            self._add_to_cache(image_id, visual_features)
+            self.logger.debug(f"[Cache] Cached visual features for image {image_id}")
+
         return inputs
+
+    def _prepare_text_inputs(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Prepare text-only inputs (without image).
+
+        Used when visual features are cached.
+
+        Args:
+            prompt: Text prompt
+            system_prompt: Optional system prompt
+
+        Returns:
+            Dictionary of text input tensors
+        """
+        messages = []
+
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        messages.append({"role": "user", "content": prompt})
+
+        # Apply chat template
+        text = self.processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
+        # Process text inputs only
+        inputs = self.processor(
+            text=[text],
+            padding=True,
+            return_tensors="pt"
+        )
+
+        # Move to device
+        inputs = {k: v.to(self.device) if hasattr(v, 'to') else v for k, v in inputs.items()}
+
+        return inputs
+
+    def _extract_visual_features(self, inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Extract visual features from inputs for caching.
+
+        Args:
+            inputs: Full input tensors
+
+        Returns:
+            Dictionary containing only visual features:
+            - pixel_values: Image pixel values
+            - image_grid_thw: Image grid dimensions
+            - image_sizes: Image sizes (if available)
+        """
+        visual_keys = ['pixel_values', 'image_grid_thw', 'image_sizes']
+        visual_features = {}
+
+        for key in visual_keys:
+            if key in inputs:
+                visual_features[key] = inputs[key]
+
+        return visual_features
+
+    def _add_to_cache(self, image_id: str, visual_features: Dict[str, torch.Tensor]) -> None:
+        """
+        Add visual features to cache with LRU eviction.
+
+        Args:
+            image_id: Image identifier
+            visual_features: Visual features to cache
+        """
+        # Check cache size limit
+        if len(self._visual_cache) >= self._cache_max_size:
+            # Evict oldest entry (FIFO strategy)
+            oldest_key = next(iter(self._visual_cache))
+            del self._visual_cache[oldest_key]
+            self.logger.debug(f"[Cache] Evicted entry: {oldest_key} (LRU)")
+
+        # Add to cache
+        self._visual_cache[image_id] = visual_features
+
+    def clear_cache(self) -> None:
+        """Clear visual features cache."""
+        self._visual_cache.clear()
+        self.logger.info("[Cache] Visual features cache cleared")
+
+    def get_cache_info(self) -> Dict[str, Any]:
+        """
+        Get cache statistics.
+
+        Returns:
+            Dictionary with cache info:
+            - enabled: Whether cache is enabled
+            - size: Current cache size
+            - max_size: Maximum cache size
+            - usage_percent: Cache usage percentage
+        """
+        return {
+            'enabled': self._cache_enabled,
+            'size': len(self._visual_cache),
+            'max_size': self._cache_max_size,
+            'usage_percent': len(self._visual_cache) / self._cache_max_size * 100 if self._cache_max_size > 0 else 0
+        }
 
     def _generate(
         self,
