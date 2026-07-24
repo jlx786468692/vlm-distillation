@@ -6,7 +6,7 @@ Placeholder for student model wrapper.
 """
 
 import torch
-from transformers import VisionEncoderDecoderModel, AutoTokenizer, AutoProcessor
+from transformers import AutoModelForVision2Seq, AutoTokenizer, AutoProcessor
 from typing import Dict, Any, Optional, Union
 from pathlib import Path
 from PIL import Image

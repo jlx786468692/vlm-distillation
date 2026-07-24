@@ -1818,21 +1818,6 @@ class TeacherModel:
                     result['question'] = question
                     results.append(result)
 
-            elif task == 'captioning':
-                result = self.inference_captioning(image, return_logits=True, generate_cot=True, num_captions=3)
-                result['image_id'] = image_id
-                results.append(result)
-
-            elif task == 'detection':
-                result = self.inference_detection(image, return_logits=True, generate_cot=True)
-                result['image_id'] = image_id
-                results.append(result)
-
-            elif task == 'keypoints':
-                result = self.inference_keypoints(image, return_logits=True, generate_cot=True)
-                result['image_id'] = image_id
-                results.append(result)
-
         return results
 
     def get_model_info(self) -> Dict[str, Any]:

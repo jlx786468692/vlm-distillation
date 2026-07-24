@@ -1,0 +1,102 @@
+# ============================================================
+# 工具模块配置 (Tools Configuration)
+# ============================================================
+#
+# 使用方式：
+#   python -m tools all --config configs/tools.yaml
+#   python -m tools prompt_generator --config configs/tools.yaml
+#   python -m tools candidate_closure --config configs/tools.yaml
+#
+# 注意：
+#   - 此配置文件用于工具模块的独立配置
+#   - 如需引用主配置(default.yaml)中的参数，请使用相对路径引用
+#   - 工具会优先使用此配置，如不存在则使用default.yaml
+# ============================================================
+
+# ============================================================
+# Prompt生成配置
+# ============================================================
+prompt_generation:
+  # 数据源配置
+  source_dir: "outputs/merged"       # 数据源目录（标签数据）
+  num_samples: 100                   # 使用样本数
+
+  # 生成策略（四种选择）
+  # - real_labels: 基于真实标签生成（推荐，高质量）
+  # - pattern_based: 基于数据模式生成（无需标注数据）
+  # - dspy: DSPy MIPROv2优化生成（自动优化prompt结构）
+  # - dspy_fewshot: DSPy Few-Shot方法（基于真实数据示例）
+  strategy: "dspy_fewshot"
+
+  # 输出配置
+  output_file: "outputs/prompts/vqa_en.yaml"
+
+  # real_labels策略参数
+  real_labels:
+    min_confidence: 0.4              # 最低置信度阈值
+
+  # pattern_based策略参数
+  pattern_based:
+    coco_annotation: "data/coco/annotations/captions_val2014.json"
+    analyze_samples: 1000
+
+  # dspy策略参数（MIPROv2）
+  dspy:
+    model: "models/Qwen2.5-VL-3B-Instruct"
+    num_trials: 10
+    metric: "f1_score"
+
+  # dspy_fewshot策略参数
+  dspy_fewshot:
+    top_k: 10                      # 选择Top-K高质量示例
+    min_confidence: 0.7            # 最低置信度阈值
+
+# ============================================================
+# 候选集封闭配置
+# ============================================================
+candidate_closure:
+  # 数据源配置
+  source_dir: "data/coco/annotations"
+
+  # 生成策略
+  strategy: "frequency_based"        # frequency_based | semantic_clustering
+
+  # 过滤参数
+  min_frequency: 5                   # 最低频率阈值
+  max_candidates: 100                # 最大候选数
+
+  # 输出配置
+  output_file: "outputs/candidate_sets/closure_data.json"
+
+  # 验证参数
+  validation:
+    check_coverage: true             # 是否检查覆盖率
+    min_coverage: 0.95               # 最低覆盖率阈值
+
+# ============================================================
+# Prompt优化配置（预留）
+# ============================================================
+prompt_optimization:
+  enabled: false                     # 是否启用优化
+  strategy: "dspy"                   # dspy | manual
+
+  dspy:
+    num_trials: 10
+    metric: "f1_score"
+    model: "models/Qwen2.5-VL-3B-Instruct"
+
+# ============================================================
+# 缓存和版本控制
+# ============================================================
+cache:
+  enabled: true                      # 启用缓存机制
+  check_data_hash: true              # 检查数据哈希变更
+  check_config_hash: true            # 检查配置哈希变更
+
+# ============================================================
+# 日志配置
+# ============================================================
+logging:
+  level: "INFO"                      # DEBUG | INFO | WARNING | ERROR
+  save_to_file: false                # 是否保存到文件
+  log_file: "logs/tools.log"

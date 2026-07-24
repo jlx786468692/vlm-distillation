@@ -117,10 +117,18 @@ Thumbs.db
 
 # Project specific
 data/coco/
-outputs/
 logs/
-*.json
 test_outputs/
+
+# 输出目录（保留结构，不追踪生成文件）
+outputs/merged/
+outputs/cleaned/
+outputs/visualizations/
+outputs/prompts/*.yaml
+outputs/prompts/*.json
+outputs/candidate_sets/*.json
+!outputs/prompts/.gitkeep
+!outputs/candidate_sets/.gitkeep
 
 # Model files (large)
 *.pth

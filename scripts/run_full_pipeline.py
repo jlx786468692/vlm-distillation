@@ -188,7 +188,7 @@ class FullPipelineRunner:
 
         # 从配置文件读取所有参数
         max_samples = self.config.get('data.max_samples', None)
-        tasks = self.config.get('distillation.tasks', ['vqa', 'captioning', 'detection'])
+        tasks = self.config.get('distillation.tasks', ['vqa'])
         min_quality = self.config.get('cleaning.min_quality_score', 30.0)
         min_confidence = self.config.get('cleaning.min_confidence', 0.6)
         output_dir = self.config.get('output.root_dir', './outputs')

@@ -3,10 +3,17 @@ project:
   version: "1.0.0"
   description: "VLM data distillation pipeline using Qwen2.5-VL-32B-Instruct-AWQ as teacher"
 
-# Prompt 配置文件路径
+# ============================================================
+# Prompt 配置文件路径（主流程使用）
+# ============================================================
 # prompts_config: "configs/prompts.yaml"  # 原版本（已删除）
 # prompts_config: "configs/prompts_zh.yaml"  # 中文版本
 prompts_config: "configs/prompts_en.yaml"  # 英文版本（数据集为英文）
+
+# 或者使用工具生成的prompt（推荐）
+# prompts_config: "outputs/prompts/vqa_en.yaml"  # 使用生成的prompt
+
+# 注意：Prompt生成和候选集封闭的配置在 configs/tools.yaml 中
 
 # Pipeline 运行控制
 pipeline:
@@ -302,3 +309,5 @@ visualization:
 vqa_token_filter:
   # 配置文件路径（独立的YAML文件）
   config_file: "configs/vqa_token_filter.yaml"
+  # 候选集封闭数据（使用工具生成）
+  candidate_sets: "outputs/candidate_sets/closure_data.json"
