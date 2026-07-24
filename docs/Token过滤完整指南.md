@@ -3,70 +3,566 @@
 ## 📋 目录
 
 1. [策略概述](#策略概述)
-2. [三层防护逻辑](#三层防护逻辑)
-3. [设计思路](#设计思路)
-4. [完整处理流程](#完整处理流程)
-5. [核心实现步骤](#核心实现步骤)
-6. [代码实现详解](#代码实现详解)
-7. [等价Token合并](#等价token合并)
-8. [配置参数说明](#配置参数说明)
-9. [效果示例](#效果示例)
-10. [问题诊断与修复](#问题诊断与修复)
-11. [测试验证](#测试验证)
-12. [性能影响](#性能影响)
-13. [相关文件](#相关文件)
+2. [VQA任务过滤指南](#vqa任务过滤指南)
+3. [Detect任务过滤指南](#detect任务过滤指南)
+4. [VQA与Detect对比](#vqa与detect对比)
+5. [三层防护逻辑](#三层防护逻辑)
+6. [设计思路](#设计思路)
+7. [完整处理流程](#完整处理流程)
+8. [核心实现步骤](#核心实现步骤)
+9. [代码实现详解](#代码实现详解)
+10. [等价Token合并](#等价token合并)
+11. [配置参数说明](#配置参数说明)
+12. [效果示例](#效果示例)
+13. [问题诊断与修复](#问题诊断与修复)
+14. [测试验证](#测试验证)
+15. [性能影响](#性能影响)
+16. [相关文件](#相关文件)
 
 ---
 
-## 策略概述
+## VQA任务过滤指南
 
-本项目采用**黑名单优先、硬标签保护、Top-K兜底**的三层防护策略，用于VQA软标签生成中的噪音token剔除。
+### 策略：黑名单 + 硬标签保护 + Top-K兜底
 
-> **核心原则**：拦截绝对不可能是单字答案的Token，确保正确答案永不丢失，保留合理的候选集。
+**核心原则**：拦截绝对不可能是单字答案的Token，确保正确答案永不丢失，保留合理的候选集。
 
-### 核心目标
+### 第一层：黑名单过滤（核心防线）
 
-1. **精准过滤**：拦截BPE碎片、标点符号、特殊Token等噪音
-2. **安全兜底**：硬标签保护确保正确答案永不丢失
-3. **多样性保障**：Top-K兜底防止过度过滤
-4. **概率合并**：避免同一答案的多个表示分散概率
+**拦截对象**（VQA中99%的噪音来源）：
 
-### 三层防护优先级
+#### 1. BPE子词碎片（最主要）
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  第一层：黑名单（核心防线）                              │
-│    ├─ BPE子词碎片：'Ġt', 'Ġa', 'ur', 'qu', 'ing'...   │
-│    ├─ 标点符号：'.', ',', '!', '?'...                  │
-│    ├─ 特殊Token：'<pad>', '</s>', '<unk>'...          │
-│    ├─ 纯空格/空字符串：'', '   '                        │
-│    └─ 纯符号组合：'@#', '$%'...                        │
-│    【目标】拦截绝对不可能是单字答案的Token               │
-├─────────────────────────────────────────────────────────┤
-│  第二层：硬标签保护（安全网）                            │
-│    └─ 强制保留hard_label_id                             │
-│    【目标】确保正确答案永不丢失                          │
-├─────────────────────────────────────────────────────────┤
-│  第三层：Top-K兜底（多样性保障）                         │
-│    └─ 如果过滤后<10个token，从Top-K补充                │
-│    【目标】防止过度过滤，保留候选集                      │
-└─────────────────────────────────────────────────────────┘
+```python
+# 这些在Qwen/BERT词表中数量巨大（约占词表30%~50%）
+# 但永远不可能单独作为VQA答案
+'Ġt', 'Ġa', 'ur', 'qu', 'ing', 'er', 'th', 'Ġthe', ...
 ```
 
-### 为什么采用黑名单而不是白名单？
+**关键特征**：
+- 以 `Ġ` 开头（BPE子词标记）
+- 1-2字母的碎片（如 'ur', 'qu', 'te'）
+- 纯子词片段（如 'ing', 'er', 'th'）
 
-| 对比项 | 白名单策略 | 黑名单策略（本项目） |
-|--------|-----------|---------------------|
-| **核心思路** | 只保留预定义的有效答案 | 拦截明确的噪音Token |
-| **适用场景** | 答案类型明确且有限（数字、颜色、二元） | VQA答案多样，难以预定义所有有效答案 |
-| **优点** | 过滤精准，噪音少 | 不遗漏未预定义的有效答案 |
-| **缺点** | 可能遗漏未知类型的有效答案 | 可能保留少量噪音 |
-| **本项目选择** | ❌ 不适用 | ✅ 适用（答案类型多样） |
+#### 2. 标点符号与特殊字符
 
-**关键原因**：
-- VQA答案类型多样：数字、颜色、位置、大小、物体、动作等
-- 无法预定义所有可能的有效答案
-- 采用黑名单策略，只拦截明确的噪音，保留更广泛的候选集
+```python
+'.', ',', '!', '?', ';', ':', '"', "'", '(', ')', '[', ']'
+'{', '}', '-', '_', '+', '=', '*', '&', '^', '%', '$', '#'
+'@', '!', '~', '`', '|', '\\', '/', '<', '>'
+```
+
+#### 3. 模型特殊Token
+
+```python
+'<pad>', '</s>', '<unk>', '<image>', '<bos>', '<eos>',
+'<s>', '</s>', '
+```
+
+#### 4. 纯空格/空字符串
+
+```python
+'', ' ', '  ', '   ', '\t', '\n', '\r'
+```
+
+#### 5. 数字以外的纯符号组合
+
+```python
+'@#', '$%', '^^', '***', '---', '___', '...', '!!!'
+```
+
+### 第二层：硬标签保护（安全网）
+
+**目标**：确保正确答案永不丢失
+
+**实现方式**：
+
+```python
+# 在Token ID层级强制保护
+hard_label_token_ids = set()
+if primary_answer_lower:
+    # 将主答案编码为token ID
+    encoded_ids = self.teacher.tokenizer.encode(primary_answer_lower, add_special_tokens=False)
+    hard_label_token_ids = set(encoded_ids)
+
+# 无论黑名单如何，强制保留
+for i, token_id in enumerate(first_token_indices):
+    if token_id.item() in hard_label_token_ids:
+        valid_token_mask[i] = True  # 强制保留
+        continue
+```
+
+### 第三层：Top-K兜底（多样性保障）
+
+**目标**：防止过滤后分布过于稀疏
+
+**触发条件**：
+- 黑名单过滤后剩余Token少于10个
+
+**实现逻辑**：
+
+```python
+min_valid_tokens = 10
+num_valid = valid_token_mask.sum().item()
+
+if num_valid < min_valid_tokens and num_valid > 0:
+    # 从Top-100中补充
+    top_k_fallback = min(self.top_k * 2, len(first_token_indices))
+    top_k_indices = torch.topk(token_probs_raw, top_k_fallback).indices
+    
+    # 使用宽松过滤策略补充
+    for idx in top_k_indices:
+        if not valid_token_mask[idx]:
+            token_str = self.teacher.tokenizer.decode([token_id.item()]).strip()
+            
+            # 不使用上下文感知，避免过度过滤
+            if self.token_filter.is_valid_token(token_str, None):
+                valid_token_mask[idx] = True
+                
+                if valid_token_mask.sum().item() >= min_valid_tokens:
+                    break
+```
+
+### 第四层：任务适配过滤（可选）
+
+**触发条件**：问题类型明确（数字、颜色、二元）
+
+**实现方式**：
+
+```python
+# 推断任务类型
+task_type = self.token_filter.infer_task_type(question, primary_answer)
+
+# 应用任务白名单过滤
+distribution = self.token_filter.filter_by_task_type(
+    distribution=distribution,
+    task_type=task_type,
+    hard_label=primary_answer,
+    preserve_hard_label=True
+)
+```
+
+**任务白名单示例**：
+
+| 任务类型 | 白名单示例 |
+|---------|-----------|
+| 数字（count） | 'zero', 'one', 'two', 'three', ... |
+| 颜色（color） | 'red', 'blue', 'green', 'gray', ... |
+| 二元（binary） | 'yes', 'no', 'maybe' |
+
+### VQA示例
+
+```
+问题: "How many people are wearing headphones?"
+
+原始Logits分布:
+  'one': 0.0815     ✓ 有效（数字答案）
+  'two': 0.0738     ✓ 有效（数字答案）
+  'yes': 0.0361     ✗ 噪音（二元答案）
+  'no': 0.0339      ✗ 噪音（二元答案）
+  'Ġt': 0.0073      ✗ 噪音（BPE碎片）
+  '.': 0.0069       ✗ 噪音（标点符号）
+
+第一层：黑名单过滤:
+  过滤掉: Ġt, .（明确噪音）
+  保留: one, two, yes, no
+
+第二层：硬标签保护:
+  主答案 'one' 强制保留
+
+第三层：Top-K兜底:
+  有效token数 = 4 < 10
+  → 从Top-100补充到至少10个token
+
+第四层：任务适配过滤:
+  任务类型: count
+  过滤掉: yes, no（不在数字白名单中）
+  保留: one, two
+
+最终分布:
+  'one': 0.5234
+  'two': 0.4766
+  + 8个补充的低概率token
+```
+
+---
+
+## Detect任务过滤指南
+
+### 策略：白名单 + 硬标签保底 + BPE黑名单辅助
+
+**核心原则**：只允许预定义的COCO 80类通过，确保GT类别永不丢失，辅助BPE碎片过滤。
+
+### 白名单构建
+
+**配置位置**: [configs/default.yaml](configs/default.yaml)
+
+```yaml
+detect:
+  categories:
+    # COCO 80类
+    - person
+    - bicycle
+    - car
+    - motorcycle
+    - airplane
+    - bus
+    - train
+    - truck
+    - boat
+    - traffic light
+    - fire hydrant
+    - stop sign
+    - parking meter
+    - bench
+    - bird
+    - cat
+    - dog
+    - horse
+    - sheep
+    - cow
+    - elephant
+    - bear
+    - zebra
+    - giraffe
+    - backpack
+    - umbrella
+    - handbag
+    - tie
+    - suitcase
+    - frisbee
+    - skis
+    - snowboard
+    - sports ball
+    - kite
+    - baseball bat
+    - baseball glove
+    - skateboard
+    - surfboard
+    - tennis racket
+    - bottle
+    - wine glass
+    - cup
+    - fork
+    - knife
+    - spoon
+    - bowl
+    - banana
+    - apple
+    - sandwich
+    - orange
+    - broccoli
+    - carrot
+    - hot dog
+    - pizza
+    - donut
+    - cake
+    - chair
+    - couch
+    - potted plant
+    - bed
+    - dining table
+    - toilet
+    - tv
+    - laptop
+    - mouse
+    - remote
+    - keyboard
+    - cell phone
+    - microwave
+    - oven
+    - toaster
+    - sink
+    - refrigerator
+    - book
+    - clock
+    - vase
+    - scissors
+    - teddy bear
+    - hair drier
+    - toothbrush
+    - background  # 无目标场景
+```
+
+### 白名单Token ID构建
+
+**关键改进**：支持多种token形式
+
+```python
+whitelist_ids = set()
+
+for category in self.detect_categories:
+    # 形式1: 类别本身（如 'person'）
+    token_ids = self.teacher.tokenizer.encode(category, add_special_tokens=False)
+    whitelist_ids.update(token_ids)
+    
+    # 形式2: 首字母大写（如 'Person'）
+    capitalized = category.capitalize()
+    token_ids = self.teacher.tokenizer.encode(capitalized, add_special_tokens=False)
+    whitelist_ids.update(token_ids)
+    
+    # 形式3: 全大写（如 'PERSON'）
+    upper = category.upper()
+    token_ids = self.teacher.tokenizer.encode(upper, add_special_tokens=False)
+    whitelist_ids.update(token_ids)
+    
+    # 形式4: 带空格前缀（如 ' person'）
+    with_space = f" {category}"
+    token_ids = self.teacher.tokenizer.encode(with_space, add_special_tokens=False)
+    whitelist_ids.update(token_ids)
+```
+
+### 过滤策略
+
+#### 第一层：BPE碎片黑名单（复用VQA）
+
+**目的**：拦截明确的噪音Token
+
+```python
+# 复用VQA的Token过滤器
+if self.token_filter and self.token_filter.is_valid_token(word, None):
+    # 不是BPE碎片，继续处理
+    items.append((word, float(prob_val)))
+```
+
+#### 第二层：类别白名单过滤（核心）
+
+**目的**：只允许COCO 80类通过
+
+```python
+def _apply_category_whitelist(self, distribution, hard_label_category):
+    """
+    应用Detect类别白名单过滤
+    """
+    filtered_distribution = {}
+    
+    for word, prob in distribution.items():
+        word_lower = word.lower()
+        
+        # 🔧 硬标签保底：GT类别永远不被过滤
+        if word_lower == hard_label_category.lower():
+            filtered_distribution[word_lower] = prob
+            continue
+        
+        # 🔧 白名单过滤：只允许白名单内的类别
+        token_ids = self.teacher.tokenizer.encode(word, add_special_tokens=False)
+        
+        # 如果所有token都在白名单内，则保留
+        if all(tid in self.category_whitelist_token_ids for tid in token_ids):
+            filtered_distribution[word_lower] = prob
+```
+
+#### 第三层：硬标签保底（安全网）
+
+**目的**：确保GT类别永不丢失
+
+```python
+# 在logits处理阶段
+category_lower = category.lower()
+if category_lower not in word_probs:
+    # 强制添加，使用置信度作为概率
+    word_probs[category_lower] = confidence
+```
+
+### Detect示例
+
+```
+检测结果: person (置信度: 0.85)
+
+原始Logits分布:
+  'person': 0.35      ✓ 有效（在COCO白名单中）
+  'people': 0.15      ✓ 有效（COCO类别变体）
+  'man': 0.10         ✗ 过滤（不在COCO白名单中）
+  'Ġt': 0.05          ✗ 过滤（BPE碎片）
+  '.': 0.02           ✗ 过滤（标点符号）
+
+第一层：BPE碎片黑名单:
+  过滤掉: Ġt, .（明确噪音）
+  保留: person, people, man
+
+第二层：类别白名单过滤:
+  'person': ✓ 在白名单中，保留
+  'people': ✓ 在白名单中，保留
+  'man': ✗ 不在白名单中，过滤
+
+第三层：硬标签保底:
+  GT类别 'person' 强制保留（即使被误过滤）
+
+最终分布:
+  'person': 0.70
+  'people': 0.30
+```
+
+### Background类别处理
+
+**用途**：无目标场景
+
+```python
+# 当没有检测到目标时
+if not objects:
+    distribution = {
+        'background': 1.0
+    }
+```
+
+---
+
+## VQA与Detect对比
+
+### 核心差异对比表
+
+| 维度 | VQA任务 | Detect任务 |
+|------|---------|-----------|
+| **过滤策略** | 黑名单（排除法） | 白名单（包含法） |
+| **候选空间** | 无限大（任何单词都可能是答案） | 固定（COCO 80类） |
+| **主要噪音** | BPE碎片、标点、特殊Token | 非COCO类别、BPE碎片 |
+| **第一层** | 黑名单过滤（拦截明确噪音） | BPE碎片黑名单（辅助） |
+| **第二层** | 硬标签保护 | 类别白名单过滤（核心） |
+| **第三层** | Top-K兜底 | 硬标签保底 |
+| **任务适配** | 可选（数字/颜色/二元白名单） | 无（已固定80类） |
+| **典型问题** | 截断词、噪音token | 非COCO类别泄露 |
+
+### 策略选择原因
+
+#### VQA：为什么用黑名单？
+
+```
+问题：VQA答案类型多样
+- 数字: one, two, three, ...
+- 颜色: red, blue, green, ...
+- 位置: left, right, center, ...
+- 物体: cat, dog, car, ...
+- 动作: sitting, standing, running, ...
+- 属性: big, small, tall, ...
+
+结论：无法预定义所有有效答案
+策略：采用黑名单，只拦截明确噪音
+```
+
+#### Detect：为什么用白名单？
+
+```
+问题：Detect类别固定
+- COCO 80类 + background
+- 类别数量有限且明确
+- 模型可能输出非COCO类别（如'man', 'woman'）
+
+结论：候选空间固定且有限
+策略：采用白名单，只允许COCO类别
+```
+
+### 过滤流程对比
+
+#### VQA过滤流程
+
+```
+原始Logits
+    ↓
+第一层：黑名单过滤
+  - BPE碎片（'Ġt', 'Ġa', ...）
+  - 标点符号（'.', ',', ...）
+  - 特殊Token（'<pad>', ...）
+    ↓
+第二层：硬标签保护
+  - 强制保留GT答案
+    ↓
+第三层：Top-K兜底
+  - 如果<10个token，补充
+    ↓
+第四层：任务适配（可选）
+  - 数字白名单（数字问题）
+  - 颜色白名单（颜色问题）
+  - 二元白名单（二元问题）
+    ↓
+最终分布
+```
+
+#### Detect过滤流程
+
+```
+原始Logits
+    ↓
+第一层：BPE碎片黑名单
+  - 复用VQA的黑名单
+  - 拦截明确噪音
+    ↓
+第二层：类别白名单过滤（核心）
+  - 只允许COCO 80类通过
+  - 支持多种token形式
+    ↓
+第三层：硬标签保底
+  - 强制保留GT类别
+    ↓
+最终分布
+```
+
+### 代码实现对比
+
+#### VQA实现
+
+```python
+# 第一层：黑名单过滤
+if self.token_filter.is_valid_token(token_str, question):
+    valid_token_mask[i] = True
+
+# 第二层：硬标签保护
+if token_id.item() in hard_label_token_ids:
+    valid_token_mask[i] = True
+
+# 第三层：Top-K兜底
+if num_valid < min_valid_tokens:
+    # 从Top-K补充
+    ...
+```
+
+#### Detect实现
+
+```python
+# 第一层：BPE碎片过滤（复用VQA）
+if self.token_filter.is_valid_token(word, None):
+    items.append((word, prob))
+
+# 第二层：类别白名单过滤（核心）
+token_ids = self.teacher.tokenizer.encode(word, add_special_tokens=False)
+if all(tid in self.category_whitelist_token_ids for tid in token_ids):
+    filtered_distribution[word_lower] = prob
+
+# 第三层：硬标签保底
+if category_lower not in word_probs:
+    word_probs[category_lower] = confidence
+```
+
+### 配置对比
+
+| 配置项 | VQA | Detect |
+|--------|-----|--------|
+| **配置文件** | `configs/vqa_token_filter.yaml` | `configs/default.yaml` |
+| **主要配置** | 黑名单、任务白名单 | COCO类别白名单 |
+| **温度参数** | 4 | 4 |
+| **Top-K** | 50 | 50 |
+
+### 性能影响对比
+
+| 指标 | VQA | Detect |
+|------|-----|--------|
+| **过滤精度** | 中等（依赖黑名单完整性） | 高（固定80类） |
+| **候选集大小** | 10-30个 | 1-5个 |
+| **计算复杂度** | O(top_k) + 黑名单检查 | O(top_k) + 白名单检查 |
+| **存储开销** | 中等 | 低 |
+
+### 使用场景总结
+
+**VQA任务**：
+- ✅ 答案类型多样（数字、颜色、位置、物体、动作等）
+- ✅ 无法预定义所有有效答案
+- ✅ 需要保留一定的候选集多样性
+- ✅ 适用于开放域视觉问答
+
+**Detect任务**：
+- ✅ 类别固定且有限（COCO 80类）
+- ✅ 需要严格约束输出范围
+- ✅ 避免非COCO类别泄露
+- ✅ 适用于目标检测、实例分割等
 
 ---
 
@@ -75,7 +571,7 @@
 > **修复日期**: 2026-07-17  
 > **修复原因**: 根据业界标准的VQA过滤实践（Blacklist + Hard Label Protection + Top-K Fallback），完善了代码实现
 
-### 三层防护架构
+### VQA任务三层防护架构
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -95,6 +591,31 @@
 ┌─────────────────────────────────────────────────────────┐
 │  第三层：Top-K兜底（多样性保障）                         │
 │  └─ 如果过滤后<10个token，从Top-K补充                   │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  第四层：任务适配过滤（可选）                            │
+│  └─ 根据问题类型应用白名单（数字/颜色/二元）            │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Detect任务三层防护架构
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  第一层：BPE碎片黑名单（辅助）                           │
+│  └─ 复用VQA的黑名单，拦截明确噪音                        │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  第二层：类别白名单过滤（核心）                          │
+│  └─ 只允许COCO 80类通过                                 │
+│  └─ 支持多种token形式（大小写、空格前缀等）              │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  第三层：硬标签保底（安全网）                            │
+│  └─ 强制保留GT类别，确保永不丢失                         │
 └─────────────────────────────────────────────────────────┘
 ```
 

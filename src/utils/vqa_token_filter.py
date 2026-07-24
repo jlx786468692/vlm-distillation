@@ -191,6 +191,45 @@ class VQATokenFilter:
             r'^@@',
         ]
 
+        # 🔧 新增：截断词黑名单（基于观察到的BPE碎片模式）
+        # 这些词通常是完整单词被tokenizer切分后的前缀部分
+        self.truncated_word_blacklist = {
+            # 2-4字符的常见截断词（观察到的实际案例）
+            'fil', 'phot', 'rec', 'dj', 'sk', 'dr', 'mus', 'bl', 'sh', 'st',
+            'obs', 'jam', 'box', 'vid', 'lis', 'wat', 'lis', 'hol',
+            'play', 'sing', 'stan', 'walk', 'take', 'hold', 'list', 'watch',
+            'per', 'for', 'back', 'groun', 'grou', 'ckgroun',
+
+            # 可能的动词截断
+            'stand', 'sitt', 'lyi', 'runn', 'jump', 'clim',
+        }
+
+        # 🔧 新增：有效短词白名单（即使长度短也允许）
+        # 这些是常见的有效答案，不是截断词
+        self.valid_short_words = {
+            # 数字答案
+            'one', 'two', 'six', 'ten',
+
+            # 颜色答案
+            'red', 'blue',
+
+            # 是非答案
+            'yes', 'no',
+
+            # 常见名词（3-4字符）
+            'cat', 'dog', 'car', 'bus', 'cup', 'jar', 'sky', 'sun',
+            'hat', 'pen', 'key', 'map', 'bag', 'box', 'bed', 'door',
+
+            # 常见动词（完整形式）
+            'sit', 'run', 'eat', 'cry', 'walk', 'talk', 'play',
+
+            # 常见缩写
+            'tv', 'pc', 'id',
+
+            # 常见介词/副词（可能作为答案）
+            'left', 'right', 'top', 'down', 'near', 'far',
+        }
+
     def _init_question_keywords(self):
         """初始化问题类型关键词"""
         keywords_config = self.config.get('question_keywords', {})
@@ -262,6 +301,24 @@ class VQATokenFilter:
         if token_lower in self.special_unicode_tokens:
             return False
 
+        # 🔧 新增：12. 检查截断词黑名单
+        if token_lower in self.truncated_word_blacklist:
+            return False
+
+        # 🔧 新增：13. 检查特殊符号组合模式（如 "*t", ">t", "**"等）
+        # 这些通常是BPE切分产生的噪音token
+        if len(token_lower) <= 3:
+            # 检查是否包含特殊符号+字母的组合
+            special_chars = {'*', '>', '<', '`', "'", '"', '#', '@', '$', '%', '^', '&', '|', '\\', '/', '~'}
+            has_special = any(c in special_chars for c in token_lower)
+            has_alpha = any(c.isalpha() for c in token_lower)
+            # 如果同时包含特殊符号和字母，很可能是噪音
+            if has_special and has_alpha:
+                return False
+            # 纯特殊符号组合（如 "**"）
+            if has_special and not has_alpha:
+                return False
+
         # 第二层：有效答案检查
 
         # 检查是否在有效答案列表中
@@ -272,11 +329,30 @@ class VQATokenFilter:
         if token_lower.isdigit():
             return True
 
-        # 检查token长度
-        if len(token_lower) < 1 or len(token_lower) > 20:
+        # 🔧 新增：检查是否在有效短词白名单中
+        if token_lower in self.valid_short_words:
+            return True
+
+        # 🔧 改进：长度检查（更严格，针对可能的截断词）
+        if len(token_lower) < 2 or len(token_lower) > 20:
             return False
 
-        # 默认：不在噪音列表且符合基本格式，可能是有效答案
+        # 🔧 新增：启发式规则 - 对短词（<=4字符）进行更严格的检查
+        if len(token_lower) <= 4:
+            # 如果已经通过前面的黑名单检查，且在有效短词列表中，则允许
+            if token_lower in self.valid_short_words:
+                return True
+
+            # 如果是数字，允许
+            if token_lower.isdigit():
+                return True
+
+            # 否则，保守地认为可能是截断词，需要进一步验证
+            # 这里我们可以检查词频词典或其他特征
+            # 为了安全起见，暂时拒绝
+            return False
+
+        # 默认：长度>4的token更可能是完整单词，允许通过
         return True
 
     def filter_distribution(

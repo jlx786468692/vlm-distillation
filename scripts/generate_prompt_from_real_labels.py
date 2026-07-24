@@ -123,6 +123,51 @@ class RealLabelLoader:
         print(f"✓ 加载 {len(samples)} 个VQA样本")
         return samples
 
+    def load_detect_samples(self, num_samples: Optional[int] = None) -> List[Dict]:
+        """
+        加载Detect标签数据
+
+        Args:
+            num_samples: 加载样本数（None表示加载全部）
+
+        Returns:
+            Detect样本列表
+        """
+        samples = []
+
+        # 获取所有JSON文件（排除摘要文件）
+        json_files = list(self.merged_dir.glob("COCO_val2014_*.json"))
+
+        if num_samples:
+            json_files = json_files[:num_samples]
+
+        for json_file in json_files:
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                # 提取Detect数据
+                if 'tasks' in data and 'detection' in data['tasks']:
+                    detect_data = data['tasks']['detection']
+
+                    sample = {
+                        'image_id': data.get('image_id'),
+                        'image_path': data.get('image_path'),
+                        'hard_label': detect_data.get('hard_label', {}),
+                        'soft_label': detect_data.get('soft_label', {}),
+                        'cot_reasoning': detect_data.get('cot_reasoning', {}),
+                        'metadata': data.get('metadata', {})
+                    }
+
+                    samples.append(sample)
+
+            except Exception as e:
+                print(f"⚠ 加载文件失败 {json_file}: {e}")
+                continue
+
+        print(f"✓ 加载 {len(samples)} 个Detect样本")
+        return samples
+
 
 class RealLabelPromptGenerator:
     """
@@ -168,6 +213,36 @@ class RealLabelPromptGenerator:
 
         # 保存prompt
         self._save_prompts(prompts, 'vqa_real_labels')
+
+        return prompts
+
+    def generate_detect_prompt_from_real_labels(self, num_samples: int = 100) -> Dict[str, str]:
+        """
+        基于真实Detect标签生成prompt
+
+        Args:
+            num_samples: 使用样本数
+
+        Returns:
+            生成的prompt字典
+        """
+        self.logger.info(f"加载 {num_samples} 个真实Detect标签样本")
+
+        # 加载真实标签
+        samples = self.loader.load_detect_samples(num_samples)
+
+        if not samples:
+            self.logger.warning("没有找到Detect标签数据")
+            return {}
+
+        # 分析数据
+        analysis = self._analyze_detect_labels(samples)
+
+        # 生成prompt
+        prompts = self._generate_detect_prompts_from_analysis(analysis, samples)
+
+        # 保存prompt
+        self._save_prompts(prompts, 'detection_real_labels')
 
         return prompts
 
@@ -233,6 +308,72 @@ class RealLabelPromptGenerator:
 
         return analysis
 
+    def _analyze_detect_labels(self, samples: List[Dict]) -> Dict:
+        """
+        分析Detect标签数据
+        """
+        from collections import Counter
+
+        analysis = {
+            'total_samples': len(samples),
+            'object_categories': Counter(),
+            'avg_objects_per_image': 0.0,
+            'avg_confidence': 0.0,
+            'bbox_distribution': [],
+            'category_examples': []
+        }
+
+        total_objects = 0
+        confidences = []
+
+        for sample in samples:
+            hard_label = sample.get('hard_label', {})
+            objects = hard_label.get('objects', [])
+
+            total_objects += len(objects)
+
+            for obj in objects:
+                # 统计类别分布
+                category = obj.get('category', 'unknown')
+                analysis['object_categories'][category] += 1
+
+                confidence = obj.get('confidence', 0)
+                confidences.append(confidence)
+
+                # 收集bbox信息
+                bbox = obj.get('bbox', [])
+                if bbox:
+                    analysis['bbox_distribution'].append({
+                        'category': category,
+                        'bbox': bbox,
+                        'confidence': confidence
+                    })
+
+            # 收集类别示例
+            if objects:
+                soft_label = sample.get('soft_label', {})
+                object_soft_labels = soft_label.get('object_soft_labels', [])
+
+                if object_soft_labels:
+                    analysis['category_examples'].append({
+                        'objects': objects[:3],  # 只取前3个
+                        'soft_labels': object_soft_labels[:3]
+                    })
+
+        # 计算平均值
+        if samples:
+            analysis['avg_objects_per_image'] = total_objects / len(samples)
+
+        if confidences:
+            analysis['avg_confidence'] = sum(confidences) / len(confidences)
+
+        self.logger.info(f"✓ Detect分析完成: {analysis['total_samples']} 个样本")
+        self.logger.info(f"  总对象数: {total_objects}")
+        self.logger.info(f"  平均每图对象数: {analysis['avg_objects_per_image']:.2f}")
+        self.logger.info(f"  平均置信度: {analysis['avg_confidence']:.3f}")
+
+        return analysis
+
     def _generate_prompts_from_analysis(self, analysis: Dict, samples: List[Dict]) -> Dict[str, str]:
         """
         基于分析结果生成prompt
@@ -287,9 +428,9 @@ INSTRUCTIONS:
 2. Analysis: Use the probability distribution to reason about which answer best matches
 3. Conclusion: Select ONE answer from the allowed answers list
 
-Observation: Focus on answer-relevant features
+Observation: [Focus on answer-relevant features]
 
-Analysis: Use probability distribution to guide reasoning
+Analysis: [Use probability distribution to guide reasoning]
 
 Conclusion: Final Answer: {primary_answer}"""
 
@@ -299,6 +440,76 @@ Conclusion: Final Answer: {primary_answer}"""
             'metadata': {
                 'source': 'real_labels',
                 'num_samples': analysis['total_samples'],
+                'avg_confidence': analysis['avg_confidence'],
+                'generated_at': datetime.now().isoformat()
+            }
+        }
+
+    def _generate_detect_prompts_from_analysis(self, analysis: Dict, samples: List[Dict]) -> Dict[str, str]:
+        """
+        基于Detect分析结果生成prompt
+        """
+        # 提取常见类别
+        common_categories = [cat for cat, count in analysis['object_categories'].most_common(20)]
+
+        # 提取示例
+        examples = self._create_detect_examples(samples[:5])
+
+        # 生成system prompt
+        system_prompt = f"""TASK: Detect objects in the image through three-step reasoning.
+
+CRITICAL RULES:
+1. SCANNING: Quick scan for object presence
+   - Focus on identifying potential objects
+   - Note their rough locations and sizes
+   - Do NOT describe unrelated background or scenery
+
+2. OBJECTS: List detected objects with details
+   - Category: Use COCO 80 categories (person, car, bicycle, etc.)
+   - Confidence: Estimate confidence (0.0-1.0)
+   - Location: Rough position (left, center, right, foreground, background)
+
+3. VERIFICATION: Ensure all significant objects are detected
+   - Double-check for missed objects
+   - Verify category accuracy
+   - Confidence calibration
+
+COMMON CATEGORIES (from real data):
+{', '.join(common_categories[:15])}
+
+QUALITY STANDARDS:
+- Scanning: Quick and focused on objects
+- Objects: Specific items with confidence and location
+- Verification: Comprehensive check
+
+REAL EXAMPLES (from actual label data):
+
+{examples}"""
+
+        # 生成user prompt模板
+        user_prompt = """Detect all objects in this image:
+
+INSTRUCTIONS:
+1. Scanning: Quick scan for object presence (focus on objects, not background)
+2. Objects: List detected objects with category, confidence, and location
+3. Verification: Check for missed objects
+
+Output format:
+Scanning: [Quick scan description]
+Objects: [List of detected objects]
+Verification: [Verification statement]
+
+Scanning:
+Objects:
+Verification:"""
+
+        return {
+            'system': system_prompt,
+            'user_template': user_prompt,
+            'metadata': {
+                'source': 'real_labels',
+                'num_samples': analysis['total_samples'],
+                'avg_objects_per_image': analysis['avg_objects_per_image'],
                 'avg_confidence': analysis['avg_confidence'],
                 'generated_at': datetime.now().isoformat()
             }
@@ -337,6 +548,45 @@ Distribution: {', '.join([f"{ans}:{prob:.2f}" for ans, prob in answer_dist.items
 Observation: {structured.get('observation', 'N/A')[:200]}...
 Analysis: {structured.get('analysis', 'N/A')[:200]}...
 Conclusion: {structured.get('conclusion', 'N/A')}
+"""
+
+            examples.append(example)
+
+        return '\n'.join(examples) if examples else "No examples available"
+
+    def _create_detect_examples(self, samples: List[Dict]) -> str:
+        """
+        创建Detect示例字符串
+        """
+        examples = []
+
+        for i, sample in enumerate(samples, 1):
+            hard_label = sample.get('hard_label', {})
+            objects = hard_label.get('objects', [])
+
+            if not objects:
+                continue
+
+            # 格式化对象列表
+            object_list = []
+            for obj in objects[:3]:  # 只取前3个
+                category = obj.get('category', 'unknown')
+                confidence = obj.get('confidence', 0)
+                bbox = obj.get('bbox', [])
+
+                object_list.append(f"{category} (conf: {confidence:.2f}, bbox: {bbox})")
+
+            # CoT推理（如果有）
+            cot = sample.get('cot_reasoning', {})
+            structured = cot.get('structured_reasoning', {})
+
+            example = f"""Example {i}:
+Objects detected: {len(objects)}
+Object list: {', '.join(object_list)}
+
+Scanning: {structured.get('scanning', 'N/A')[:200]}...
+Objects: {structured.get('objects', 'N/A')[:200]}...
+Verification: {structured.get('verification', 'N/A')}
 """
 
             examples.append(example)
@@ -439,9 +689,23 @@ def main():
             print("\n生成的Prompt:")
             print("-"*60)
             print("System Prompt (前500字符):")
-            print(prompts['system'][:1500] + "...")
+            print(prompts['system'][:500] + "...")
             print("\nUser Template:")
             print(prompts['user_template'])
+
+    elif args.task == 'detection':
+        prompts = generator.generate_detect_prompt_from_real_labels(args.num_samples)
+
+        if prompts:
+            print("\n生成的Detection Prompt:")
+            print("-"*60)
+            print("System Prompt (前500字符):")
+            print(prompts['system'][:500] + "...")
+            print("\nUser Template:")
+            print(prompts['user_template'])
+            print("\nMetadata:")
+            print(f"  平均每图对象数: {prompts['metadata'].get('avg_objects_per_image', 0):.2f}")
+            print(f"  平均置信度: {prompts['metadata'].get('avg_confidence', 0):.3f}")
 
     print("\n" + "="*60)
     print("✓ Prompt生成完成")

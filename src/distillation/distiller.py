@@ -21,7 +21,8 @@ from ..utils.logger import get_logger, DistillationLogger
 from ..export.json_exporter import JSONExporter
 
 from .hard_label_gen import HardLabelGenerator
-from .soft_label_gen import SoftLabelGenerator
+from .vqa_soft_label_gen import VQASoftLabelGenerator
+from .detect_soft_label_gen import DetectSoftLabelGenerator
 from .cot_generator import CoTGenerator
 
 
@@ -61,7 +62,11 @@ class Distiller:
 
         # Initialize generators
         self.hard_label_gen = HardLabelGenerator(self.teacher, self.config)
-        self.soft_label_gen = SoftLabelGenerator(self.teacher, self.config)
+
+        # 🔧 重构：分别初始化VQA和Detect的软标签生成器
+        self.vqa_soft_label_gen = VQASoftLabelGenerator(self.teacher, self.config)
+        self.detect_soft_label_gen = DetectSoftLabelGenerator(self.teacher, self.config)
+
         self.cot_gen = CoTGenerator(self.teacher, self.config)
 
         # Initialize exporter
@@ -504,7 +509,7 @@ class Distiller:
             questions = batch_data['annotations']['vqa'].get(image_id, [])
             if questions:
                 question = questions[0].get('question', '')
-                return self.soft_label_gen.generate_vqa_soft_labels(
+                return self.vqa_soft_label_gen.generate_vqa_soft_labels(
                     image_path=image_path,
                     question=question,
                     image_id=str(image_id),
@@ -513,7 +518,7 @@ class Distiller:
             return {}
 
         elif task == 'captioning':
-            return self.soft_label_gen.generate_captioning_soft_labels(
+            return self.vqa_soft_label_gen.generate_captioning_soft_labels(
                 image_path=image_path,
                 num_captions=3,
                 image_id=str(image_id)
@@ -521,17 +526,23 @@ class Distiller:
 
         elif task == 'detection':
             # 🔧 传入hard_label结果，避免重复推理
-            return self.soft_label_gen.generate_detection_soft_labels(
+            return self.detect_soft_label_gen.generate_detect_soft_labels(
                 image_path=image_path,
                 image_id=str(image_id),
                 hard_label_result=hard_label_result
             )
 
         elif task == 'keypoints':
-            return self.soft_label_gen.generate_keypoints_soft_labels(
-                image_path=image_path,
-                image_id=str(image_id)
-            )
+            # TODO: 实现KeypointsSoftLabelGenerator
+            # 暂时返回空字典
+            self.logger.warning("Keypoints soft label generation not implemented yet")
+            return {}
+
+            # 未来实现：
+            # return self.keypoints_soft_label_gen.generate_keypoints_soft_labels(
+            #     image_path=image_path,
+            #     image_id=str(image_id)
+            # )
 
         return {}
 

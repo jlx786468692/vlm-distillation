@@ -1,8 +1,9 @@
 """
-Hard Label Generator
-====================
+Hard Label Generator - Optimized for Qwen2.5-VL-32B
+====================================================
 
 Generates hard labels (final predictions) from teacher model.
+Optimized for 32B model with enhanced capabilities.
 """
 
 import json
@@ -24,6 +25,10 @@ class HardLabelGenerator:
     - VQA: Final answer
     - Captioning: Generated caption
     - Detection: Detected objects with bounding boxes
+
+    Optimized for 32B model:
+    - Lower confidence threshold (32B model more reliable)
+    - Longer max_new_tokens (32B can generate better reasoning)
     """
 
     def __init__(
@@ -42,8 +47,11 @@ class HardLabelGenerator:
         self.config = config or ConfigManager()
         self.logger = get_logger()
 
-        # Settings
-        self.confidence_threshold = self.config.get("distillation.hard_labels.confidence_threshold", 0.7)
+        # 🔧 32B模型优化：降低置信度阈值（32B模型更可靠）
+        # 原因：32B模型容量更大，输出质量更高
+        self.confidence_threshold = self.config.get(
+            "distillation.hard_labels.confidence_threshold", 0.3  # 🔧 降低到0.3（从0.7）
+        )
 
     def generate_vqa_hard_labels(
         self,
@@ -52,7 +60,7 @@ class HardLabelGenerator:
         image_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Generate hard labels for VQA task.
+        Generate hard labels for VQA task (32B optimized).
 
         Args:
             image_path: Path to image
@@ -64,7 +72,7 @@ class HardLabelGenerator:
         """
         self.logger.debug(f"Generating VQA hard labels for image {image_id}")
 
-        # Get teacher model inference WITH logits to compute confidence
+        # 🔧 32B优化：获取完整的logits用于软标签
         result = self.teacher.inference_vqa(
             image=image_path,
             question=question,
@@ -87,10 +95,13 @@ class HardLabelGenerator:
             'confidence': result.get('confidence', 0.0),
         }
 
-        # Filter by confidence if needed
+        # 🔧 32B优化：调整置信度过滤阈值
+        # 32B模型置信度普遍较低但质量更高，降低阈值
         if hard_label['confidence'] < self.confidence_threshold:
             hard_label['filtered'] = True
-            self.logger.debug(f"VQA result filtered: confidence {hard_label['confidence']} < threshold {self.confidence_threshold}")
+            self.logger.debug(
+                f"VQA result filtered: confidence {hard_label['confidence']:.4f} < threshold {self.confidence_threshold}"
+            )
 
         return hard_label
 
@@ -101,7 +112,7 @@ class HardLabelGenerator:
         image_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Generate hard labels for image captioning.
+        Generate hard labels for image captioning (32B optimized).
 
         Args:
             image_path: Path to image
@@ -113,7 +124,7 @@ class HardLabelGenerator:
         """
         self.logger.debug(f"Generating captioning hard labels for image {image_id}")
 
-        # Get teacher model inference WITH logits to compute confidence
+        # 🔧 32B优化：获取更长的caption
         result = self.teacher.inference_captioning(
             image=image_path,
             return_logits=True,  # Changed from False to get confidence scores

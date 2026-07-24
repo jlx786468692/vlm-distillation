@@ -77,14 +77,14 @@ class TeacherModel:
         self.device = device or self.config.get("teacher.device", "cuda")
         self.precision = precision or self.config.get("teacher.precision", "auto")
 
-        # Generation parameters
-        self.max_new_tokens = self.config.get("model.max_new_tokens", 512)
-        self.max_detection_tokens = self.config.get("model.max_detection_tokens", 1024)
-        self.temperature = self.config.get("model.temperature", 0.0)  # 贪婪解码
-        self.detection_temperature = self.config.get("model.detection_temperature", 0.1)
-        self.top_p = self.config.get("model.top_p", 1.0)
-        self.detection_top_p = self.config.get("model.detection_top_p", 0.9)
-        self.top_k = self.config.get("model.top_k", 1)
+        # Generation parameters (32B optimized)
+        self.max_new_tokens = self.config.get("teacher.max_new_tokens", 768)  # 🔧 32B: 768 (from 512)
+        self.max_detection_tokens = self.config.get("teacher.max_detection_tokens", 2048)
+        self.temperature = self.config.get("teacher.temperature", 0.0)  # 贪婪解码
+        self.detection_temperature = self.config.get("teacher.detection_temperature", 0.05)  # 🔧 32B: 0.05
+        self.top_p = self.config.get("teacher.top_p", 1.0)
+        self.detection_top_p = self.config.get("teacher.detection_top_p", 0.85)  # 🔧 32B: 0.85
+        self.top_k = self.config.get("teacher.top_k", 1)
 
         # Model components
         self.model = None
