@@ -350,22 +350,18 @@ class DataQualityValidator:
         return results
 
     def _check_category_distribution_alignment(self, data_list: List[Dict]) -> Dict[str, Any]:
-        """全局分布对齐检查"""
-        # 统计教师软标签类别分布
+        """全局分布对齐检查 - 仅支持VQA任务"""
+        # 统计教师软标签类别分布（VQA任务）
         teacher_category_distribution = defaultdict(float)
 
         for data in data_list:
             tasks = data.get('tasks', {})
-
-            # Detection任务
-            detection_data = tasks.get('detection', {})
-            hard_label = detection_data.get('hard_label', {})
-
-            objects = hard_label.get('objects', [])
-            for obj in objects:
-                category = obj.get('category', obj.get('label', 'unknown'))
-                if category:
-                    teacher_category_distribution[category.lower()] += 1
+            # VQA任务分布统计（基于答案类别）
+            vqa_data = tasks.get('vqa', {})
+            hard_label = vqa_data.get('hard_label', {})
+            answer = hard_label.get('answer', '')
+            if answer:
+                teacher_category_distribution[answer.lower()] += 1
 
         # 归一化
         total_teacher = sum(teacher_category_distribution.values())
@@ -633,34 +629,13 @@ class DataQualityValidator:
     # ============================================================
 
     def _validate_top_k_matching(self, data_list: List[Dict]) -> Dict[str, Any]:
-        """Top-K匹配统计"""
+        """Top-K匹配统计 - 仅支持VQA任务"""
         matched_count = 0
         unmatched_count = 0
         unmatched_samples = []
 
         for data in data_list:
             tasks = data.get('tasks', {})
-
-            # Detection任务
-            detection_data = tasks.get('detection', {})
-            hard_label = detection_data.get('hard_label', {})
-
-            objects = hard_label.get('objects', [])
-            if objects:
-                top1_category = objects[0].get('category', 'unknown')
-
-                image_id = data.get('image_id')
-                is_matched = self._check_category_match(image_id, top1_category)
-
-                if is_matched:
-                    matched_count += 1
-                else:
-                    unmatched_count += 1
-                    unmatched_samples.append({
-                        'image_id': image_id,
-                        'predicted_category': top1_category,
-                        'confidence': objects[0].get('confidence', 0)
-                    })
 
             # VQA任务
             vqa_data = tasks.get('vqa', {})

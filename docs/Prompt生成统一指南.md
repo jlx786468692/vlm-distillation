@@ -1,5 +1,7 @@
 # Prompt生成完整指南
 
+**重要说明**: 本文档专注于VQA（Visual Question Answering）任务的Prompt生成策略。项目已不再支持Detection、Captioning等其他任务。
+
 ## 📋 目录
 
 1. [概述](#概述)

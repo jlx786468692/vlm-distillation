@@ -354,7 +354,7 @@ class DataQualityAnalyzer:
             score += avg_cot_score * weights['cot_quality']
 
         # 4. 任务覆盖分数 (20%)
-        expected_tasks = ['vqa', 'captioning', 'detection']
+        expected_tasks = ['vqa']
         task_count = len([t for t in expected_tasks if t in tasks])
         task_coverage = task_count / len(expected_tasks)
         score += task_coverage * 100 * weights['task_coverage']

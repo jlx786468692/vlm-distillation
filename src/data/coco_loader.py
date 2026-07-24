@@ -263,46 +263,6 @@ class COCODataLoader:
             self.logger.error(f"Error loading image {image_id}: {e}")
             return None
 
-    def get_captions(self, image_id: int) -> List[str]:
-        """
-        Get all captions for an image.
-
-        Args:
-            image_id: COCO image ID
-
-        Returns:
-            List of caption strings
-        """
-        captions = []
-        for ann in self.captions_data.get(image_id, []):
-            caption = ann.get('caption', '')
-            if caption:
-                captions.append(caption)
-        return captions
-
-    def get_instances(self, image_id: int) -> List[Dict]:
-        """
-        Get all object instances for an image.
-
-        Args:
-            image_id: COCO image ID
-
-        Returns:
-            List of instance dictionaries with bbox and category
-        """
-        instances = []
-        for ann in self.instances_data.get(image_id, []):
-            instance = {
-                'bbox': ann.get('bbox', []),  # [x, y, width, height]
-                'category_id': ann.get('category_id'),
-                'category_name': self.categories.get(ann.get('category_id'), 'unknown'),
-                'area': ann.get('area', 0),
-                'is_crowd': ann.get('iscrowd', 0),
-                'segmentation': ann.get('segmentation', None),
-            }
-            instances.append(instance)
-        return instances
-
     def get_vqa_questions(self, image_id: int) -> List[Dict]:
         """
         Get VQA questions for an image.
@@ -314,49 +274,6 @@ class COCODataLoader:
             List of question dictionaries
         """
         return self.vqa_data_by_image.get(image_id, [])
-
-    def get_keypoints(self, image_id: int) -> List[Dict]:
-        """
-        Get all person keypoints for an image.
-
-        Args:
-            image_id: COCO image ID
-
-        Returns:
-            List of person keypoints dictionaries with:
-            - bbox: person bounding box [x, y, width, height]
-            - keypoints: list of {name, x, y, visibility} dicts (17 keypoints)
-            - num_keypoints: count of visible keypoints
-            - skeleton: skeleton connections for visualization
-        """
-        keypoints_list = []
-        for ann in self.keypoints_data.get(image_id, []):
-            # Parse flat keypoints array [x1,y1,v1, x2,y2,v2, ...]
-            kp_flat = ann.get('keypoints', [])
-            keypoints_parsed = []
-
-            for i, name in enumerate(self.keypoint_names):
-                x = kp_flat[i * 3] if i * 3 < len(kp_flat) else 0
-                y = kp_flat[i * 3 + 1] if i * 3 + 1 < len(kp_flat) else 0
-                v = kp_flat[i * 3 + 2] if i * 3 + 2 < len(kp_flat) else 0
-                keypoints_parsed.append({
-                    'name': name,
-                    'x': float(x),
-                    'y': float(y),
-                    'visibility': int(v)  # 0=not labeled, 1=labeled not visible, 2=visible
-                })
-
-            keypoints_list.append({
-                'bbox': ann.get('bbox', []),  # [x, y, width, height]
-                'keypoints': keypoints_parsed,
-                'num_keypoints': ann.get('num_keypoints', 0),
-                'category_id': ann.get('category_id'),
-                'area': ann.get('area', 0),
-                'is_crowd': ann.get('iscrowd', 0),
-                'skeleton': self.skeleton,
-            })
-
-        return keypoints_list
 
     def get_image_ids(self, task: Optional[str] = None) -> List[int]:
         """

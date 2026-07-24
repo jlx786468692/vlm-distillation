@@ -123,9 +123,6 @@ class DataManager:
         """
         # Get IDs for each task
         vqa_ids = set(self.coco_loader.get_image_ids('vqa')) if 'vqa' in self.tasks else set()
-        caption_ids = set(self.coco_loader.get_image_ids('caption')) if 'captioning' in self.tasks else set()
-        instance_ids = set(self.coco_loader.get_image_ids('instance')) if 'detection' in self.tasks else set()
-        keypoints_ids = set(self.coco_loader.get_image_ids('keypoints')) if 'keypoints' in self.tasks else set()
 
         # 🔧 改进：使用宽松模式（并集），只要有任一任务的标注即可
         all_ids = set(self.coco_loader.get_image_ids())
@@ -134,23 +131,11 @@ class DataManager:
         self.logger.info("Dataset annotations summary:")
         if 'vqa' in self.tasks:
             self.logger.info(f"  VQA: {len(vqa_ids)} images")
-        if 'captioning' in self.tasks:
-            self.logger.info(f"  Captioning: {len(caption_ids)} images")
-        if 'detection' in self.tasks:
-            self.logger.info(f"  Detection: {len(instance_ids)} images")
-        if 'keypoints' in self.tasks:
-            self.logger.info(f"  Keypoints: {len(keypoints_ids)} images")
 
         # 收集所有有标注的任务集合
         task_sets = []
         if 'vqa' in self.tasks and vqa_ids:
             task_sets.append(vqa_ids)
-        if 'captioning' in self.tasks and caption_ids:
-            task_sets.append(caption_ids)
-        if 'detection' in self.tasks and instance_ids:
-            task_sets.append(instance_ids)
-        if 'keypoints' in self.tasks and keypoints_ids:
-            task_sets.append(keypoints_ids)
 
         # 🔧 宽松模式：并集（只要有任一任务的标注）
         valid_ids = set()
@@ -376,18 +361,6 @@ class DataManager:
             if 'vqa' in self.tasks:
                 vqa_questions = self.coco_loader.get_vqa_questions(img_id)
                 batch_data['annotations']['vqa'][img_id] = vqa_questions
-
-            if 'captioning' in self.tasks:
-                captions = self.coco_loader.get_captions(img_id)
-                batch_data['annotations']['captioning'][img_id] = captions
-
-            if 'detection' in self.tasks:
-                instances = self.coco_loader.get_instances(img_id)
-                batch_data['annotations']['detection'][img_id] = instances
-
-            if 'keypoints' in self.tasks:
-                keypoints = self.coco_loader.get_keypoints(img_id)
-                batch_data['annotations']['keypoints'][img_id] = keypoints
 
         return batch_data
 

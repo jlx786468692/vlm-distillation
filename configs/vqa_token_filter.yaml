@@ -69,3 +69,9 @@ filtering: {
   "max_answers": 50,
   "min_valid_tokens": 10
 }
+
+# 🔧 新增：词干归一化配置（Stemming）
+# 将 animal/animals, dog/dogs 等视为同一候选
+stemming: {
+  "enabled": true  # 启用词干归一化
+}

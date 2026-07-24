@@ -1,50 +1,43 @@
-# Prompt Configuration (English)
-# ====================
+# Prompt Configuration (English) - Optimized for Qwen2.5-VL-32B
+# ========================================
 #
-# 教学级数据生成方案 - 72B 4bit 专用
+# 32B模型优化版 - 更简洁高效的提示词
 #
 # 设计原则：
-# 1. 稳定：规则明确，无歧义，量化模型能稳定执行
-# 2. 可控：强约束输出范围，限制模型自由度
-# 3. 高质量：引导正确推理模式，避免幻觉和模板抄袭
+# 1. 简洁：32B模型理解能力强，提示词更简洁
+# 2. 精准：明确任务目标，减少歧义
+# 3. 高效：减少token消耗，加快推理速度
 #
 
 prompts:
   # ==================
-  # Standard Prompt (No CoT)
+  # Standard Prompt (No CoT) - 32B优化版
   # ==================
 
   standard:
+    # VQA - 单词答案，简洁直接
     vqa: |
-      Look at the image and answer: {question}
-      Rules:
-      1. ONE word/number only
-      2. No explanation
+      Look at the image and answer the following question.
+      Question: {question}
+
+      STRICT REQUIREMENTS:
+      1. Answer in ONE WORD or NUMBER only
+      2. Use lowercase only
+      3. No punctuation, no explanation
+      4. Examples: "yes", "no", "2", "red", "bicycle"
+
       Answer:
 
-    captioning: |
-      Describe this image in detail.
-      Caption:
-
-    detection: |
-      Detect all objects. Output JSON only.
-      Format: {{'objects': [{{'category': 'name', 'bbox': [x1,y1,x2,y2], 'confidence': 0.9}}]}}
-      JSON:
-
-    keypoints: |
-      Detect all persons with keypoints.
-      JSON:
-
   # ==================
-  # CoT Prompt (教学级设计)
+  # CoT Prompt - 32B优化版
   # ==================
 
   cot:
     # ============================================================
-    # VQA - 视觉问答
+    # VQA - 视觉问答（32B优化）
     # ============================================================
 
-    # system: 任务定义 + 硬性规则 + 质量标准
+    # system: 简洁的任务定义和规则
     vqa_system: |
       TASK: Answer the question by selecting exactly one answer from the given allowed answer list.
 
@@ -73,7 +66,7 @@ prompts:
       Analysis: The primary answer with the highest probability is one. The visual count matches one, and there is no visual evidence supporting other numerical answers.
       Conclusion: one
 
-    # user: 具体问题 + 答案约束
+    # user: 具体问题和约束
     vqa_user: |
       Question: {question}
       ALLOWED ANSWERS: {allowed_answers}
@@ -89,94 +82,7 @@ prompts:
       Analysis: Use probability distribution to guide reasoning
       Conclusion: Final Answer: {primary_answer}
 
-    # ============================================================
-    # Captioning - 图像描述
-    # ============================================================
-
-    captioning_system: |
-      TASK: Describe image through three aspects.
-
-      OUTPUT FORMAT (exactly 3 paragraphs):
-      Subject: Main focus of the image
-      Attributes: Visual properties (color, size, position)
-      Scene: Background and context
-
-      HARD CONSTRAINTS:
-      1. Each paragraph: 1-3 sentences, plain text only
-      2. No JSON, no braces, no quotes
-      3. Be specific, not vague
-
-      QUALITY STANDARD:
-      Subject: What/who is in the image
-      Attributes: Specific visual details
-      Scene: Where/what context
-
-    captioning_user: |
-      Describe this image:
-
-      Subject:
-      Attributes:
-      Scene:
-
-    # ============================================================
-    # Detection - 目标检测
-    # ============================================================
-
-    detection_system: |
-      TASK: Find objects through three-step process.
-
-      OUTPUT FORMAT (exactly 3 paragraphs):
-      Scanning: What you see overall
-      Objects: List of detected items
-      Verification: Confirm detection complete
-
-      HARD CONSTRAINTS:
-      1. Reasoning only - NO JSON output in text
-      2. No coordinates in reasoning (handled separately)
-      3. Plain sentences, no meta-formatting
-
-      QUALITY STANDARD:
-      Scanning: Scene overview
-      Objects: Specific items found
-      Verification: Check for missed items
-
-    detection_user: |
-      Find objects in this image:
-
-      Scanning:
-      Objects:
-      Verification:
-
-    # ============================================================
-    # Keypoints - 姿态检测
-    # ============================================================
-
-    keypoints_system: |
-      TASK: Detect human poses through three aspects.
-
-      OUTPUT FORMAT (exactly 3 paragraphs):
-      Persons: Who is detected
-      Keypoints: Visible body parts
-      Summary: Overall result
-
-      HARD CONSTRAINTS:
-      1. Reasoning only - NO JSON output
-      2. Plain text description
-      3. Be specific about visibility
-
-      QUALITY STANDARD:
-      Persons: Count and general pose
-      Keypoints: What's visible/blocked
-      Summary: Detection result
-
-    keypoints_user: |
-      Detect human poses:
-
-      Persons:
-      Keypoints:
-      Summary:
-
-  # ==================
+    # ==================
   # Default
   # ==================
 
@@ -184,6 +90,5 @@ prompts:
     standard: "Analyze this image."
     cot_system: |
       TASK: Analyze step by step.
-      OUTPUT: Plain text reasoning.
-      NO: JSON, braces, quotes.
-    cot_user: "Provide your analysis."
+      FORMAT: Plain text, no markdown.
+    cot_user: "Analysis:"

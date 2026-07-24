@@ -447,6 +447,29 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
                     else:
                         word_probs[word] = prob
 
+                # 🔧 关键改进：多Token答案标准化（如 'hot' -> 'hotdog'）
+                # 问题：多Token答案（如"hotdog"）被分词成["hot", "dog"]
+                # 软标签分布只包含第一个token"hot"的概率，导致主答案丢失
+                # 解决：将第一个token映射到完整答案
+                if primary_answer_lower:
+                    try:
+                        # 检查答案是否是多Token
+                        primary_token_ids = self.teacher.tokenizer.encode(primary_answer_lower, add_special_tokens=False)
+
+                        if len(primary_token_ids) > 1:
+                            # 是多Token答案，获取第一个token
+                            first_token = self.teacher.tokenizer.decode([primary_token_ids[0]]).strip().lower()
+
+                            # 如果第一个token在分布中，将其概率转移到完整答案
+                            if first_token in word_probs and primary_answer_lower not in word_probs:
+                                prob = word_probs.pop(first_token)
+                                word_probs[primary_answer_lower] = prob
+                                self.logger.debug(
+                                    f"[Multi-Token Normalization] Mapped '{first_token}' -> '{primary_answer_lower}' (prob: {prob:.4f})"
+                                )
+                    except Exception as e:
+                        self.logger.warning(f"[Multi-Token Normalization] Failed: {e}")
+
                 # 🔧 关键改进：硬标签保底策略（防止分布过于平均）
                 primary_answer_lower = primary_answer.lower() if primary_answer else None
 
@@ -563,80 +586,6 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
 
         return distribution
 
-    def generate_captioning_soft_labels(
-        self,
-        image_path: str,
-        num_captions: int = 3,
-        image_id: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Generate soft labels for captioning.
-
-        Args:
-            image_path: Path to image
-            num_captions: Number of caption variations
-            image_id: Image identifier
-
-        Returns:
-            Soft label dictionary
-        """
-        self.logger.debug(f"Generating captioning soft labels for image {image_id}")
-
-        # Get teacher inference with logits
-        result = self.teacher.inference_captioning(
-            image=image_path,
-            return_logits=True,
-            generate_cot=False,
-            num_captions=num_captions
-        )
-
-        soft_label = {
-            'temperature': self.temperature,
-        }
-
-        # Process caption logits
-        if 'logits' in result:
-            caption_distributions = []
-            for i, logits_data in enumerate(result['logits']):
-                distribution = self._process_caption_logits(logits_data)
-                caption_distributions.append({
-                    'caption_index': i,
-                    'distribution': distribution,
-                    'caption': result['captions'][i] if i < len(result['captions']) else '',
-                })
-
-            soft_label['caption_distributions'] = caption_distributions
-
-        soft_label['captions'] = result.get('captions', [])
-        soft_label['num_captions'] = len(result.get('captions', []))
-
-        return soft_label
-
-    def _process_caption_logits(
-        self,
-        logits_data: Dict[str, torch.Tensor]
-    ) -> Dict[str, Any]:
-        """
-        Process captioning logits.
-
-        Args:
-            logits_data: Logits dictionary
-
-        Returns:
-            Processed distribution (without top-k data to reduce storage)
-        """
-        probs = logits_data.get('probabilities')
-
-        if probs is None:
-            return {}
-
-        scaled_probs = self._apply_temperature(probs)
-        # 🔧 不再保存 top_k_indices 和 top_k_values，减少 JSON 存储大小
-        # 这些数据主要用于内部计算，不需要保存到最终输出中
-        return {
-            'distribution_shape': scaled_probs.shape,
-        }
-
     def generate_batch_soft_labels(
         self,
         batch_data: Dict[str, Any],
@@ -670,14 +619,6 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
                         image_id=image_id
                     )
                     results['vqa'].append(soft_label)
-
-            if 'captioning' in tasks:
-                soft_label = self.generate_captioning_soft_labels(
-                    image_path=image_path,
-                    num_captions=3,
-                    image_id=image_id
-                )
-                results['captioning'].append(soft_label)
 
         return results
 

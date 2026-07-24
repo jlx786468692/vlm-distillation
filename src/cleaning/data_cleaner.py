@@ -49,6 +49,7 @@ class DataCleaner:
 
         # 清洗策略
         self.auto_remove_invalid = self.config.get("cleaning.auto_remove_invalid", True)
+        self.remove_empty_results = self.config.get("cleaning.remove_empty_results", True)
         self.auto_repair_bbox = self.config.get("cleaning.auto_repair_bbox", True)
         self.deduplicate_answers = self.config.get("cleaning.deduplicate_answers", True)
 
@@ -194,12 +195,6 @@ class DataCleaner:
                 if task_name == 'vqa':
                     self._detect_vqa_anomalies(image_id, task_data, anomalies)
 
-                elif task_name == 'captioning':
-                    self._detect_captioning_anomalies(image_id, task_data, anomalies)
-
-                elif task_name == 'detection':
-                    self._detect_detection_anomalies(image_id, task_data, anomalies)
-
         return anomalies
 
     def _detect_vqa_anomalies(self, image_id: str,
@@ -272,137 +267,6 @@ class DataCleaner:
                     'task': 'vqa',
                     'step_count': step_count,
                     'type': 'insufficient_steps'
-                })
-
-    def _detect_captioning_anomalies(self, image_id: str,
-                                      task_data: Dict,
-                                      anomalies: Dict) -> None:
-        """Detect Captioning anomalies."""
-
-        hard_label = task_data.get('hard_label', {})
-        captions = hard_label.get('captions', [])
-
-        # 1. 空caption检测
-        if not captions or len(captions) == 0:
-            anomalies['empty_results'].append({
-                'image_id': image_id,
-                'task': 'captioning',
-                'type': 'no_captions'
-            })
-
-        # 2. Caption质量检测
-        valid_captions = [cap for cap in captions if len(cap.strip()) >= 10]
-        if len(valid_captions) < len(captions):
-            anomalies['empty_results'].append({
-                'image_id': image_id,
-                'task': 'captioning',
-                'num_captions': len(captions),
-                'valid_captions': len(valid_captions),
-                'type': 'invalid_captions'
-            })
-
-        # 3. Caption长度异常
-        for i, caption in enumerate(captions):
-            cap_len = len(caption.strip())
-            if cap_len < 15:
-                anomalies['length_anomalies'].append({
-                    'image_id': image_id,
-                    'task': 'captioning',
-                    'caption_index': i,
-                    'length': cap_len,
-                    'type': 'caption_too_short'
-                })
-            elif cap_len > 200:
-                anomalies['length_anomalies'].append({
-                    'image_id': image_id,
-                    'task': 'captioning',
-                    'caption_index': i,
-                    'length': cap_len,
-                    'type': 'caption_too_long'
-                })
-
-    def _detect_detection_anomalies(self, image_id: str,
-                                     task_data: Dict,
-                                     anomalies: Dict) -> None:
-        """Detect Detection anomalies."""
-
-        hard_label = task_data.get('hard_label', {})
-        objects = hard_label.get('objects', [])
-
-        # 1. 无检测结果
-        if not objects or len(objects) == 0:
-            anomalies['empty_results'].append({
-                'image_id': image_id,
-                'task': 'detection',
-                'type': 'no_objects'
-            })
-
-        # 2. 检测框异常
-        for obj in objects:
-            bbox = obj.get('bbox', [])
-            confidence = obj.get('confidence', 0.0)
-
-            # 格式错误
-            if len(bbox) != 4:
-                anomalies['format_errors'].append({
-                    'image_id': image_id,
-                    'task': 'detection',
-                    'bbox': bbox,
-                    'type': 'invalid_bbox_format'
-                })
-                continue
-
-            # 解析bbox
-            x_min, y_min, x_max, y_max = bbox
-
-            # 超出范围检测 (假设合理范围 [0, 1000])
-            if x_min < 0 or y_min < 0 or x_max > 1000 or y_max > 1000:
-                anomalies['bbox_anomalies'].append({
-                    'image_id': image_id,
-                    'object': obj,
-                    'type': 'bbox_out_of_range',
-                    'bbox': bbox
-                })
-
-            # 尺寸异常
-            width = x_max - x_min
-            height = y_max - y_min
-
-            if width < 5 or height < 5:  # 太小
-                anomalies['bbox_anomalies'].append({
-                    'image_id': image_id,
-                    'object': obj,
-                    'type': 'bbox_too_small',
-                    'width': width,
-                    'height': height
-                })
-
-            if width > 900 or height > 900:  # 太大
-                anomalies['bbox_anomalies'].append({
-                    'image_id': image_id,
-                    'object': obj,
-                    'type': 'bbox_too_large',
-                    'width': width,
-                    'height': height
-                })
-
-            # 坐标异常
-            if x_max <= x_min or y_max <= y_min:
-                anomalies['bbox_anomalies'].append({
-                    'image_id': image_id,
-                    'object': obj,
-                    'type': 'invalid_coordinates',
-                    'bbox': bbox
-                })
-
-            # 低置信度检测
-            if confidence < self.min_confidence:
-                anomalies['low_confidence'].append({
-                    'image_id': image_id,
-                    'task': 'detection',
-                    'confidence': confidence,
-                    'object_class': obj.get('class', obj.get('category_name', 'unknown')),
-                    'type': 'object_low_confidence'
                 })
 
     def _summarize_anomalies(self, anomalies: Dict) -> Dict[str, int]:
@@ -585,10 +449,15 @@ class DataCleaner:
                 should_remove = True
                 removal_reasons.append("invalid_answer")
 
-            # 规则3: 空结果
+            # 规则3: 空结果（可配置是否移除）
             if image_id in empty_result_ids:
-                should_remove = True
-                removal_reasons.append("empty_result")
+                if self.remove_empty_results:
+                    should_remove = True
+                    removal_reasons.append("empty_result")
+                else:
+                    # 标记但不移除（用于调试）
+                    data['has_empty_result'] = True
+                    self.logger.debug(f"Image {image_id} has empty results but not removed (remove_empty_results=False)")
 
             # 规则4: 格式错误
             if image_id in format_error_ids:
@@ -759,47 +628,6 @@ class DataCleaner:
             # 修复每个任务
             for task_name, task_data in tasks.items():
 
-                # 修复bbox（超出范围的裁剪）
-                if task_name == 'detection':
-                    objects = task_data.get('hard_label', {}).get('objects', [])
-                    repaired_objects = []
-
-                    for obj in objects:
-                        bbox = obj.get('bbox', [])
-                        if len(bbox) == 4:
-                            x_min, y_min, x_max, y_max = bbox
-                            original_bbox = bbox.copy()
-
-                            # 裁剪到合理范围 [0, 1000]
-                            x_min = max(0, min(x_min, 1000))
-                            y_min = max(0, min(y_min, 1000))
-                            x_max = max(x_min + 5, min(x_max, 1000))  # 确保最小宽度5
-                            y_max = max(y_min + 5, min(y_max, 1000))  # 确保最小高度5
-
-                            # 如果坐标异常（x_max <= x_min），修复
-                            if x_max <= x_min:
-                                x_max = x_min + 10
-                            if y_max <= y_min:
-                                y_max = y_min + 10
-
-                            repaired_bbox = [x_min, y_min, x_max, y_max]
-
-                            if repaired_bbox != original_bbox:
-                                obj['bbox'] = repaired_bbox
-                                obj['bbox_original'] = original_bbox
-                                obj['bbox_repaired'] = True
-                                repair_actions.append({
-                                    'task': task_name,
-                                    'type': 'bbox_repair',
-                                    'original': original_bbox,
-                                    'repaired': repaired_bbox
-                                })
-
-                        repaired_objects.append(obj)
-
-                    if 'hard_label' in task_data:
-                        task_data['hard_label']['objects'] = repaired_objects
-
                 # 修复缺失字段
                 if 'hard_label' in task_data:
                     hard_label = task_data['hard_label']
@@ -913,6 +741,7 @@ class DataCleaner:
                 'min_quality_score': self.min_quality_score,
                 'min_cot_quality': self.min_cot_quality,
                 'auto_remove_invalid': self.auto_remove_invalid,
+                'remove_empty_results': self.remove_empty_results,
                 'auto_repair_bbox': self.auto_repair_bbox,
                 'deduplicate_answers': self.deduplicate_answers,
             },

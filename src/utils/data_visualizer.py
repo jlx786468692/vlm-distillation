@@ -964,13 +964,12 @@ class DataVisualizer:
         )
 
         # ============================================================
-        # 左侧：原图 + 检测框
+        # 左侧：原图
         # ============================================================
         ax_img = fig.add_subplot(gs[:, 0])
         ax_img.imshow(img_array)
         ax_img.set_title(f'Sample {idx+1}: Image ID {image_id}', fontsize=14, fontweight='bold')
         ax_img.axis('off')
-        self._draw_detection_boxes(ax_img, data)
 
         # ============================================================
         # 右上：硬标签 + 软标签信息
@@ -1002,25 +1001,6 @@ class DataVisualizer:
         plt.savefig(path, dpi=100, bbox_inches='tight', pad_inches=0.1)
         plt.close()
         return path
-
-    def _draw_detection_boxes(self, ax: plt.Axes, data: Dict):
-        """Draw detection boxes"""
-        tasks = data.get('tasks', {})
-        for task_name, task_data in tasks.items():
-            if task_name == 'detection':
-                hard_label = task_data.get('hard_label', {})
-                objects = hard_label.get('objects', [])
-                for obj in objects:
-                    category = obj.get('category', obj.get('label', 'object'))
-                    bbox = obj.get('bbox', obj.get('bbox_2d', []))
-                    confidence = obj.get('confidence', 0.9)
-                    if len(bbox) >= 4:
-                        rect = Rectangle((bbox[0], bbox[1]), bbox[2]-bbox[0], bbox[3]-bbox[1],
-                                          linewidth=2, edgecolor='#3498DB', facecolor='none')
-                        ax.add_patch(rect)
-                        ax.text(bbox[0], bbox[1]-5, f"{category}: {confidence:.0%}",
-                               fontsize=9, color='#3498DB', fontweight='bold',
-                               bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
 
     def _format_labels_info(self, data: Dict) -> str:
         """Format labels info (hard + soft)"""
@@ -1365,12 +1345,12 @@ class DataVisualizer:
                 generated_plots.append(('answer_frequency', path))
                 self._log(f"  OK: answer_frequency.{self.plot_format}")
 
-            # 3. 检测类别分布图
-            self._log("\n[3/4] Detection classes...")
-            path = self._plot_detection_classes(data_list, output_path)
-            if path:
-                generated_plots.append(('detection_classes', path))
-                self._log(f"  OK: detection_classes.{self.plot_format}")
+            # 3. 检测类别分布图 - 跳过，仅保留VQA任务
+            # self._log("\n[3/4] Detection classes...")
+            # path = self._plot_detection_classes(data_list, output_path)
+            # if path:
+            #     generated_plots.append(('detection_classes', path))
+            #     self._log(f"  OK: detection_classes.{self.plot_format}")
 
             # 4. CoT质量指标图
             self._log("\n[4/4] CoT quality metrics...")
@@ -1554,96 +1534,6 @@ class DataVisualizer:
 
         plt.tight_layout()
         path = output_path / f'answer_frequency.{self.plot_format}'
-        plt.savefig(path, dpi=self.dpi)
-        plt.close()
-        return path
-
-    def _plot_detection_classes(
-        self,
-        data_list: List[Dict],
-        output_path: Path
-    ) -> Optional[Path]:
-        """Detection classes distribution visualization"""
-        if not HAS_MATPLOTLIB:
-            return None
-
-        from collections import Counter
-
-        categories = []
-        for data in data_list:
-            tasks = data.get('tasks', {})
-            detection_data = tasks.get('detection', {})
-            hard_label = detection_data.get('hard_label', {})
-            objects = hard_label.get('objects', [])
-
-            for obj in objects:
-                category = obj.get('category', obj.get('label', 'unknown'))
-                if category:
-                    categories.append(category.lower().strip())
-
-        if not categories:
-            return None
-
-        counter = Counter(categories)
-        top_10 = counter.most_common(10)
-
-        fig, axes = plt.subplots(1, 2, figsize=(16, 8))
-
-        # ============================================================
-        # Plot 1: Pie chart
-        # ============================================================
-        ax1 = axes[0]
-
-        labels = [cat for cat, count in top_10]
-        sizes = [count for cat, count in top_10]
-
-        # 计算其他类别
-        other_count = len(categories) - sum(sizes)
-        if other_count > 0:
-            labels.append('Other')
-            sizes.append(other_count)
-
-        colors_pie = ['#3498DB', '#2ECC71', '#E74C3C', '#9B59B6', '#F39C12',
-                      '#1ABC9C', '#E67E22', '#8E44AD', '#16A085', '#D35400', '#95A5A6']
-
-        wedges, texts, autotexts = ax1.pie(
-            sizes, labels=labels, colors=colors_pie[:len(labels)],
-            autopct='%1.1f%%', startangle=90
-        )
-
-        ax1.set_title('Detection Classes Distribution (Pie Chart)', fontweight='bold')
-
-        # ============================================================
-        # Plot 2: Bar chart
-        # ============================================================
-        ax2 = axes[1]
-
-        labels_bar = [cat for cat, count in top_10]
-        counts_bar = [count for cat, count in top_10]
-
-        bars = ax2.bar(range(len(labels_bar)), counts_bar, color=colors_pie[:len(labels_bar)], edgecolor='black')
-
-        ax2.set_xticks(range(len(labels_bar)))
-        ax2.set_xticklabels(labels_bar, rotation=45, ha='right')
-
-        ax2.set_xlabel('Category')
-        ax2.set_ylabel('Count')
-        ax2.set_title('Detection Classes Distribution (Bar Chart)', fontweight='bold')
-        ax2.grid(True, alpha=0.3, axis='y')
-
-        # 添加计数标签
-        for bar, count in zip(bars, counts_bar):
-            ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 5,
-                    str(count), ha='center', fontsize=9)
-
-        # 统计信息
-        ax2.annotate(f'Total Objects: {len(categories)}\nUnique Classes: {len(counter)}',
-                    xy=(0.95, 0.95), xycoords='axes fraction',
-                    ha='right', va='top',
-                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-        plt.tight_layout()
-        path = output_path / f'detection_classes.{self.plot_format}'
         plt.savefig(path, dpi=self.dpi)
         plt.close()
         return path

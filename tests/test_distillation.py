@@ -135,15 +135,6 @@ class TestHardLabelGenerator(unittest.TestCase):
             'full_response': 'test response'
         })
 
-        self.mock_teacher.inference_captioning = Mock(return_value={
-            'captions': ['test caption 1', 'test caption 2'],
-            'num_captions': 2
-        })
-
-        self.mock_teacher.inference_detection = Mock(return_value={
-            'objects': [{'class': 'person', 'bbox': [10, 20, 30, 40]}]
-        })
-
     def test_generate_vqa_hard_labels(self):
         """Test VQA hard label generation."""
         config = ConfigManager()
@@ -160,22 +151,6 @@ class TestHardLabelGenerator(unittest.TestCase):
         self.assertEqual(result['task'], 'vqa')
         self.assertEqual(result['answer'], 'test_answer')
         self.assertIn('confidence', result)
-
-    def test_generate_captioning_hard_labels(self):
-        """Test captioning hard label generation."""
-        config = ConfigManager()
-        config.config = {'distillation': {'hard_labels': {'confidence_threshold': 0.5}}}
-
-        generator = HardLabelGenerator(self.mock_teacher, config)
-
-        result = generator.generate_captioning_hard_labels(
-            'test_image.jpg',
-            num_captions=2,
-            image_id='test_id'
-        )
-
-        self.assertEqual(result['task'], 'captioning')
-        self.assertEqual(len(result['captions']), 2)
 
     def test_validate_hard_labels(self):
         """Test hard label validation."""

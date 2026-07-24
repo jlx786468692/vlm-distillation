@@ -22,7 +22,6 @@ from ..export.json_exporter import JSONExporter
 
 from .hard_label_gen import HardLabelGenerator
 from .vqa_soft_label_gen import VQASoftLabelGenerator
-from .detect_soft_label_gen import DetectSoftLabelGenerator
 from .cot_generator import CoTGenerator
 
 
@@ -63,9 +62,8 @@ class Distiller:
         # Initialize generators
         self.hard_label_gen = HardLabelGenerator(self.teacher, self.config)
 
-        # 🔧 重构：分别初始化VQA和Detect的软标签生成器
+        # 🔧 重构：只使用VQA软标签生成器
         self.vqa_soft_label_gen = VQASoftLabelGenerator(self.teacher, self.config)
-        self.detect_soft_label_gen = DetectSoftLabelGenerator(self.teacher, self.config)
 
         self.cot_gen = CoTGenerator(self.teacher, self.config)
 
@@ -425,77 +423,6 @@ class Distiller:
                 return hard_label
             return {}
 
-        elif task == 'captioning':
-            result = self.teacher.inference_captioning(
-                image=image_path,
-                return_logits=True,
-                generate_cot=False,
-                num_captions=3
-            )
-
-            captions = result.get('captions', [])
-            hard_label = {
-                'captions': captions,
-                'num_captions': len(captions),
-                'primary_caption': captions[0] if captions else '',
-                'confidence': result.get('confidence', 0.0),
-                'logits': result.get('logits', {})
-            }
-            return hard_label
-
-        elif task == 'detection':
-            result = self.teacher.inference_detection(
-                image=image_path,
-                return_logits=True,  # 获取 logits
-                generate_cot=False
-            )
-
-            objects = result.get('objects', [])
-
-            # 应用置信度过滤
-            filtered_objects = [
-                obj for obj in objects
-                if obj.get('confidence', 1.0) >= self.hard_label_gen.confidence_threshold
-            ]
-
-            # 计算平均置信度
-            avg_confidence = (
-                sum(obj.get('confidence', 0.9) for obj in filtered_objects) / len(filtered_objects)
-                if filtered_objects else 0.0
-            )
-
-            hard_label = {
-                'objects': filtered_objects,
-                'num_objects': len(filtered_objects),
-                'total_detected': len(objects),
-                'confidence': avg_confidence,
-                'logits': result.get('logits', {})
-            }
-            return hard_label
-
-        elif task == 'keypoints':
-            result = self.teacher.inference_keypoints(
-                image=image_path,
-                return_logits=True,
-                generate_cot=False
-            )
-
-            persons = result.get('persons', [])
-
-            # 过滤可见关键点不足的人
-            filtered_persons = [
-                person for person in persons
-                if sum(1 for kp in person.get('keypoints', []) if kp.get('visibility', 0) >= 2) >= 5
-            ]
-
-            hard_label = {
-                'persons': filtered_persons,
-                'num_persons': len(filtered_persons),
-                'total_detected': len(persons),
-                'logits': result.get('logits', {})
-            }
-            return hard_label
-
         return {}
 
     def _generate_task_soft_labels(
@@ -533,33 +460,6 @@ class Distiller:
                 )
             return {}
 
-        elif task == 'captioning':
-            return self.vqa_soft_label_gen.generate_captioning_soft_labels(
-                image_path=image_path,
-                num_captions=3,
-                image_id=str(image_id)
-            )
-
-        elif task == 'detection':
-            # 🔧 传入hard_label结果，避免重复推理
-            return self.detect_soft_label_gen.generate_detect_soft_labels(
-                image_path=image_path,
-                image_id=str(image_id),
-                hard_label_result=hard_label_result
-            )
-
-        elif task == 'keypoints':
-            # TODO: 实现KeypointsSoftLabelGenerator
-            # 暂时返回空字典
-            self.logger.warning("Keypoints soft label generation not implemented yet")
-            return {}
-
-            # 未来实现：
-            # return self.keypoints_soft_label_gen.generate_keypoints_soft_labels(
-            #     image_path=image_path,
-            #     image_id=str(image_id)
-            # )
-
         return {}
 
     def _generate_task_cot(
@@ -594,24 +494,6 @@ class Distiller:
                     allowed_answers=allowed_answers
                 )
             return {}
-
-        elif task == 'captioning':
-            return self.cot_gen.generate_captioning_cot(
-                image_path=image_path,
-                image_id=str(image_id)
-            )
-
-        elif task == 'detection':
-            return self.cot_gen.generate_detection_cot(
-                image_path=image_path,
-                image_id=str(image_id)
-            )
-
-        elif task == 'keypoints':
-            return self.cot_gen.generate_keypoints_cot(
-                image_path=image_path,
-                image_id=str(image_id)
-            )
 
         return {}
 

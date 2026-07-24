@@ -218,8 +218,8 @@ class TeacherOutputValidator:
             for task_name, task_data in tasks.items():
                 hard_label = task_data.get('hard_label', {})
 
-                # VQA/Captioning 答案检查
-                answer = hard_label.get('answer', '') or hard_label.get('primary_caption', '')
+                # VQA 答案检查
+                answer = hard_label.get('answer', '')
 
                 if answer:
                     total_count += 1
@@ -350,12 +350,6 @@ class LabelDistributionValidator:
         # 1. VQA 答案分布
         report['checks']['vqa_distribution'] = self._check_vqa_distribution(data_list)
 
-        # 2. Caption 多样性
-        report['checks']['caption_diversity'] = self._check_caption_diversity(data_list)
-
-        # 3. 检测类别分布
-        report['checks']['detection_distribution'] = self._check_detection_distribution(data_list)
-
         # 计算总体通过状态
         report['passed'] = all(
             check.get('passed', True)
@@ -427,119 +421,6 @@ class LabelDistributionValidator:
                 'top_1_ratio': round(top1_ratio, 4),
             },
             'top_20_answers': top_20,
-            'warnings': warnings
-        }
-
-    def _check_caption_diversity(self, data_list: List[Dict]) -> Dict[str, Any]:
-        """Caption 多样性检查"""
-        captions = []
-        lengths = []
-
-        for data in data_list:
-            tasks = data.get('tasks', {})
-            captioning_data = tasks.get('captioning', {})
-            hard_label = captioning_data.get('hard_label', {})
-
-            # 单个 caption
-            primary_caption = hard_label.get('primary_caption', '')
-            if primary_caption:
-                captions.append(primary_caption.lower().strip())
-                lengths.append(len(primary_caption))
-
-            # 多 captions
-            all_captions = hard_label.get('captions', [])
-            for cap in all_captions:
-                if cap and cap.lower().strip() not in captions:
-                    captions.append(cap.lower().strip())
-
-        if not captions:
-            return {
-                'passed': True,
-                'statistics': {},
-                'warnings': ['No caption data found']
-            }
-
-        # 多样性统计
-        unique_captions = len(set(captions))
-        diversity_ratio = unique_captions / len(captions) if captions else 0
-
-        # 长度统计
-        avg_length = sum(lengths) / len(lengths) if lengths else 0
-
-        # 判断通过状态
-        passed = diversity_ratio > 0.5  # 至少50%是独特的 caption
-
-        warnings = []
-        if diversity_ratio < 0.5:
-            warnings.append(f'Caption 多样性过低 ({diversity_ratio*100:.1f}% < 50%)')
-
-        return {
-            'passed': passed,
-            'statistics': {
-                'total_count': len(captions),
-                'unique_count': unique_captions,
-                'diversity_ratio': round(diversity_ratio, 4),
-                'avg_length': round(avg_length, 2),
-                'min_length': min(lengths) if lengths else 0,
-                'max_length': max(lengths) if lengths else 0,
-            },
-            'warnings': warnings
-        }
-
-    def _check_detection_distribution(self, data_list: List[Dict]) -> Dict[str, Any]:
-        """检测类别分布检查"""
-        categories = []
-
-        for data in data_list:
-            tasks = data.get('tasks', {})
-            detection_data = tasks.get('detection', {})
-            hard_label = detection_data.get('hard_label', {})
-            objects = hard_label.get('objects', [])
-
-            for obj in objects:
-                category = obj.get('category', obj.get('label', 'unknown'))
-                if category:
-                    categories.append(category.lower().strip())
-
-        if not categories:
-            return {
-                'passed': True,
-                'statistics': {},
-                'warnings': ['No detection data found']
-            }
-
-        # 频率统计
-        counter = Counter(categories)
-        total_count = len(categories)
-        unique_categories = len(counter)
-
-        # 小样本类别（< 1%）
-        rare_categories = [
-            (cat, count) for cat, count in counter.items()
-            if count / total_count < 0.01
-        ]
-
-        # Top-10 类别
-        top_10 = counter.most_common(10)
-
-        # 判断通过状态
-        passed = unique_categories >= 10  # 至少10个类别
-
-        warnings = []
-        if unique_categories < 10:
-            warnings.append(f'检测类别数量过少 ({unique_categories} < 10)')
-        if rare_categories:
-            warnings.append(f'小样本类别数量: {len(rare_categories)} (占比 < 1%)')
-
-        return {
-            'passed': passed,
-            'statistics': {
-                'total_objects': total_count,
-                'unique_categories': unique_categories,
-                'avg_objects_per_image': round(total_count / len(data_list), 2),
-            },
-            'top_10_categories': top_10,
-            'rare_categories': rare_categories[:20],
             'warnings': warnings
         }
 
@@ -1074,10 +955,6 @@ class DataValidator:
             lines.append(f"\n[标签分布]")
             lines.append(f"  VQA答案熵值: {stats.get('entropy', 'N/A')}")
             lines.append(f"  Top-1答案占比: {stats.get('top_1_ratio', 'N/A')*100:.1f}%")
-
-        if 'detection_distribution' in checks:
-            stats = checks['detection_distribution'].get('statistics', {})
-            lines.append(f"  检测类别数: {stats.get('unique_categories', 'N/A')}")
 
         # CoT Hallucination
         cot = report['validation_results'].get('cot_hallucination', {})
