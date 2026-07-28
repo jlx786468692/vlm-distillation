@@ -3,6 +3,8 @@ VQA Soft Label Generator
 ========================
 
 VQA任务的软标签生成器，继承基类复用公共逻辑。
+
+🔧 新增：集成候选集封闭，减少噪声
 """
 
 import torch
@@ -15,6 +17,14 @@ from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
 from ..utils.vqa_token_filter import VQATokenFilter
 from ..utils.answer_normalizer import normalize_answer
+
+# 🔧 新增：导入候选集封闭模块
+try:
+    from tools.candidate.candidate_closure import CandidateClosure
+    CANDIDATE_CLOSURE_AVAILABLE = True
+except ImportError:
+    CANDIDATE_CLOSURE_AVAILABLE = False
+    CandidateClosure = None
 
 
 class VQASoftLabelGenerator(BaseSoftLabelGenerator):
@@ -71,6 +81,26 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
             self.logger.warning(f"VQA Token过滤器初始化失败: {e}，将不使用任务适配过滤")
             self.token_filter = None
 
+        # 🔧 新增：初始化候选集封闭模块
+        try:
+            candidate_config = {
+                'enable_classifier': self.config.get("distillation.soft_labels.enable_candidate_classifier", False),
+                'temperature': self.temperature,
+                'min_probability': self.min_probability,
+                'max_candidates': self.config.get("distillation.soft_labels.max_candidates", 100)
+            }
+
+            if CANDIDATE_CLOSURE_AVAILABLE and CandidateClosure:
+                self.candidate_closure = CandidateClosure(candidate_config)
+                self.logger.info("✓ 候选集封闭模块初始化成功")
+                self.logger.info(f"  VQA词表大小: {len(self.candidate_closure.vqa_vocab)}个")
+            else:
+                self.candidate_closure = None
+                self.logger.warning("候选集封闭模块未加载，将使用默认token过滤")
+        except Exception as e:
+            self.logger.warning(f"候选集封闭模块初始化失败: {e}，将使用默认token过滤")
+            self.candidate_closure = None
+
     def generate_vqa_soft_labels(
         self,
         image_path: str,
@@ -109,6 +139,15 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
 
             if primary_answer != primary_answer_raw:
                 self.logger.debug(f"[Answer Normalization] '{primary_answer_raw}' -> '{primary_answer}'")
+
+            # 🔧 新增：使用候选集封闭获取候选答案集
+            if self.candidate_closure and not answer_candidates:
+                answer_candidates = self.candidate_closure.get_candidates_for_question(
+                    question=question,
+                    primary_answer=primary_answer
+                )
+                self.logger.info(f"[Candidate Closure] 生成候选集: {len(answer_candidates)}个答案")
+                self.logger.debug(f"[Candidate Closure] 前五个候选: {answer_candidates[:5]}")
 
             # 🔧 传入 primary_answer，确保分布合理
             # 🔧 新增：传入question用于上下文感知过滤
@@ -583,6 +622,45 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
                 f"tokens after filtering: {len(distribution)}, "
                 f"primary_answer='{primary_answer}' with prob={distribution.get(primary_answer.lower(), 0):.4f}"
             )
+
+        # ===== 🔧 第五层：候选集封闭过滤（核心降噪层） =====
+        # 只保留在候选答案集中的token，彻底消除噪声
+        if distribution and answer_candidates and self.candidate_closure:
+            candidate_set = set(c.lower() for c in answer_candidates)
+            primary_lower = primary_answer.lower() if primary_answer else None
+
+            filtered_distribution = {}
+            for answer, prob in distribution.items():
+                answer_lower = answer.lower()
+
+                # 保留在候选集中的答案
+                if answer_lower in candidate_set:
+                    filtered_distribution[answer_lower] = prob
+                # 保底：强制保留primary_answer（即使不在候选集中）
+                elif primary_lower and answer_lower == primary_lower:
+                    filtered_distribution[answer_lower] = prob
+                    self.logger.warning(
+                        f"[Candidate Closure] Primary answer '{primary_lower}' not in candidate set, forcing inclusion"
+                    )
+
+            # 归一化
+            if filtered_distribution:
+                total = sum(filtered_distribution.values())
+                if total > 0:
+                    filtered_distribution = {k: v/total for k, v in filtered_distribution.items()}
+                distribution = filtered_distribution
+
+                self.logger.info(
+                    f"[Candidate Closure] Filtered distribution: {len(distribution)} answers, "
+                    f"primary_answer='{primary_lower}' with prob={distribution.get(primary_lower, 0):.4f}"
+                )
+            else:
+                self.logger.warning(
+                    "[Candidate Closure] All answers filtered out! Using primary answer only."
+                )
+                # 极端情况：只保留primary_answer
+                if primary_lower:
+                    distribution = {primary_lower: 1.0}
 
         return distribution
 

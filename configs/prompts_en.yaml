@@ -16,15 +16,25 @@ prompts:
 
   standard:
     # VQA - 单词答案，简洁直接
+    # 🔧 改进：添加候选答案集提示，引导模型生成更精准的logits
+    #
+    # 概念区分：
+    # - candidate_answers: 从VQA词表/训练集得到的预定义答案集（硬标签阶段）
+    # - allowed_answers: 从软标签分布中提取的可能答案（CoT阶段）
+    #
     vqa: |
       Look at the image and answer the following question.
       Question: {question}
 
-      STRICT REQUIREMENTS:
+      CANDIDATE ANSWERS (choose from these):
+      {candidate_answers}
+
+      REQUIREMENTS:
       1. Answer in ONE WORD or NUMBER only
       2. Use lowercase only
       3. No punctuation, no explanation
-      4. Examples: "yes", "no", "2", "red", "bicycle"
+      4. Focus on choosing from the candidate answers above
+      5. Examples: "yes", "no", "2", "red", "bicycle"
 
       Answer:
 

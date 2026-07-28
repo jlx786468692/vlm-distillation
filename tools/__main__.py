@@ -7,7 +7,6 @@
 使用方式：
     python -m tools                              # 显示帮助
     python -m tools prompt_generator             # 生成Prompt
-    python -m tools prompt_optimizer             # 优化Prompt
     python -m tools candidate_closure            # 生成候选集
     python -m tools all                          # 运行所有工具
 """
@@ -92,29 +91,165 @@ def run_prompt_optimizer(args):
 
 
 def run_candidate_closure(args):
-    """运行候选集封闭"""
-    from tools.candidate.closure import CandidateClosure
+    """运行候选集封闭（千问开源流水线三阶段）"""
+    from pathlib import Path
+    import subprocess
+    import sys
 
     print("\n" + "="*60)
-    print("🎯 Candidate Closure")
+    print("🎯 Candidate Closure (千问开源流水线三阶段)")
     print("="*60)
+    print("\n阶段1：构建全局超大候选池 C_all")
+    print("阶段2：COCO图像分场景")
+    print("阶段3：分场景过滤生成局部小闭合集")
 
-    config = load_config(args.config)
-    closure = CandidateClosure(config.get('candidate_closure', {}))
-    data = closure.generate()
+    # 检查必需的COCO标注文件
+    annotations_dir = Path("data/coco/annotations")
 
-    if not data:
-        print("❌ 候选集生成失败")
+    required_files = {
+        'VQA标注': annotations_dir / "v2_mscoco_train2014_annotations.json",
+        'COCO Captions': annotations_dir / "captions_train2014.json",
+        'COCO Instances': annotations_dir / "instances_train2014.json"
+    }
+
+    missing_files = []
+    for name, file_path in required_files.items():
+        if not file_path.exists():
+            missing_files.append((name, file_path))
+
+    if missing_files:
+        print("\n❌ 缺少必需的COCO标注文件：")
+        for name, file_path in missing_files:
+            print(f"  {name}: {file_path}")
+
+        print("\n请下载COCO和VQA数据集：")
+        print("\n1. COCO数据集：")
+        print("   访问: https://cocodataset.org/#download")
+        print("   下载: 2014 Train/Val annotations")
+        print("   解压到: data/coco/annotations/")
+
+        print("\n2. VQA v2数据集：")
+        print("   访问: https://visualqa.org/download.html")
+        print("   下载: Trainable data: v2_Annotations_Train_mscoco.zip")
+        print("   解压到: data/coco/annotations/")
+
+        print("\n或者使用已有的merged数据（简化方案）：")
+        print("   python tools/candidate/generate_vqa_vocab.py --source merged")
+
         return
 
-    # 保存
-    output_path = Path(config.get('candidate_closure', {}).get('output_file', 'outputs/candidate_sets/closure_data.json'))
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # 检查输出文件
+    global_pool_file = Path("data/global_candidate_pool.json")
+    scene_mapping_file = Path("data/imgid2scene.json")
+    scene_candidates_file = Path("data/scene_candidates.json")
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    # 阶段1：构建全局超大候选池
+    if not global_pool_file.exists():
+        print("\n" + "="*60)
+        print("阶段1：构建全局超大候选池")
+        print("="*60)
 
-    print(f"✓ 候选集已生成: {output_path}")
+        try:
+            # 从配置读取是否使用教师模型
+            config = load_config(args.config)
+            closure_config = config.get('candidate_closure', {})
+            use_teacher_model = closure_config.get('use_teacher_model', False)
+            teacher_model_path = closure_config.get('teacher_model', 'models/Qwen2.5-VL-32B-Instruct-AWQ')
+            max_expand_samples = closure_config.get('max_expand_samples', 1000)
+
+            # 构建命令
+            cmd = [sys.executable, "tools/candidate/stage1_build_global_pool.py"]
+
+            if use_teacher_model:
+                cmd.extend([
+                    "--use-teacher-model",
+                    "--teacher-model", teacher_model_path,
+                    "--max-expand-samples", str(max_expand_samples)
+                ])
+                print(f"使用教师模型扩充: {teacher_model_path}")
+                print(f"扩充样本数: {max_expand_samples}")
+
+            result = subprocess.run(
+                cmd,
+                cwd=Path(__file__).parent.parent,
+                check=True
+            )
+            print("✓ 阶段1完成")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ 阶段1失败: {e}")
+            return
+    else:
+        print(f"\n✓ 全局候选池已存在: {global_pool_file}")
+
+    # 阶段2：COCO图像分场景
+    if not scene_mapping_file.exists():
+        print("\n" + "="*60)
+        print("阶段2：COCO图像分场景")
+        print("="*60)
+
+        try:
+            result = subprocess.run(
+                [sys.executable, "tools/candidate/stage2_scene_mapping.py"],
+                cwd=Path(__file__).parent.parent,
+                check=True
+            )
+            print("✓ 阶段2完成")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ 阶段2失败: {e}")
+            return
+    else:
+        print(f"✓ 场景映射已存在: {scene_mapping_file}")
+
+    # 阶段3：分场景过滤生成局部小闭合集
+    if not scene_candidates_file.exists():
+        print("\n" + "="*60)
+        print("阶段3：分场景过滤生成局部小闭合集")
+        print("="*60)
+
+        try:
+            result = subprocess.run(
+                [sys.executable, "tools/candidate/stage3_scene_closure.py"],
+                cwd=Path(__file__).parent.parent,
+                check=True
+            )
+            print("✓ 阶段3完成")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ 阶段3失败: {e}")
+            return
+    else:
+        print(f"✓ 分场景候选集已存在: {scene_candidates_file}")
+
+    # 显示结果
+    print("\n" + "="*60)
+    print("✓ 千问开源流水线三阶段完成")
+    print("="*60)
+
+    print("\n输出文件：")
+    print(f"  1. 全局候选池: {global_pool_file}")
+    print(f"  2. 场景映射: {scene_mapping_file}")
+    print(f"  3. 分场景候选集: {scene_candidates_file}")
+
+    # 显示统计信息
+    if scene_candidates_file.exists():
+        import json
+        with open(scene_candidates_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        print("\n场景候选集统计：")
+        total_candidates = 0
+        for scene, scene_data in data.get('scenes', {}).items():
+            count = scene_data.get('count', 0)
+            total_candidates += count
+            print(f"  {scene:15s}: {count:4d} 个候选")
+
+        print(f"\n总候选数: {total_candidates}")
+        print(f"平均候选数: {total_candidates / len(data.get('scenes', {})):.0f}")
+
+    print("\n💡 提示：")
+    print("  - 候选集会在软标签生成时自动调用")
+    print("  - 数据来源：VQA标注 + COCO Caption + 教师模型（可选）")
+    print("  - 场景划分：COCO原生12大场景")
+    print("  - 三层过滤：物体硬匹配 + 频次过滤 + 语义过滤")
 
 
 def run_all(args):

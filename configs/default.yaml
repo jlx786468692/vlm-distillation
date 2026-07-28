@@ -115,6 +115,11 @@ distillation:
     top_k_logits: 50  # Top-K兜底策略
     save_format: "json"
 
+    # 🔧 新增：候选集封闭配置（降噪）
+    enable_candidate_closure: true  # 启用候选集封闭
+    enable_candidate_classifier: false  # 启用问题类型分类器（需要下载模型）
+    max_candidates: 100  # 最大候选答案数
+
   # Chain-of-Thought configuration
   cot:
     enabled: true

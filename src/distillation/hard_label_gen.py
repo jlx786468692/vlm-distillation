@@ -4,6 +4,8 @@ Hard Label Generator for VQA Tasks
 
 专注于VQA任务的硬标签生成器。
 Optimized for Qwen2.5-VL-32B
+
+🔧 新增：集成候选集封闭，引导模型生成更精准的logits
 """
 
 import json
@@ -15,6 +17,14 @@ from ..models.teacher_model import TeacherModel
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
 from ..utils.answer_normalizer import normalize_answer
+
+# 🔧 新增：导入候选集封闭模块
+try:
+    from tools.candidate.candidate_closure import CandidateClosure
+    CANDIDATE_CLOSURE_AVAILABLE = True
+except ImportError:
+    CANDIDATE_CLOSURE_AVAILABLE = False
+    CandidateClosure = None
 
 
 class HardLabelGenerator:
@@ -49,6 +59,26 @@ class HardLabelGenerator:
             "distillation.hard_labels.confidence_threshold", 0.4
         )
 
+        # 🔧 新增：初始化候选集封闭模块
+        try:
+            candidate_config = {
+                'enable_classifier': self.config.get("distillation.soft_labels.enable_candidate_classifier", False),
+                'temperature': self.config.get("distillation.soft_labels.temperature", 2.0),
+                'min_probability': self.config.get("distillation.soft_labels.min_probability", 0.01),
+                'max_candidates': self.config.get("distillation.soft_labels.max_candidates", 100)
+            }
+
+            if CANDIDATE_CLOSURE_AVAILABLE and CandidateClosure:
+                self.candidate_closure = CandidateClosure(candidate_config)
+                self.logger.info("✓ HardLabelGenerator: 候选集封闭模块初始化成功")
+                self.logger.info(f"  VQA词表大小: {len(self.candidate_closure.vqa_vocab)}个")
+            else:
+                self.candidate_closure = None
+                self.logger.warning("HardLabelGenerator: 候选集封闭模块未加载")
+        except Exception as e:
+            self.logger.warning(f"HardLabelGenerator: 候选集封闭模块初始化失败: {e}")
+            self.candidate_closure = None
+
     def generate_vqa_hard_labels(
         self,
         image_path: str,
@@ -57,6 +87,12 @@ class HardLabelGenerator:
     ) -> Dict[str, Any]:
         """
         Generate hard labels for VQA task.
+
+        🔧 改进：集成候选集封闭，引导模型生成更精准的logits
+
+        概念区分：
+        - candidate_answers: 从VQA词表得到的预定义答案集，用于引导模型（硬标签阶段）
+        - allowed_answers: 从软标签分布提取的可能答案，用于CoT生成（软标签阶段）
 
         Args:
             image_path: Path to image
@@ -68,12 +104,28 @@ class HardLabelGenerator:
         """
         self.logger.debug(f"Generating VQA hard labels for image {image_id}")
 
+        # 🔧 新增：生成候选答案集（用于引导模型）
+        # 从VQA词表中选择候选答案，引导模型的logits更集中在有意义的答案上
+        candidate_answers = None
+        if self.candidate_closure:
+            try:
+                # 从VQA词表选择Top-K个候选答案
+                max_candidates = self.config.get("distillation.hard_labels.max_candidates_for_prompt", 20)
+                candidate_answers = self.candidate_closure.vqa_vocab[:max_candidates]
+                self.logger.info(f"[Hard Label] 使用VQA词表作为候选答案集: {len(candidate_answers)}个")
+                self.logger.debug(f"[Hard Label] 前5个候选: {candidate_answers[:5]}")
+            except Exception as e:
+                self.logger.warning(f"[Hard Label] 生成候选答案集失败: {e}")
+                candidate_answers = None
+
         # 获取完整的logits用于软标签
+        # 🔧 改进：传入候选答案集（candidate_answers），引导模型关注这些答案
         result = self.teacher.inference_vqa(
             image=image_path,
             question=question,
             return_logits=True,  # 获取 logits 供 soft_label 使用
-            generate_cot=False
+            generate_cot=False,
+            candidate_answers=candidate_answers  # 🔧 新增：传入候选答案集（用于硬标签阶段）
         )
 
         # Extract hard label

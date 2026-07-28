@@ -1,17 +1,19 @@
-# 🔧 工具模块 (Tools Module)
+# 🔧 工具模块使用说明
 
 ## 📋 概述
 
-工具模块提供独立的可执行工具，包括：
-- **Prompt生成**: 基于真实标签或数据模式生成优化的prompt
-- **候选集封闭**: 生成封闭的答案候选集
+工具模块提供Prompt生成和候选集封闭功能。
+
+**核心方案**：零样本分类路由 + 分场景独立小闭合集
+
+---
 
 ## 🚀 快速开始
 
-### 运行所有工具
+### 一键运行（推荐）
 
 ```bash
-# 运行所有工具（推荐）
+# 运行所有工具
 python -m tools all
 
 # 查看帮助
@@ -21,256 +23,179 @@ python -m tools --help
 ### 单独运行
 
 ```bash
-# 只生成Prompt
+# Prompt生成
 python -m tools prompt_generator
 
-# 只生成候选集
-python -m tools candidate_closure
-
-# 强制重新生成
-python -m tools all --force
-```
-
-### 使用自定义配置
-
-```bash
-# 使用自定义配置文件
-python -m tools all --config my_tools.yaml
-
-# 或修改 configs/tools.yaml 后直接运行
-python -m tools all
-```
-
----
-
-## 📁 目录结构
-
-```
-tools/
-├── __init__.py              # 模块接口
-├── __main__.py              # 统一执行入口
-│
-├── prompt/                  # Prompt工具
-│   ├── __init__.py
-│   └── generator.py         # Prompt生成器
-│
-└── candidate/               # 候选集工具
-    ├── __init__.py
-    └── closure.py           # 候选集封闭
-```
-
----
-
-## 📊 输出位置
-
-运行工具后，生成的资源位于：
-
-```
-outputs/
-├── prompts/                 # 生成的Prompt
-│   ├── vqa_en.yaml
-│   └── metadata.json
-│
-└── candidate_sets/          # 生成的候选集
-    ├── closure_data.json
-    └── metadata.json
-```
-
----
-
-## ⚙️ 配置说明
-
-工具使用独立的配置文件 `configs/tools.yaml`：
-
-```bash
-# 查看配置
-cat configs/tools.yaml
-
-# 使用默认配置（configs/tools.yaml）
-python -m tools all
-
-# 使用自定义配置
-python -m tools all --config my_tools.yaml
-```
-
-配置文件位置：`configs/tools.yaml`
-
-```yaml
-# Prompt生成配置
-prompt_generation:
-  source_dir: "outputs/merged"       # 数据源目录
-  num_samples: 100                   # 样本数
-  strategy: "real_labels"            # 策略：real_labels | pattern_based
-  output_file: "outputs/prompts/vqa_en.yaml"
-
-# 候选集封闭配置
-candidate_closure:
-  source_dir: "data/coco/annotations"
-  strategy: "frequency_based"        # 策略：frequency_based
-  min_frequency: 5                   # 最低频率阈值
-  max_candidates: 100                # 最大候选数
-  output_file: "outputs/candidate_sets/closure_data.json"
-```
-
-**注意**：
-- 工具默认使用 `configs/tools.yaml`
-- 如果 `tools.yaml` 不存在，会自动使用 `configs/default.yaml`
-- 主流程配置仍在 `configs/default.yaml`
-
----
-
-## 🔧 高级用法
-
-### 方式一：统一入口（推荐）
-
-```bash
-# 运行所有工具
-python -m tools all
-
-# 单独运行
-python -m tools prompt_generator
+# 候选集封闭（自动生成分场景独立小闭合集）
 python -m tools candidate_closure
 ```
 
-### 方式二：单独执行子模块
+---
 
-```bash
-# Prompt生成
-python -m tools.prompt.generator --strategy real_labels --num_samples 100
+## 🎯 核心方案
 
-# 候选集封闭
-python -m tools.candidate.closure --strategy frequency_based --max_candidates 100
+### 零样本分类路由 + 分场景独立小闭合集
+
+**核心流程**：
+1. 加载 VQA 训练集标注
+2. 零样本分类问题类型（count/color/binary/other）
+3. 为每个场景生成独立候选集
+4. 输出分场景独立小闭合集
+
+**数据来源**：VQA 训练集标注
+
+**输出文件**：`data/scene_candidates.json`
+
+### 方案优势
+
+| 传统方案 | 新方案 |
+|---------|--------|
+| 单一候选集（1873个答案） | 分场景独立候选集 ✅ |
+| 所有问题都用同一候选集 | 根据问题类型动态选择 ✅ |
+| 噪声多、效率低 | 高质量、高效率 ✅ |
+
+### 场景示例
+
 ```
-
-### 方式三：在Python代码中使用
-
-```python
-from tools import PromptGenerator, CandidateClosure
-
-# Prompt生成
-config = {
-    'source_dir': 'outputs/merged',
-    'num_samples': 100,
-    'strategy': 'real_labels'
-}
-generator = PromptGenerator(config)
-prompts = generator.generate()
-
-# 候选集封闭
-config = {
-    'source_dir': 'data/coco/annotations',
-    'strategy': 'frequency_based',
-    'max_candidates': 100
-}
-closure = CandidateClosure(config)
-closure_data = closure.generate()
+计数问题 → count候选集（21个答案）
+颜色问题 → color候选集（24个答案）
+二元问题 → binary候选集（2个答案）
+其他问题 → other候选集（1873个答案）
 ```
 
 ---
 
-## 📝 支持的策略
+## 📚 分场景候选集生成
 
-### Prompt生成策略
-
-| 策略 | 说明 | 适用场景 | 推荐度 |
-|-----|------|---------|-------|
-| `real_labels` | 基于真实标签生成 | 有高质量标注数据时 | ⭐⭐⭐⭐⭐ |
-| `dspy_fewshot` | DSPy Few-Shot方法 | 基于真实数据示例 | ⭐⭐⭐⭐⭐ |
-| `dspy` | DSPy MIPROv2优化 | 自动优化prompt结构 | ⭐⭐⭐⭐ |
-| `pattern_based` | 基于数据模式分析 | 无标注数据时 | ⭐⭐⭐ |
-
-**使用不同策略**:
+### 自动生成（推荐）
 
 ```bash
-# 使用real_labels策略（默认）
-python -m tools prompt_generator --strategy real_labels
+# 直接运行，系统自动检测并生成
+python -m tools candidate_closure
+```
 
-# 使用DSPy Few-Shot方法（推荐）
+**自动流程**：
+1. 检测 `data/scene_candidates.json` 是否存在
+2. 如果不存在，从 VQA 训练集生成
+3. 初始化候选集封闭系统
+4. 演示候选集生成
+
+### 手动生成
+
+```bash
+python tools/candidate/generate_vqa_vocab.py \
+    --vqa-annotations data/coco/annotations \
+    --min-frequency 5 \
+    --max-candidates 100
+```
+
+### 数据准备
+
+需要下载 VQA v2 训练集标注：
+
+1. 访问 https://visualqa.org/download.html
+2. 下载 `v2_Annotations_Train_mscoco.zip`
+3. 解压到 `data/coco/annotations/`
+
+---
+
+## 📝 Prompt生成策略
+
+支持4种策略：
+
+| 策略 | 说明 | 推荐度 |
+|-----|------|-------|
+| `real_labels` | 基于真实标签 | ⭐⭐⭐⭐⭐ |
+| `dspy_fewshot` | DSPy Few-Shot | ⭐⭐⭐⭐⭐ |
+| `dspy` | DSPy MIPROv2 | ⭐⭐⭐⭐ |
+| `pattern_based` | 基于数据模式 | ⭐⭐⭐ |
+
+### 使用不同策略
+
+```bash
+# 默认：real_labels
+python -m tools prompt_generator
+
+# 推荐：dspy_fewshot
 python -m tools prompt_generator --strategy dspy_fewshot
 
-# 使用DSPy MIPROv2优化
+# DSPy优化
 python -m tools prompt_generator --strategy dspy
 
-# 使用pattern_based策略
+# 无标注数据
 python -m tools prompt_generator --strategy pattern_based
 ```
 
-**策略对比**:
+---
 
-| 特性 | real_labels | dspy_fewshot | dspy | pattern_based |
-|-----|------------|--------------|------|--------------|
-| 需要 | 真实标签 | 真实标签 | 真实标签 | COCO标注 |
-| 质量 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ |
-| 速度 | 快 | 中等 | 慢 | 快 |
-| 示例 | ❌ | ✅ 自动选择 | ✅ 自动生成 | ❌ |
-| 推荐度 | ✅ 推荐 | ✅ 推荐 | 推荐 | 备用 |
+## 📁 输出位置
 
-**策略详细说明**:
+```
+outputs/
+├── prompts/
+│   └── vqa_en.yaml        # 生成的Prompt
+└── candidate_sets/
+    └── closure_data.json  # 生成的候选集（已废弃）
+```
 
-1. **real_labels**: 直接使用真实标签数据生成prompt，简单快速
-2. **dspy_fewshot**: 自动选择高质量示例，构建few-shot prompt（推荐）
-3. **dspy**: 使用DSPy的MIPROv2自动优化prompt结构
-4. **pattern_based**: 基于数据模式分析生成（备用）
+**新版本输出**：
 
-### 候选集封闭策略
-
-| 策略 | 说明 | 适用场景 |
-|-----|------|---------|
-| `frequency_based` | 基于频率统计 | 通用场景（推荐）|
-| `semantic_clustering` | 基于语义聚类 | 需要语义分组时（预留）|
+```
+data/
+└── scene_candidates.json  # 分场景独立小闭合集 ✅
+```
 
 ---
 
-## 🔗 与主流程的集成
+## ⚙️ 配置
 
-生成资源后，在主流程中使用：
+配置文件：`configs/tools.yaml`
 
 ```yaml
-# configs/default.yaml
-teacher:
-  prompts_config: "outputs/prompts/vqa_en.yaml"
+prompt_generation:
+  strategy: "real_labels"    # 或 dspy_fewshot, dspy, pattern_based
+  num_samples: 100
 
-vqa_token_filter:
-  candidate_sets: "outputs/candidate_sets/closure_data.json"
-```
+candidate_closure:
+  # 🔧 问题类型分类器配置
+  classifier_model: "models/bart-large-mnli"  # 零样本分类模型
+  enable_classifier: true                        # 是否启用分类器
 
-运行主流程：
-
-```bash
-python scripts/run_full_pipeline.py --max_samples 10
-```
-
----
-
-## 🐛 故障排除
-
-### 问题：找不到数据源
-
-**错误**: `数据源目录不存在: outputs/merged`
-
-**解决**: 先运行主流程生成标签数据
-```bash
-python scripts/run_full_pipeline.py --steps distillation
-```
-
-### 问题：生成的Prompt为空
-
-**可能原因**: 样本数配置过大或数据源为空
-
-**解决**: 检查配置并减少样本数
-```bash
-python -m tools prompt_generator --num_samples 10
+  # 候选集生成参数
+  temperature: 2.0                   # 温度缩放参数
+  min_probability: 0.01              # 最小概率阈值
+  max_candidates: 100                # 每个场景最大候选数
 ```
 
 ---
 
-## 📚 相关文档
+## 📚 详细文档
 
-- [主项目README](../README.md)
-- [配置文件说明](../configs/default.yaml)
-- [主流程脚本](../scripts/run_full_pipeline.py)
+- **核心方案**: [docs/零样本分类路由+分场景独立小闭合集方案.md](../docs/零样本分类路由+分场景独立小闭合集方案.md)
+- **完整指南**: [docs/Prompt生成指南.md](../docs/Prompt生成指南.md)
+- **配置说明**: [configs/tools.yaml](../configs/tools.yaml)
 
 ---
 
-**版本**: 1.0.0
-**最后更新**: 2026-07-24
+## 💡 推荐用法
+
+### 生产环境
+
+```bash
+# 推荐：先运行候选集封闭，生成场景候选集
+python -m tools candidate_closure
+
+# 然后运行Prompt生成
+python -m tools prompt_generator --strategy dspy_fewshot
+```
+
+### 快速原型
+
+```bash
+# 推荐：使用默认配置
+python -m tools all
+```
+
+---
+
+**快速上手**: `python -m tools candidate_closure`

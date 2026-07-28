@@ -232,6 +232,7 @@ class TeacherModel:
         generate_cot: bool = False,
         primary_answer: Optional[str] = None,
         allowed_answers: Optional[List[str]] = None,
+        candidate_answers: Optional[List[str]] = None,  # 🔧 新增：候选答案集（用于硬标签阶段）
         cache_visual: bool = True,  # 🔧 新增：是否缓存视觉特征
         use_cached_visual: bool = False,  # 🔧 新增：是否使用缓存的视觉特征
         image_id: Optional[str] = None  # 🔧 新增：图像ID（用于缓存）
@@ -246,6 +247,7 @@ class TeacherModel:
             generate_cot: Whether to generate Chain-of-Thought reasoning
             primary_answer: Reference answer from hard_label (for CoT prompt)
             allowed_answers: List of allowed answers from soft_label (for CoT prompt)
+            candidate_answers: List of candidate answers from VQA vocabulary (for hard_label prompt)
             cache_visual: Whether to cache visual features (default: True)
             use_cached_visual: Whether to use cached visual features (default: False)
             image_id: Image ID for caching (auto-extracted from path if not provided)
@@ -255,10 +257,12 @@ class TeacherModel:
         """
         # Construct prompt
         if generate_cot:
+            # CoT阶段：使用allowed_answers（从软标签分布中提取）
             system_prompt, user_prompt = self._construct_cot_prompt(question, task="vqa", primary_answer=primary_answer, allowed_answers=allowed_answers)
         else:
+            # 硬标签阶段：使用candidate_answers（从VQA词表得到）
             system_prompt = None
-            user_prompt = self._construct_prompt(question, task="vqa")
+            user_prompt = self._construct_prompt(question, task="vqa", candidate_answers=candidate_answers)
 
         # Transformers 推理
         return self._inference_vqa_transformers(
@@ -296,13 +300,20 @@ class TeacherModel:
 
         return result
 
-    def _construct_prompt(self, question: str, task: str) -> str:
+    def _construct_prompt(self, question: str, task: str, candidate_answers: Optional[List[str]] = None) -> str:
         """
         Construct task-specific prompt from configuration file.
+
+        🔧 改进：支持候选答案集（candidate_answers），用于硬标签生成阶段
+
+        概念区分：
+        - candidate_answers: 从VQA词表/训练集得到的预定义答案集，用于引导模型
+        - allowed_answers: 从软标签分布中提取的可能答案，用于CoT生成阶段
 
         Args:
             question: Question for VQA (empty for other tasks)
             task: Task type (vqa/captioning/detection/keypoints)
+            candidate_answers: List of candidate answers from VQA vocabulary (optional)
 
         Returns:
             Formatted prompt string
@@ -319,11 +330,16 @@ class TeacherModel:
 
         # 支持变量插值 - 使用replace代替format避免大括号冲突
         try:
-            if '{question}' in prompt_template:
-                prompt = prompt_template.replace('{question}', question)
+            prompt = prompt_template
+            if '{question}' in prompt:
+                prompt = prompt.replace('{question}', question)
                 self.logger.debug(f"Formatted prompt with question: {question}")
-            else:
-                prompt = prompt_template
+
+            # 🔧 新增：支持候选答案集（candidate_answers）
+            if '{candidate_answers}' in prompt and candidate_answers:
+                candidate_answers_str = ', '.join(candidate_answers[:20])  # 只显示前20个，避免prompt过长
+                prompt = prompt.replace('{candidate_answers}', candidate_answers_str)
+                self.logger.debug(f"Formatted prompt with candidate_answers: {len(candidate_answers)} candidates")
         except Exception as e:
             self.logger.warning(f"Prompt template error: {e}")
             prompt = prompt_template

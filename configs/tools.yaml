@@ -52,26 +52,89 @@ prompt_generation:
     min_confidence: 0.7            # 最低置信度阈值
 
 # ============================================================
-# 候选集封闭配置
+# 候选集封闭配置（千问开源流水线三阶段）
 # ============================================================
 candidate_closure:
   # 数据源配置
   source_dir: "data/coco/annotations"
 
-  # 生成策略
-  strategy: "frequency_based"        # frequency_based | semantic_clustering
+  # 🔧 阶段1：全局候选池配置
+  # 是否使用千问大教师模型零样本扩充答案（顶层）
+  use_teacher_model: true             # true: 启用教师模型扩充（关键增强步骤）
+  teacher_model: "models/Qwen2.5-VL-32B-Instruct-AWQ"  # 千问教师模型路径
+  max_expand_samples: 1000             # 教师模型扩充样本数
 
-  # 过滤参数
-  min_frequency: 5                   # 最低频率阈值
-  max_candidates: 100                # 最大候选数
+  # 🔧 教师模型Prompt配置（答案扩充 - 严格约束版）
+  # ⚠️ 重要规则：大模型扩充仅针对标准物体名词
+  # color/location/number/yesno 四类分支使用固定词库，禁止扩充
+  teacher_prompt:
+    template: |
+      你是视觉问答物体名词扩充工具，仅对【可数/不可数实物名词】生成精准合规同义变体；输入为动词、分词、形容词、专有地名/人名时，仅输出原词，不生成任何额外变体。严格执行所有强制约束，禁止任何违规输出。
+
+      【允许生成内容，仅以下三类，严格限定范围】
+      1. 精准完全同义名词：仅输入实物名词的标准英文别名、英美拼写变体；禁止拆分专有复合词、禁止输出物品所属上层大类名词、禁止拆分词根单独输出。
+      2. 规范名词单复数变形：仅通用可数实物名词生成原生合法复数；专有地名、人名、品牌、复合专有名词、动词、形容词无合理复数时，绝不编造复数形式；包含英语不规则复数。
+      3. 数字文本与阿拉伯数字互换（仅输入为数字英文单词时才生成）
+
+      【强制禁止生成内容，出现即违规】
+      1. 动词、动词分词、动名词、形容词、副词等非名词词汇一律禁止输出（tapped/tapping/tap为动词相关，不可生成）。
+      2. 带修饰词复合短语、多词描述词组、超过2个单词的内容全部禁止。
+      3. 方位词、否定词汇一律禁止输出。
+      4. 禁止重复输出任意词汇，列表内所有元素唯一不重复。
+      5. 禁止拆分专有复合词输出单个词根（woodgate不可单独输出wood、gate）。
+      6. 禁止输出物品所属上层大类名词（donut不可生成pastry，car不可生成transport）。
+      7. 禁止编造无官方拼写、无实际语义的单词变形、无意义复数。
+      8. 禁止输出多余标点符号、空格、换行、序号、解释文字。
+
+      【输出硬性格式铁则，必须严格遵守】
+      1. 仅输出纯英文逗号分隔的词汇列表，无任何额外字符、多余逗号、首尾逗号。
+      2. 全程禁止换行、注释、推理、示例复述、思考文字。
+      3. 列表内每一项单词数量≤2。
+      4. 列表第一个元素固定为原始输入单词，全部词汇唯一无重复；若输入为动词/形容词/专有名称，仅输出原词，无其他变体。
+
+      标准示例参考，严格对齐输出风格：
+      输入：dog
+      输出：dog, dogs, puppy, puppies, canine, hound
+      输入：car
+      输出：car, cars, automobile, automobiles, vehicle, auto
+
+      待处理基准名词：{answer}
+  # 🔧 教师模型生成参数
+  generation_params:
+    max_new_tokens: 50                  # 最大生成长度（简短答案）
+    do_sample: false                     # 贪婪解码（确定性输出，推荐）
+    # 以下参数仅在 do_sample=true 时有效，已注释
+    # temperature: 0.0                  # 温度参数（采样模式）
+    # top_p: 1.0                        # nucleus sampling（采样模式）
+    # top_k: 0                          # top-k sampling（采样模式）
+
+  # 全局池清洗过滤参数
+  min_frequency: 2                     # 最低频次阈值（<2的极长尾答案存入备用池）
+  max_words: 8                         # 最大单词数（剔除超过8个单词的长句）
+
+  # 🔧 阶段2：场景映射配置
+  # 使用COCO原生12大supercategory作为场景划分标准
+  # person, vehicle, outdoor, animal, accessory,
+  # sports, kitchen, food, furniture, electronic,
+  # appliance, indoor
+
+  # 🔧 阶段3：分场景过滤配置
+  # 三层递进过滤规则
+  use_semantic_filter: true           # 是否使用Caption语义相似度软过滤
+  scene_min_frequency: 3               # 场景内最低频次阈值
+  scene_max_candidates: 1000           # 单场景最大候选数
+
+  # 🔧 分布计算参数（软标签生成时使用）
+  temperature: 2.0                     # 温度缩放参数
+  min_probability: 0.01                # 最小概率阈值
 
   # 输出配置
-  output_file: "outputs/candidate_sets/closure_data.json"
+  output_file: "data/scene_candidates.json"
 
   # 验证参数
   validation:
-    check_coverage: true             # 是否检查覆盖率
-    min_coverage: 0.95               # 最低覆盖率阈值
+    check_coverage: true                # 是否检查覆盖率
+    min_coverage: 0.95                  # 最低覆盖率阈值
 
 # ============================================================
 # Prompt优化配置（预留）
