@@ -51,7 +51,41 @@ blacklists: {
   "symbol_only": ["**", "*t", "*s", "*m", ">t", ">s", "``", "''", "@#", "$%", "^^", "***", "---", "___", "...", "!!!", "##", "==", "++", "--", "~@", "``"],
   "short_fragments": ["a", "i", "u", "e", "tw", "ur", "re", "al", "le", "er", "en", "ne", "an", "ar", "te", "ti", "it", "on", "wo", "ul", "us", "at", "of", "be", "ha", "wa", "wh", "ye", "aqu", "gre", "yel", "blu", "blk", "whi", "ora", "pur", "pin", "bro", "gra", "sil", "gol", "emer", "ten", "squ", "vol", "soc", "rac", "tai", "con", "dir", "sup", "pol", "dis", "tra", "sig", "clo", "ctl", "ref", "tab", "pip", "bad", "tal", "man", "pla", "han", "bal", "foo", "bas", "ski", "swi", "gym", "ath", "run", "wal", "sit", "sta", "lyi", "jun", "gen", "unc", "ind", "unk", "cal", "sed", "ob", "na", "uns", "und", "ex", "var", "unn", "pro", "wea", "hea", "dep", "ove", "wei", "nut", "bmi", "die", "lif", "sty", "hap", "sad", "ang", "joy", "fea", "sur", "dis", "app", "sat", "con", "uns"],
   "noise_words": ["the", "a", "an", "this", "that", "these", "those", "in", "on", "at", "to", "for", "of", "with", "by", "from", "up", "down", "over", "under", "it", "they", "he", "she", "we", "you", "i", "me", "him", "her", "and", "or", "but", "so", "because", "if", "when", "where", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would", "can", "could", "should", "may", "might", "must", "not", "very", "too", "also", "just", "only", "even", "there", "here", "what", "how", "why", "which", "who", "whose", "answer", "question", "image", "photo", "picture", "maybe", "none", "bool", "boolean", "true", "false"],
-  "multilingual_noise": ["zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun", "zehn", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez", "une", "deux", "trois", "quatre", "cinq", "sept", "huit", "neuf", "dix", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove", "dieci", "grün", "blau", "rot", "gelb", "lila", "rosa", "braun", "schwarz", "weiß", "grau", "vert", "bleu", "rouge", "jaune", "violet", "rose", "marron", "noir", "blanc", "gris", "verde", "azul", "rojo", "amarillo", "violeta", "negro", "blanco", "rosso", "giallo", "viola", "nero", "bianco"]
+  "multilingual_noise": ["zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun", "zehn", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez", "une", "deux", "trois", "quatre", "cinq", "sept", "huit", "neuf", "dix", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove", "dieci", "grün", "blau", "rot", "gelb", "lila", "rosa", "braun", "schwarz", "weiß", "grau", "vert", "bleu", "rouge", "jaune", "violet", "rose", "marron", "noir", "blanc", "gris", "verde", "azul", "rojo", "amarillo", "violeta", "negro", "blanco", "rosso", "giallo", "viola", "nero", "bianco"],
+  # 🔧 新增：冗余背景词汇（Qwen-VL官方方案）
+  # CoT中可能出现的无关背景描述，需要裁剪以提升数据质量
+  "redundant_background": [
+    # 场景描述冗余词
+    "meeting room", "conference room", "office room", "living room", "bedroom",
+    "bathroom", "kitchen", "dining room", "hotel room", "classroom",
+    # 自然场景冗余词
+    "ocean water", "sea water", "river water", "lake water", "beach sand",
+    "mountain range", "forest area", "grass field", "sky background",
+    # 建筑结构冗余词
+    "building structure", "wall surface", "floor surface", "ceiling area",
+    "window frame", "door frame", "roof top",
+    # 背景物体冗余词
+    "background object", "distant object", "surrounding area",
+    "overall scene", "general view", "panoramic view",
+    # 过度描述词
+    "completely visible", "fully visible", "entirely visible",
+    "partially visible", "somewhat visible", "barely visible",
+    "clearly visible", "obviously visible",
+    # 无关时间描述
+    "daytime", "nighttime", "morning", "afternoon", "evening",
+    # 无关天气描述
+    "sunny day", "cloudy day", "rainy day", "sunny weather",
+    # 无关光源描述
+    "artificial light", "natural light", "bright light", "dim light"
+  ],
+  # 🔧 新增：禁止推测词汇（用于后处理匹配）
+  "speculative_words": [
+    "appear", "seem", "seems", "appeared", "seemed",
+    "probably", "likely", "possibly", "perhaps", "maybe",
+    "suggest", "suggests", "suggested", "suggesting",
+    "might", "could be", "may be", "would be",
+    "unclear", "uncertain", "ambiguous"
+  ]
 }
 
 # 问题类型关键词
@@ -74,4 +108,13 @@ filtering: {
 # 将 animal/animals, dog/dogs 等视为同一候选
 stemming: {
   "enabled": true  # 启用词干归一化
+}
+
+# 🔧 新增：CoT Token长度过滤配置（Qwen-VL官方方案）
+# 使用token计数而非字符长度
+cot_length_filter: {
+  "enabled": true,
+  "observation_min_tokens": 15,  # Observation token数 < 15 标记低质
+  "cot_max_tokens": 350,          # CoT总token数 > 350 丢弃
+  "use_token_count": true         # 使用token计数（而非字符）
 }

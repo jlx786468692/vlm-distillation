@@ -6,10 +6,14 @@ Wraps Qwen2.5-VL teacher model for multi-task distillation.
 Supports AWQ quantized models via autoawq.
 """
 
-# 🔧 关键：在导入 transformers 之前设置离线模式
+# 🔧 关键：在导入 transformers 之前设置离线模式和禁用 Intel 优化
 import os
 import sys
 from pathlib import Path
+
+# ✅ 禁用 Intel 优化（如果不需要 Intel GPU）
+os.environ['DISABLE_IPEX'] = '1'
+os.environ['INTEL_IGCL'] = '0'
 
 # 检查是否有本地模型配置
 _config_path = Path(__file__).parent.parent.parent / 'configs' / 'default.yaml'
@@ -235,7 +239,9 @@ class TeacherModel:
         candidate_answers: Optional[List[str]] = None,  # 🔧 新增：候选答案集（用于硬标签阶段）
         cache_visual: bool = True,  # 🔧 新增：是否缓存视觉特征
         use_cached_visual: bool = False,  # 🔧 新增：是否使用缓存的视觉特征
-        image_id: Optional[str] = None  # 🔧 新增：图像ID（用于缓存）
+        image_id: Optional[str] = None,  # 🔧 新增：图像ID（用于缓存）
+        custom_prompt: Optional[str] = None,  # 🔧 新增：自定义 prompt（用于开放推理）
+        is_open_question: bool = False  # 🔧 新增：是否为开放问题（返回完整答案）
     ) -> Dict[str, Any]:
         """
         Perform VQA inference.
@@ -251,12 +257,18 @@ class TeacherModel:
             cache_visual: Whether to cache visual features (default: True)
             use_cached_visual: Whether to use cached visual features (default: False)
             image_id: Image ID for caching (auto-extracted from path if not provided)
+            custom_prompt: Custom prompt for open inference (optional)
+            is_open_question: Whether this is an open question (return full answer instead of first word)
 
         Returns:
             Dictionary with answer, confidence, and optionally logits/cot
         """
         # Construct prompt
-        if generate_cot:
+        if custom_prompt:
+            # 🔧 新增：使用自定义 prompt（开放推理）
+            system_prompt = None
+            user_prompt = custom_prompt.format(question=question) if '{question}' in custom_prompt else custom_prompt
+        elif generate_cot:
             # CoT阶段：使用allowed_answers（从软标签分布中提取）
             system_prompt, user_prompt = self._construct_cot_prompt(question, task="vqa", primary_answer=primary_answer, allowed_answers=allowed_answers)
         else:
@@ -270,7 +282,8 @@ class TeacherModel:
             return_logits, generate_cot,
             cache_visual=cache_visual,
             use_cached_visual=use_cached_visual,
-            image_id=image_id
+            image_id=image_id,
+            is_open_question=is_open_question  # 🔧 传递开放问题标志
         )
 
     def _inference_vqa_transformers(
@@ -282,7 +295,8 @@ class TeacherModel:
         generate_cot: bool,
         cache_visual: bool = True,  # 🔧 新增参数
         use_cached_visual: bool = False,  # 🔧 新增参数
-        image_id: Optional[str] = None  # 🔧 新增参数
+        image_id: Optional[str] = None,  # 🔧 新增参数
+        is_open_question: bool = False  # 🔧 新增：是否为开放问题
     ) -> Dict[str, Any]:
         """Transformers 后端的 VQA 推理"""
         # Prepare inputs
@@ -296,7 +310,7 @@ class TeacherModel:
         outputs = self._generate(inputs, return_logits=return_logits)
 
         # Process outputs
-        result = self._process_vqa_outputs(outputs, return_logits)
+        result = self._process_vqa_outputs(outputs, return_logits, is_open_question)
 
         return result
 
@@ -388,6 +402,10 @@ class TeacherModel:
             if '{allowed_answers}' in user_prompt and allowed_answers:
                 answers_str = ', '.join(allowed_answers[:10])
                 user_prompt = user_prompt.replace('{allowed_answers}', answers_str)
+            # 🔧 新增：替换 {answer_distribution} 占位符（防止 prompt 不完整）
+            if '{answer_distribution}' in user_prompt:
+                # 如果没有分布信息，使用默认提示
+                user_prompt = user_prompt.replace('{answer_distribution}', 'See primary answer probability')
             self.logger.debug(f"Formatted user prompt for task '{task}'")
         except Exception as e:
             self.logger.warning(f"CoT user prompt error: {e}")
@@ -654,7 +672,8 @@ class TeacherModel:
     def _process_vqa_outputs(
         self,
         outputs: Dict[str, Any],
-        return_logits: bool
+        return_logits: bool,
+        is_open_question: bool = False  # 🔧 新增：是否为开放问题
     ) -> Dict[str, Any]:
         """
         Process VQA generation outputs.
@@ -662,6 +681,7 @@ class TeacherModel:
         Args:
             outputs: Model outputs
             return_logits: Whether logits are included
+            is_open_question: Whether this is an open question (return full answer)
 
         Returns:
             Processed VQA result
@@ -669,7 +689,7 @@ class TeacherModel:
         # transformers 输出格式
         generated_ids = outputs.sequences
         generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-        answer = self._extract_answer(generated_text)
+        answer = self._extract_answer(generated_text, is_open_question)
 
         # 🔧 计算置信度
         confidence = 0.8  # 默认值
@@ -714,22 +734,21 @@ class TeacherModel:
 
         return result
 
-    def _extract_answer(self, text: str) -> str:
+    def _extract_answer(self, text: str, is_open_question: bool = False) -> str:
         """
-        从VQA响应中提取简短答案（改进版）
+        从VQA响应中提取答案（改进版）
 
         改进：
-        1. 去掉 assistant\n 前缀
-        2. 去掉 Answer: 等提示词
-        3. 提取第一个词作为简短答案
-        4. 清理标点和格式
-        5. 转小写
+        1. 区分开放/闭合问题
+        2. 闭合问题：提取第一个词作为简短答案
+        3. 开放问题：返回完整的自然语言答案
 
         Args:
             text: 生成的文本
+            is_open_question: 是否为开放问题（返回完整答案）
 
         Returns:
-            清理后的简短答案
+            清理后的答案（开放：完整文本，闭合：第一个单词）
         """
         import re
 
@@ -756,7 +775,12 @@ class TeacherModel:
                 if len(parts) > 1:
                     cleaned_text = parts[-1].strip()
 
-        # 提取第一个词（最可能的简短答案）
+        # 🔧 关键：区分开放/闭合问题
+        if is_open_question:
+            # 开放问题：返回完整文本，不做截断
+            return cleaned_text
+
+        # 闭合问题：提取第一个词（最可能的简短答案）
         words = cleaned_text.split()
 
         if words:
@@ -1542,51 +1566,40 @@ class TeacherModel:
         """
         Process generation scores into probability distribution.
 
-        改进：
-        1. 应用温度缩放
-        2. 计算softmax得到概率分布
-        3. 提取top-k概率（学生训练直接使用）
+        ✅ 官方标准：返回原始logits，不应用温度缩放
+        温度缩放应该在软标签生成器中手动应用（T=3.0）
 
         Args:
             scores: Tuple of score tensors from generation
 
         Returns:
-            Dictionary with probability distribution (NOT logits)
+            Dictionary with raw logits (NOT probabilities)
         """
         # Stack scores - 这是原始logits
         logits_stack = torch.stack(scores)
 
-        # 🔧 保存原始logits（用于硬标签置信度计算）
-        raw_logits_stack = logits_stack.clone()
+        # ───────────────────────────────────────────────────────
+        # ✅ 官方标准：返回原始logits，不应用温度缩放
+        # 温度缩放在软标签生成器中手动应用（T=3.0）
+        # ───────────────────────────────────────────────────────
 
-        # 🔧 应用温度缩放（用于软标签）
-        temperature = self.config.get("distillation.soft_labels.temperature", 4.0)
-        scaled_logits = logits_stack / temperature
+        # 提取top-k logits（原始logits，未缩放）
+        top_k = self.config.get('distillation.soft_labels.top_k_logits', 50)
+        top_k = min(top_k, logits_stack.size(-1))
 
-        # 🔧 计算softmax得到概率分布（用于软标签）
-        probs_stack = torch.softmax(scaled_logits, dim=-1)
-
-        # 🔧 计算原始概率（temperature=1.0，用于硬标签置信度）
-        raw_probs_stack = torch.softmax(raw_logits_stack, dim=-1)
-
-        # 🔧 提取top-k概率（学生训练直接使用）
-        top_k = self.config.get('distillation.soft_labels.top_k_logits', 50)  # 🔧 修复：使用配置值50，而不是500
-        top_k = min(top_k, probs_stack.size(-1))
-
-        # 提取软标签的top-k（温度缩放后）
-        if probs_stack.dim() == 3:
-            top_probs, top_indices = torch.topk(probs_stack, top_k, dim=-1)
-            # 提取硬标签置信度的top-k（原始，temperature=1.0）
-            raw_top_probs, _ = torch.topk(raw_probs_stack, top_k, dim=-1)
+        # 提取top-k原始logits
+        if logits_stack.dim() == 3:
+            # [batch, num_tokens, vocab_size]
+            top_logits, top_indices = torch.topk(logits_stack, top_k, dim=-1)
         else:
-            top_probs, top_indices = torch.topk(probs_stack, top_k, dim=-1)
-            raw_top_probs, _ = torch.topk(raw_probs_stack, top_k, dim=-1)
+            # [num_tokens, vocab_size]
+            top_logits, top_indices = torch.topk(logits_stack, top_k, dim=-1)
 
         return {
-            'top_k_indices': top_indices,       # token IDs
-            'top_k_values': top_probs,          # ✅ 概率值（温度缩放后，用于软标签）
-            'raw_top_k_values': raw_top_probs,  # ✅ 原始概率值（temperature=1.0，用于硬标签置信度）
-            'temperature': temperature,         # 记录使用的温度
+            'raw_logits': logits_stack,        # ✅ 原始logits（完整vocab_size维度）
+            'top_k_indices': top_indices,      # token IDs
+            'top_k_values': top_logits,        # ✅ 原始logits（top-k）
+            'temperature': 1.0,                # ✅ 标记为原始logits（未缩放）
             'top_k': top_k,
         }
 

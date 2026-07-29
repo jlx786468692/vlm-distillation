@@ -3,6 +3,10 @@ Main Distiller
 ==============
 
 Orchestrates the complete distillation pipeline.
+
+集成问题分类器（官方标准）：
+- 闭合问题（count/color/binary/location）：两阶段约束推理 + 候选集封闭
+- 开放问题（open_descriptive）：单阶段无约束推理
 """
 
 import json
@@ -18,6 +22,22 @@ from ..models.teacher_model import TeacherModel
 from ..data.data_manager import DataManager
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger, DistillationLogger
+
+# 🔧 新增：导入问题分类器和开放推理器
+try:
+    from ..classification.question_classifier import QuestionClassifier, QuestionType
+    QUESTION_CLASSIFIER_AVAILABLE = True
+except ImportError:
+    QUESTION_CLASSIFIER_AVAILABLE = False
+    QuestionClassifier = None
+    QuestionType = None
+
+try:
+    from .open_inference import OpenSampleInferencer
+    OPEN_INFERENCE_AVAILABLE = True
+except ImportError:
+    OPEN_INFERENCE_AVAILABLE = False
+    OpenSampleInferencer = None
 from ..export.json_exporter import JSONExporter
 
 from .hard_label_gen import HardLabelGenerator
@@ -66,6 +86,46 @@ class Distiller:
         self.vqa_soft_label_gen = VQASoftLabelGenerator(self.teacher, self.config)
 
         self.cot_gen = CoTGenerator(self.teacher, self.config)
+
+        # 🔧 新增：初始化问题分类器（官方标准）
+        self.question_classifier = None
+        self.enable_question_classifier = self.config.get("question_classifier.enabled", True)
+
+        if self.enable_question_classifier and QUESTION_CLASSIFIER_AVAILABLE:
+            try:
+                classifier_config = {
+                    'model_path': self.config.get("question_classifier.model_path", "models/bart-large-mnli"),
+                    'confidence_threshold': self.config.get("question_classifier.confidence_threshold", 0.7),
+                    'enable_model': self.config.get("question_classifier.enable_model", True),
+                    'device': self.config.get("question_classifier.device", "cuda")
+                }
+                self.question_classifier = QuestionClassifier(**classifier_config)
+                self.logger.info("✓ 问题分类器初始化成功")
+                self.logger.info(f"  - 模型路径: {classifier_config['model_path']}")
+                self.logger.info(f"  - 模型兜底: {'已启用' if classifier_config['enable_model'] else '已禁用'}")
+            except Exception as e:
+                self.logger.warning(f"问题分类器初始化失败: {e}，将统一使用闭合推理模式")
+                self.question_classifier = None
+        elif not QUESTION_CLASSIFIER_AVAILABLE:
+            self.logger.warning("问题分类器模块未找到，将统一使用闭合推理模式")
+
+        # 🔧 新增：初始化开放推理器
+        self.open_inference_gen = None
+        if OPEN_INFERENCE_AVAILABLE:
+            try:
+                self.open_inference_gen = OpenSampleInferencer(self.teacher, self.config)
+                self.logger.info("✓ 开放推理器初始化成功")
+            except Exception as e:
+                self.logger.warning(f"开放推理器初始化失败: {e}")
+
+        # 🔧 新增：初始化闭合问题标签生成器（官方标准）
+        try:
+            from .vqa_closed_label_generator import VQAClosedLabelGenerator
+            self.closed_label_gen = VQAClosedLabelGenerator(self.teacher, self.config)
+            self.logger.info("✓ 闭合问题标签生成器初始化成功（官方标准）")
+        except Exception as e:
+            self.logger.warning(f"闭合问题标签生成器初始化失败: {e}")
+            self.closed_label_gen = None
 
         # Initialize exporter
         self.exporter = JSONExporter(self.config)
@@ -291,66 +351,139 @@ class Distiller:
                 if task == 'vqa':
                     questions = batch_data['annotations']['vqa'].get(image_id, [])
                     if questions:
-                        task_result['question'] = questions[0].get('question', '')
+                        question = questions[0].get('question', '')
+                        task_result['question'] = question
 
-                # 添加时间戳
-                task_result['timestamp'] = datetime.now().isoformat()
+                        # 🔧 新增：问题分类（官方标准分流逻辑）
+                        question_type = None
+                        if self.question_classifier:
+                            try:
+                                classification = self.question_classifier.classify(question)
+                                question_type = classification.question_type.value
+                                task_result['question_type'] = question_type
+                                self.logger.info(
+                                    f"[Question Classifier] Image {image_id}: "
+                                    f"type={question_type}, "
+                                    f"confidence={classification.confidence:.3f}, "
+                                    f"method={classification.method}"
+                                )
+                            except Exception as e:
+                                self.logger.warning(f"问题分类失败: {e}，使用默认闭合推理")
+                                question_type = None
 
-                # Step 1: 生成 Hard Label（获取 logits 供 Soft Label 使用）
-                if self.enable_hard_labels:
-                    hard_labels = self._generate_task_hard_labels(
-                        task, batch_data, image_id, image_path,
-                        cot_result=None  # 不从 CoT 提取，单独推理
-                    )
-                    task_result['hard_label'] = hard_labels
+                        # 🔧 新增：根据问题类型选择推理路径
+                        # 开放问题：单阶段无约束推理
+                        # 闭合问题：两阶段约束推理（当前流程）
+                        if question_type == 'open_descriptive' and self.open_inference_gen:
+                            self.logger.info(f"[Routing] Image {image_id}: 使用开放推理路径")
 
-                    # 🔧 新增：置信度拦截（在数据入口处过滤低质量样本）
-                    # 如果硬标签置信度低于阈值，跳过后续标签生成
-                    confidence = hard_labels.get('confidence', 0.0)
-                    if confidence < self.hard_label_gen.confidence_threshold:
-                        self.logger.warning(
-                            f"[Low Confidence Filter] Image {image_id}, task {task}: "
-                            f"confidence {confidence:.4f} < {self.hard_label_gen.confidence_threshold}, "
-                            f"skipping soft_label and CoT generation"
-                        )
-                        # 标记为已过滤
-                        task_result['hard_label']['filtered'] = True
-                        # 跳过后续标签生成，直接进入下一个task
-                        # 注意：仍然保存hard_label，但soft_label和CoT不生成
-                        image_result['tasks'][task] = task_result
-                        continue
+                            # ───────────────────────────────────────────────────────
+                            # 开放问答处理（官方标准）
+                            # ───────────────────────────────────────────────────────
+                            # 核心原则：
+                            # 1. 无候选集 → 不生成 soft/hard 标签
+                            # 2. 自由长文本回答无需强制结构化推理 → 不生成 CoT
+                            # 3. 仅输出完整自然语言 answer（唯一监督文本）
+                            # ───────────────────────────────────────────────────────
 
-                # Step 2: 生成 Soft Label（使用 hard_label 的 logits）
-                if self.enable_soft_labels:
-                    hard_label_for_soft = task_result.get('hard_label') if self.enable_hard_labels else None
-                    soft_labels = self._generate_task_soft_labels(
-                        task, batch_data, image_id, image_path,
-                        hard_label_result=hard_label_for_soft
-                    )
-                    task_result['soft_label'] = soft_labels
+                            # 开放推理：仅生成完整答案文本
+                            open_result = self.open_inference_gen.generate_vqa_open(
+                                image_path=image_path,
+                                question=question,
+                                image_id=str(image_id)
+                            )
 
-                # Step 3: 生成 CoT（单独推理）
-                if self.enable_cot:
-                    # 🔧 第一层重构：从 soft_label 获取 primary_answer 和合法答案列表
-                    primary_answer = None
-                    allowed_answers = None
-                    if task == 'vqa':
-                        # 优先使用 soft_label 的数据（包含合法答案列表）
-                        if self.enable_soft_labels and task_result.get('soft_label'):
-                            soft_label_data = task_result['soft_label']
-                            primary_answer = soft_label_data.get('primary_answer', '')
-                            allowed_answers = soft_label_data.get('allowed_answers', [])
-                        # 备选：使用 hard_label 的 answer
-                        elif self.enable_hard_labels and 'answer' in task_result.get('hard_label', {}):
-                            primary_answer = task_result['hard_label']['answer']
-                            allowed_answers = [primary_answer]  # 单一答案
+                            # ✅ 仅存储 answer 字段（符合官方标准）
+                            task_result['answer'] = open_result.get('answer', '')
 
-                    cot = self._generate_task_cot(
-                        task, batch_data, image_id, image_path,
-                        primary_answer=primary_answer,
-                        allowed_answers=allowed_answers
-                    )
-                    task_result['cot_reasoning'] = cot
+                            # 保留其他元数据字段（用于追踪和调试）
+                            task_result['question_type'] = 'open_descriptive'
+                            task_result['inference_mode'] = 'open'
+
+                            # ❌ 开放问题不生成以下字段：
+                            # - hard_label（无候选集）
+                            # - soft_label（无概率分布）
+                            # - cot_reasoning（无强制结构化推理）
+                            # - allowed_answers（无候选集）
+
+                            # 直接跳到下一个 task
+                            image_result['tasks'][task] = task_result
+                            continue
+                        else:
+                            # ───────────────────────────────────────────────────────
+                            # 闭合问答处理（官方标准流水线）
+                            # ───────────────────────────────────────────────────────
+                            # 官方流程：
+                            # 步骤1：前置分流 + 加载候选词列表
+                            # 步骤2：阶段1推理 - 提取候选词原始logits（关键裁剪）
+                            # 步骤3：温度缩放 + softmax归一化
+                            # 步骤4：由软标签推导硬标签
+                            # 步骤5：阶段2推理 - 生成CoT
+                            # ───────────────────────────────────────────────────────
+                            self.logger.info(f"[Routing] Image {image_id}: 使用闭合推理路径（官方标准）")
+
+                            # 🔧 关键修复：使用官方标准标签生成器
+                            if self.closed_label_gen:
+                                # 官方标准流程：一次性生成软硬标签
+                                labels_result = self.closed_label_gen.generate_labels(
+                                    image_path=image_path,
+                                    question=question,
+                                    question_type=question_type,
+                                    image_id=str(image_id)
+                                )
+
+                                if labels_result:
+                                    # ✅ 软硬标签一致（从同一分布推导）
+                                    task_result['hard_label'] = labels_result['hard_label']
+                                    task_result['soft_label'] = labels_result['soft_label']
+
+                                    self.logger.info(
+                                        f"[Label Gen] ✓ 软硬标签生成完成: "
+                                        f"answer={labels_result['hard_label']['answer']}, "
+                                        f"confidence={labels_result['hard_label']['confidence']:.4f}"
+                                    )
+                                else:
+                                    self.logger.warning(f"[Label Gen] 标签生成失败")
+                            else:
+                                # 回退：使用旧逻辑（不推荐）
+                                self.logger.warning("[Label Gen] 闭合问题标签生成器未初始化，使用旧逻辑")
+
+                                # Step 1: 生成 Hard Label
+                                if self.enable_hard_labels:
+                                    hard_labels = self._generate_task_hard_labels(
+                                        task, batch_data, image_id, image_path,
+                                        cot_result=None
+                                    )
+                                    task_result['hard_label'] = hard_labels
+
+                                # Step 2: 生成 Soft Label
+                                if self.enable_soft_labels:
+                                    hard_label_for_soft = task_result.get('hard_label') if self.enable_hard_labels else None
+                                    soft_labels = self._generate_task_soft_labels(
+                                        task, batch_data, image_id, image_path,
+                                        hard_label_result=hard_label_for_soft
+                                    )
+                                    task_result['soft_label'] = soft_labels
+
+                            # Step 3: 生成 CoT（单独推理）
+                            if self.enable_cot:
+                                primary_answer = None
+                                allowed_answers = None
+
+                                if task == 'vqa' and task_result.get('soft_label'):
+                                    soft_label_data = task_result['soft_label']
+                                    primary_answer = soft_label_data.get('primary_answer', '')
+                                    allowed_answers = soft_label_data.get('allowed_answers', [])
+                                elif task == 'vqa' and task_result.get('hard_label'):
+                                    primary_answer = task_result['hard_label']['answer']
+                                    allowed_answers = [primary_answer]
+
+                                cot = self._generate_task_cot(
+                                    task, batch_data, image_id, image_path,
+                                    primary_answer=primary_answer,
+                                    allowed_answers=allowed_answers
+                                )
+                                task_result['cot_reasoning'] = cot
 
                 # 将task结果添加到tasks对象中
                 image_result['tasks'][task] = task_result

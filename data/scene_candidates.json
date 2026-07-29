@@ -1,0 +1,407 @@
+{
+  "metadata": {
+    "source": "Qwen Official Pipeline Stage 3",
+    "global_pool_file": "data/global_candidate_pool.json",
+    "scene_mapping_file": "data/imgid2scene.json",
+    "total_scenes": 16,
+    "config": {
+      "min_freq": 2,
+      "max_candidates": 1600,
+      "use_semantic_filter": true
+    }
+  },
+  "scenes": {
+    "color": {
+      "candidates": [
+        "grey",
+        "gold",
+        "magenta",
+        "cyan",
+        "tan",
+        "pink",
+        "yellow",
+        "beige",
+        "turquoise",
+        "brown",
+        "purple",
+        "silver",
+        "cream",
+        "orange",
+        "gray"
+      ],
+      "count": 15,
+      "source": "stage1_categorized"
+    },
+    "location": {
+      "candidates": [
+        "outside",
+        "bottom",
+        "corner",
+        "foreground",
+        "right",
+        "background",
+        "inside",
+        "top",
+        "middle",
+        "left",
+        "center",
+        "back",
+        "side"
+      ],
+      "count": 13,
+      "source": "stage1_categorized"
+    },
+    "count": {
+      "candidates": [
+        "thirteen",
+        "fourteen",
+        "six",
+        "fifteen",
+        "eighteen",
+        "nineteen",
+        "twelve",
+        "eight",
+        "sixteen",
+        "twenty",
+        "seven",
+        "seventeen",
+        "one",
+        "ten",
+        "nine",
+        "eleven"
+      ],
+      "count": 33,
+      "source": "stage1_categorized"
+    },
+    "binary": {
+      "candidates": [
+        "yes",
+        "no"
+      ],
+      "count": 2,
+      "source": "stage1_categorized"
+    },
+    "person": {
+      "candidates": [
+        "adult",
+        "man",
+        "adults",
+        "kid",
+        "child",
+        "male",
+        "girl",
+        "humans",
+        "baby",
+        "person",
+        "kids",
+        "boy",
+        "woman",
+        "female",
+        "human"
+      ],
+      "count": 15,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 16605,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    },
+    "vehicle": {
+      "candidates": [
+        "train",
+        "truck",
+        "plane",
+        "motorcycle",
+        "bus",
+        "boat",
+        "airplane",
+        "car",
+        "planes",
+        "bicycle"
+      ],
+      "count": 10,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 8626,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    },
+    "animal": {
+      "candidates": [
+        "cows",
+        "horses",
+        "dogs",
+        "dog",
+        "bears",
+        "elephant",
+        "elephants",
+        "bear",
+        "cat",
+        "sheep",
+        "bird",
+        "birds",
+        "cow",
+        "horse",
+        "cats"
+      ],
+      "count": 15,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 8890,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    },
+    "food": {
+      "candidates": [
+        "cake",
+        "carrots",
+        "broccoli",
+        "sandwich",
+        "pizza",
+        "apples",
+        "oranges",
+        "sandwiches",
+        "bananas",
+        "banana",
+        "carrot",
+        "cakes",
+        "apple"
+      ],
+      "count": 14,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 4868,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    },
+    "furniture": {
+      "candidates": [
+        "chair",
+        "desk",
+        "chairs",
+        "beds",
+        "cabinets",
+        "couch",
+        "dining table",
+        "desks",
+        "cabinet",
+        "table",
+        "shelves",
+        "tables",
+        "shelf",
+        "sofa"
+      ],
+      "count": 14,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 4593,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    },
+    "electronic": {
+      "candidates": [
+        "keyboard",
+        "mobile phone",
+        "computers",
+        "cellphone",
+        "mobile",
+        "computer",
+        "keyboards",
+        "laptop",
+        "cell phone",
+        "phone",
+        "tv",
+        "laptops",
+        "television",
+        "mouse",
+        "phones"
+      ],
+      "count": 15,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 2094,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    },
+    "appliance": {
+      "candidates": [
+        "ovens",
+        "toaster",
+        "refrigerator",
+        "toasters",
+        "sinks",
+        "fans",
+        "blenders",
+        "refrigerators",
+        "microwave",
+        "oven",
+        "fridge",
+        "fan",
+        "sink",
+        "blender",
+        "microwaves"
+      ],
+      "count": 15,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 1124,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    },
+    "sports": {
+      "candidates": [
+        "frisbee",
+        "skateboard",
+        "kites",
+        "skis",
+        "snowboard",
+        "skateboards",
+        "ski",
+        "kite",
+        "balls",
+        "ball",
+        "snowboards",
+        "frisbees"
+      ],
+      "count": 12,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 2036,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    },
+    "kitchen": {
+      "candidates": [
+        "bowl",
+        "bottles",
+        "bowls",
+        "plates",
+        "cup",
+        "spoons",
+        "wine",
+        "plate",
+        "spoon",
+        "bottle",
+        "fork",
+        "forks",
+        "knives",
+        "cups",
+        "glasses",
+        "knife",
+        "glass"
+      ],
+      "count": 17,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 5453,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    },
+    "accessory": {
+      "candidates": [
+        "purses",
+        "tie",
+        "backpack",
+        "suitcases",
+        "handbags",
+        "umbrellas",
+        "backpacks",
+        "ties",
+        "suitcase",
+        "umbrella",
+        "handbag",
+        "bag",
+        "bags",
+        "purse"
+      ],
+      "count": 14,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 1320,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    },
+    "indoor": {
+      "candidates": [
+        "teddy",
+        "dolls",
+        "bears",
+        "teddy bear",
+        "clock",
+        "bear",
+        "vases",
+        "clocks",
+        "scissors",
+        "vase",
+        "doll",
+        "book",
+        "books"
+      ],
+      "count": 13,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 4176,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    },
+    "outdoor": {
+      "candidates": [
+        "benches",
+        "parking meter",
+        "plant",
+        "plants",
+        "hydrants",
+        "sign",
+        "hydrant",
+        "bench",
+        "signs",
+        "meters",
+        "meter",
+        "fire hydrant",
+        "potted plant"
+      ],
+      "count": 13,
+      "source": "Qwen Pipeline Stage 3",
+      "total_images": 2301,
+      "filters": {
+        "object_filter": true,
+        "frequency_filter": true,
+        "semantic_filter": true,
+        "execution_order": "correct"
+      }
+    }
+  }
+}

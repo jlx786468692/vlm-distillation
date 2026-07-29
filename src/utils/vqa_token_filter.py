@@ -11,7 +11,7 @@ VQA Token 过滤器
 
 import re
 from pathlib import Path
-from typing import Dict, List, Set, Optional, Union
+from typing import Dict, List, Set, Optional, Union, Any
 import yaml
 
 
@@ -181,6 +181,20 @@ class VQATokenFilter:
         if isinstance(multilingual_noise, list):
             self.noise_words.update(multilingual_noise)
 
+        # 🔧 新增：冗余背景词汇（Qwen-VL官方方案）
+        redundant_background = blacklists_config.get('redundant_background', [])
+        if isinstance(redundant_background, list):
+            self.redundant_background_words = set(redundant_background)
+        else:
+            self.redundant_background_words = set()
+
+        # 🔧 新增：禁止推测词汇（用于后处理匹配）
+        speculative_words = blacklists_config.get('speculative_words', [])
+        if isinstance(speculative_words, list):
+            self.speculative_words = set(speculative_words)
+        else:
+            self.speculative_words = set()
+
         # 特殊Unicode字符（保留硬编码，因为难以在YAML中表示）
         self.special_unicode_tokens = {
             '₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉',
@@ -238,6 +252,13 @@ class VQATokenFilter:
             # 常见介词/副词（可能作为答案）
             'left', 'right', 'top', 'down', 'near', 'far',
         }
+
+        # 🔧 新增：加载CoT长度过滤配置
+        cot_length_config = self.config.get('cot_length_filter', {})
+        self.cot_length_filter_enabled = cot_length_config.get('enabled', True)
+        self.observation_min_tokens = cot_length_config.get('observation_min_tokens', 15)
+        self.cot_max_tokens = cot_length_config.get('cot_max_tokens', 350)
+        self.use_token_count = cot_length_config.get('use_token_count', True)
 
     def _init_question_keywords(self):
         """初始化问题类型关键词"""
@@ -668,6 +689,190 @@ class VQATokenFilter:
             VQATokenFilter实例
         """
         return cls(config_path=config_path)
+
+    # ===== 新增：冗余词汇裁剪功能（Qwen-VL官方方案）=====
+
+    def trim_redundant_words(self, text: str) -> str:
+        """
+        裁剪CoT文本中的冗余背景词汇
+
+        Qwen-VL官方方案：减少CoT中的无关背景描述，提升数据质量
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            裁剪后的文本
+        """
+        if not text:
+            return text
+
+        # 转换为小写进行匹配
+        text_lower = text.lower()
+
+        # 检查并移除冗余背景词汇
+        for redundant_phrase in self.redundant_background_words:
+            if redundant_phrase.lower() in text_lower:
+                # 使用正则表达式进行大小写不敏感替换
+                pattern = re.compile(re.escape(redundant_phrase), re.IGNORECASE)
+                text = pattern.sub('', text)
+
+        # 清理多余空格
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        return text
+
+    def check_speculative_words(self, text: str) -> Dict[str, Any]:
+        """
+        检测CoT文本中的禁止推测词汇
+
+        Qwen-VL官方方案：检测并标记包含推测词的样本
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            检测结果字典，包含：
+            - has_speculative: 是否包含推测词
+            - found_words: 找到的推测词列表
+            - count: 推测词数量
+        """
+        if not text:
+            return {'has_speculative': False, 'found_words': [], 'count': 0}
+
+        text_lower = text.lower()
+        found_words = []
+
+        for word in self.speculative_words:
+            if word.lower() in text_lower:
+                found_words.append(word)
+
+        return {
+            'has_speculative': len(found_words) > 0,
+            'found_words': found_words,
+            'count': len(found_words)
+        }
+
+    def count_tokens(self, text: str) -> int:
+        """
+        统计文本的token数量（近似值）
+
+        注意：这里使用简单的空格分词作为近似，
+        真正的token计数需要使用tokenizer
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            token数量（近似值）
+        """
+        if not text:
+            return 0
+
+        # 简单分词（空格+标点）
+        # 注意：这是近似值，真实token计数需要使用tokenizer
+        words = re.findall(r'\b\w+\b', text)
+        return len(words)
+
+    def check_cot_length(
+        self,
+        cot_text: str,
+        observation_text: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        检查CoT文本长度（使用token计数）
+
+        Qwen-VL官方方案：
+        - Observation token数 < 15：标记低质样本
+        - CoT总token > 350：描述冗余，丢弃
+
+        Args:
+            cot_text: CoT完整文本
+            observation_text: Observation段落文本（可选）
+
+        Returns:
+            检查结果字典，包含：
+            - is_valid: 是否有效
+            - observation_too_short: Observation是否过短
+            - cot_too_long: CoT是否过长
+            - token_count: token总数
+            - observation_token_count: Observation token数（如果提供）
+        """
+        if not self.cot_length_filter_enabled:
+            return {
+                'is_valid': True,
+                'observation_too_short': False,
+                'cot_too_long': False,
+                'token_count': 0,
+                'observation_token_count': 0
+            }
+
+        # 统计CoT总token数
+        token_count = self.count_tokens(cot_text) if self.use_token_count else len(cot_text)
+
+        # 统计Observation token数
+        observation_token_count = 0
+        if observation_text:
+            observation_token_count = self.count_tokens(observation_text) if self.use_token_count else len(observation_text)
+
+        # 判断是否有效
+        observation_too_short = observation_token_count < self.observation_min_tokens if observation_text else False
+        cot_too_long = token_count > self.cot_max_tokens
+
+        return {
+            'is_valid': not cot_too_long,
+            'observation_too_short': observation_too_short,
+            'cot_too_long': cot_too_long,
+            'token_count': token_count,
+            'observation_token_count': observation_token_count
+        }
+
+    def clean_cot_text(self, cot_text: str, check_length: bool = True) -> Dict[str, Any]:
+        """
+        清洗CoT文本（综合应用多个过滤规则）
+
+        Args:
+            cot_text: 输入CoT文本
+            check_length: 是否检查长度
+
+        Returns:
+            清洗结果字典，包含：
+            - cleaned_text: 清洗后的文本
+            - speculative_check: 推测词检测结果
+            - length_check: 长度检查结果
+            - is_valid: 是否有效
+        """
+        if not cot_text:
+            return {
+                'cleaned_text': '',
+                'speculative_check': {'has_speculative': False, 'found_words': [], 'count': 0},
+                'length_check': {'is_valid': True},
+                'is_valid': False
+            }
+
+        # 1. 裁剪冗余背景词汇
+        cleaned_text = self.trim_redundant_words(cot_text)
+
+        # 2. 检测推测词
+        speculative_check = self.check_speculative_words(cleaned_text)
+
+        # 3. 检查长度（可选）
+        length_check = {'is_valid': True}
+        if check_length:
+            length_check = self.check_cot_length(cleaned_text)
+
+        # 综合判断是否有效
+        is_valid = (
+            not speculative_check['has_speculative'] and
+            length_check['is_valid']
+        )
+
+        return {
+            'cleaned_text': cleaned_text,
+            'speculative_check': speculative_check,
+            'length_check': length_check,
+            'is_valid': is_valid
+        }
 
 
 # ===== 使用示例 =====

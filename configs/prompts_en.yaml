@@ -8,10 +8,14 @@
 # 2. 精准：明确任务目标，减少歧义
 # 3. 高效：减少token消耗，加快推理速度
 #
+# 🔧 新增：区分闭合问题和开放问题的 prompt（官方标准）
+# - 闭合问题：两阶段约束推理（hard_label + soft_label + CoT）
+# - 开放问题：单阶段无约束推理（仅生成完整answer文本）
+#
 
 prompts:
   # ==================
-  # Standard Prompt (No CoT) - 32B优化版
+  # Standard Prompt (闭合问题) - 两阶段约束推理
   # ==================
 
   standard:
@@ -26,15 +30,17 @@ prompts:
       Look at the image and answer the following question.
       Question: {question}
 
-      CANDIDATE ANSWERS (choose from these):
+      CANDIDATE ANSWERS (you MUST pick the exact text from this list only):
       {candidate_answers}
 
       REQUIREMENTS:
-      1. Answer in ONE WORD or NUMBER only
-      2. Use lowercase only
-      3. No punctuation, no explanation
-      4. Focus on choosing from the candidate answers above
-      5. Examples: "yes", "no", "2", "red", "bicycle"
+      1. Output ONLY the exact candidate text, single word only.
+      2. If candidate answers are number words (one/two/three), DO NOT output Arabic numerals like 1/2/3.
+      3. All characters lowercase only.
+      4. No punctuation, no extra explanations, no additional words.
+      5. Examples:
+          Candidates ["yes", "no"] → output "yes"
+          Candidates ["one", "two", "three"] → output "one" (NOT "1")
 
       Answer:
 
@@ -93,6 +99,33 @@ prompts:
       Conclusion: Final Answer: {primary_answer}
 
     # ==================
+    # Open Prompt (开放问题) - 单阶段无约束推理
+    # ==================
+    # 🔧 官方标准：仅用于开放问题（因果/描述/抽象问答）
+    # 特点：
+    # - 无候选答案集约束
+    # - 仅生成完整自然语言回答
+    # - 不强制三段式 CoT
+    # - 不输出 logits
+
+    open:
+      vqa: |
+        Role: Professional visual teacher model for open-ended VQA data distillation.
+        Core High-Priority Constraints (must strictly follow first):
+        1. No markdown formatting of any kind: forbid #, ##, ###, numeric ordered list (1./2./3.), bullet symbols (-/*), bold tags **, dividing lines. Only plain continuous paragraphs are allowed.
+        2. Do NOT generate any closed-set task content: hard_label, soft_label, candidate word lists, probability values, structured three-part CoT (observation/analysis/conclusion) are all forbidden.
+
+        Core Rules:
+        1. All reasoning and answers must be derived only from visible elements in the image, strictly prohibit hallucinations of non-existent objects, actions or relationships.
+        2. Output one or multiple connected plain text paragraphs only. Single-word replies, extremely short single sentences, fragmented phrases are strictly forbidden.
+        3. For reasoning questions starting with why / how / what reason: First describe the key visible visual details of the image, then logically derive the complete conclusion based on those visual facts.
+        4. Output length is unlimited; provide sufficient supporting visual details to make your reasoning fully persuasive.
+        5. If critical areas of the image are obscured, blurry or blocked, clearly point out the unclear region in your answer instead of guessing uncertain information.
+
+        User Question: {question}
+        Answer:
+
+  # ==================
   # Default
   # ==================
 

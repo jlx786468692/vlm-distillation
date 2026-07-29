@@ -81,6 +81,10 @@ class CoTGenerator:
         # Extract and structure CoT
         full_response = result.get('full_response', '')
 
+        # 🔧 调试日志：查看原始 CoT 响应
+        self.logger.debug(f"[CoT] Raw full_response length: {len(full_response)}")
+        self.logger.debug(f"[CoT] full_response (first 500 chars): {full_response[:500]}")
+
         cot_data = {}
 
         # Structure the reasoning
@@ -112,11 +116,19 @@ class CoTGenerator:
             'conclusion': ''
         }
 
+        # 🔧 调试日志：查看原始推理文本
+        self.logger.debug(f"[Structure] Raw reasoning length: {len(raw_reasoning)}")
+        if not raw_reasoning or len(raw_reasoning.strip()) < 10:
+            self.logger.warning(f"[Structure] Empty or too short reasoning: '{raw_reasoning[:100]}'")
+            return structured
+
         # 提取assistant回复
         if 'assistant' in raw_reasoning:
             response_part = raw_reasoning.split('assistant')[-1]
+            self.logger.debug(f"[Structure] Extracted assistant response (first 200 chars): {response_part[:200]}")
         else:
             response_part = raw_reasoning
+            self.logger.debug(f"[Structure] No 'assistant' found, using full text")
 
         # 定义标签映射
         label_patterns = {
@@ -145,7 +157,11 @@ class CoTGenerator:
                     content = response_part[start_idx:end_idx].strip()
                     if content:
                         structured[key] = content
+                        self.logger.debug(f"[Structure] Extracted {key}: {content[:100]}")
                         break
+
+        # 🔧 调试日志：显示最终解析结果
+        self.logger.debug(f"[Structure] Final structured result: obs={bool(structured['observation'])}, ana={bool(structured['analysis'])}, con={bool(structured['conclusion'])}")
 
         return structured
 

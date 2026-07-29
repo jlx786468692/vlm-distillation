@@ -37,7 +37,7 @@ teacher:
   # 使用GPU 1（如果GPU 0被占用）：cuda_devices: "1"
   # 使用双卡张量并行：cuda_devices: "0,1" 且 tensor_parallel_size: 2
   # 留空则使用所有可见GPU
-  cuda_devices: "0"  # 单卡运行（32B-AWQ约20GB显存）
+  cuda_devices: "0,1"  # 单卡运行（32B-AWQ约20GB显存）
 
   # 🔧 模型选择（Qwen2.5-VL 系列）
   # 3B: ~6GB 显存，单卡
@@ -52,6 +52,9 @@ teacher:
 
   # vLLM 配置（Qwen2.5-VL 多模态有 bug，禁用）
   use_vllm: false
+
+  # 🔧 Intel 优化配置（如果不需要 Intel GPU，禁用）
+  use_intel_optimization: false  # ✅ 新增：禁用 Intel 优化
 
   # 通用生成参数（适用于VQA、Captioning等任务）
   # 【32B模型优化】使用贪婪解码（temperature=0）
@@ -68,6 +71,74 @@ teacher:
   # 减少两次推理中的重复图像编码计算，提升约15-20%性能
   cache_visual_features: true      # 启用视觉特征缓存（默认：true）
   cache_max_size: 1000            # 最大缓存数量（防止内存溢出）
+
+  # ============================================================
+  # Token过滤配置（遵循千问官方蒸馏流水线标准）
+  # ============================================================
+  # 严格区分两套独立机制：解码时不拦截推测词，后置清洗时过滤低质样本
+
+  stop_words:
+    # ==========================================================
+    # 类别1：解码时实时拦截（bad_words_ids）
+    # ==========================================================
+    # 用途：在模型推理过程中，一旦检测到禁止token立即截断输出
+    # 仅用于：格式符号、非法字符、阿拉伯数字等绝对违禁词
+
+    # Markdown符号（解码时拦截）
+    markdown:
+      - "*"
+      - "#"
+      - "-"
+      - "{"
+      - "}"
+      - "`"
+      - "|"
+
+    # 非法数字（解码时拦截，强制输出单词而非阿拉伯数字）
+    illegal_numbers:
+      - "1"
+      - "2"
+      - "3"
+      - "4"
+      - "5"
+      - "6"
+      - "7"
+      - "8"
+      - "9"
+      - "0"
+
+    # ==========================================================
+    # 类别2：仅用于离线后处理过滤（不参与解码拦截）
+    # ==========================================================
+    # 用途：在离线清洗阶段，过滤包含大量推测模糊词的低质样本
+    # 注意：这些词汇在解码生成阶段完全放行，保证CoT完整通顺
+
+    # 模糊推测词汇（仅用于后处理清洗，解码时不拦截）
+    speculative:
+      - "appear"
+      - "seem"
+      - "probably"
+      - "likely"
+      - "suggest"
+      - "maybe"
+      - "might"
+      - "could be"
+      - "possibly"
+      - "perhaps"
+
+  # 重复惩罚参数（抑制重复语句）
+  repetition_penalty: 1.2
+
+  # 是否启用stop_words实时拦截（CoT生成时）
+  enable_stop_words_filter: true
+
+  # ============================================================
+  # 兜底机制配置（Qwen-VL官方方案）
+  # ============================================================
+  # 空输出重试机制
+  max_empty_output_retries: 2    # 空输出重试次数（官方推荐值）
+
+  # OOM捕获已在代码中自动启用
 
 student:
   model_name: "models/Qwen2.5-VL-3B-Instruct"  # To be configured (e.g., Qwen/Qwen2-VL-2B-Instruct)
@@ -105,7 +176,7 @@ distillation:
   # Hard label configuration
   hard_labels:
     enabled: true
-    confidence_threshold: 0.4  # 🔧 置信度阈值：低于此值将跳过soft_label和CoT生成（性能优化）
+    confidence_threshold: 0.55  # 🔧 置信度阈值：低于此值将跳过soft_label和CoT生成（性能优化）
     save_format: "json"
 
   # Soft label configuration
@@ -316,3 +387,30 @@ vqa_token_filter:
   config_file: "configs/vqa_token_filter.yaml"
   # 候选集封闭数据（使用工具生成）
   candidate_sets: "outputs/candidate_sets/closure_data.json"
+
+# ============================================================
+# 问题分类器配置（分层策略：规则 + 模型兜底）
+# ============================================================
+question_classifier:
+  # 是否启用问题分类器
+  enabled: true
+
+  # BART-MNLI模型路径
+  model_path: "models/bart-large-mnli"
+
+  # 运行设备
+  device: "cuda"
+
+  # 模型置信度阈值（低于此值归为开放式问题）
+  confidence_threshold: 0.7
+
+  # 是否启用模型推理（False则仅使用规则匹配）
+  enable_model: true
+
+  # 分类类别（与车载VQA标准对齐）
+  categories:
+    - "counting"      # 计数问题（官方标准命名）
+    - "color"         # 颜色问题
+    - "yes_no"        # 是非问题（官方标准命名）
+    - "location"      # 位置问题
+    - "open_descriptive"  # 开放式描述问题（官方标准命名）

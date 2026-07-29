@@ -161,9 +161,29 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
             # 🔧 提取合法答案列表（用于 CoT 限定答案范围）
             allowed_answers = list(distribution.keys())
 
+            # 🔧 关键修复：从分布中获取 primary_answer，而不是硬编码
+            # 如果硬标签在分布中，使用硬标签；否则使用分布中的最大值
+            primary_answer_lower = primary_answer.lower() if primary_answer else None
+
+            if distribution:
+                if primary_answer_lower in distribution:
+                    # 硬标签在分布中，使用硬标签（这是正确答案）
+                    final_primary_answer = primary_answer_lower
+                else:
+                    # 硬标签不在分布中，使用分布中的最大值
+                    final_primary_answer = max(distribution.items(), key=lambda x: x[1])[0]
+                    self.logger.warning(
+                        f"[Primary Answer Mismatch] hard_label='{primary_answer_lower}' not in distribution, "
+                        f"using max_prob_answer='{final_primary_answer}'"
+                    )
+            else:
+                # 分布为空（极端情况），使用硬标签
+                final_primary_answer = primary_answer_lower
+                self.logger.warning(f"[Empty Distribution] Using hard label as primary_answer: '{primary_answer_lower}'")
+
             soft_label = {
                 'answer_distribution': distribution,
-                'primary_answer': primary_answer,
+                'primary_answer': final_primary_answer,  # 🔧 修复：使用从分布中获取的最终答案
                 'allowed_answers': allowed_answers  # 🔧 新增：合法答案列表
             }
             return soft_label
@@ -188,9 +208,12 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
             }
             allowed_answers = list(distribution.keys())  # ✅ 添加 allowed_answers
 
+            # 🔧 修复：从分布中获取 primary_answer，确保一致性
+            final_primary_answer = primary_answer.lower()
+
             soft_label = {
                 'answer_distribution': distribution,
-                'primary_answer': primary_answer,
+                'primary_answer': final_primary_answer,  # 🔧 使用统一变量名
                 'allowed_answers': allowed_answers  # ✅ 同源
             }
             return soft_label
@@ -216,9 +239,15 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
             )
             allowed_answers = list(distribution.keys())  # ✅ 同源
 
+            # 🔧 修复：从分布中获取 primary_answer
+            if distribution:
+                final_primary_answer = max(distribution.items(), key=lambda x: x[1])[0]
+            else:
+                final_primary_answer = primary_answer.lower()
+
             soft_label = {
                 'answer_distribution': distribution,
-                'primary_answer': primary_answer,
+                'primary_answer': final_primary_answer,  # 🔧 使用从分布中获取的值
                 'allowed_answers': allowed_answers  # ✅ 添加
             }
         else:
@@ -227,9 +256,12 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
             }
             allowed_answers = list(distribution.keys())  # ✅ 同源
 
+            # 🔧 修复：从分布中获取 primary_answer
+            final_primary_answer = result.get('answer', 'unknown').lower()
+
             soft_label = {
                 'answer_distribution': distribution,
-                'primary_answer': primary_answer,
+                'primary_answer': final_primary_answer,  # 🔧 使用从分布中获取的值
                 'allowed_answers': allowed_answers  # ✅ 添加
             }
 
@@ -265,42 +297,46 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
         """
         distribution = {}
 
-        # 方法1：从原始logits提取top-k，应用温度缩放，然后计算概率
+        # 🔧 修复：正确处理 teacher_model 返回的概率值
+        # teacher_model._process_logits 返回的 top_k_values 已经是概率（softmax后）
+        # 不需要再应用温度缩放！
         if 'top_k_indices' in logits_data and 'top_k_values' in logits_data:
             token_indices = logits_data['top_k_indices']
-            token_logits = logits_data['top_k_values']  # 🔧 现在是logits，不是概率
+            token_probs_raw = logits_data['top_k_values']  # 🔧 修复：这是概率，不是logits！
+            temperature = logits_data.get('temperature', 1.0)  # 获取使用的温度
 
             # 🔧 修复3：空值防护，阻断 None.dim() 崩溃
-            if token_indices is None or token_logits is None:
-                self.logger.warning("[VQA Logits] token_indices or token_logits is None, returning empty distribution")
+            if token_indices is None or token_probs_raw is None:
+                self.logger.warning("[VQA Logits] token_indices or token_probs is None, returning empty distribution")
                 return distribution
 
             # 🔧 修复：正确处理不同维度的tensor
             # 期望形状：[num_tokens, top_k] 或 [top_k]
-            if token_indices.dim() >= 1 and token_logits.dim() >= 1:
+            if token_indices.dim() >= 1 and token_probs_raw.dim() >= 1:
                 # 添加调试日志
-                self.logger.debug(f"[VQA Logits] token_indices shape: {token_indices.shape}, token_logits shape: {token_logits.shape}")
+                self.logger.debug(f"[VQA Logits] token_indices shape: {token_indices.shape}, token_probs shape: {token_probs_raw.shape}")
+                self.logger.debug(f"[VQA Logits] Temperature used: {temperature}")
 
                 # 取第一个位置（答案的第一个 token）
                 if token_indices.dim() == 1:
                     # 已经是 [top_k] 形状，直接使用
                     first_token_indices = token_indices
-                    first_token_logits = token_logits
+                    first_token_probs = token_probs_raw
                     self.logger.debug(f"[VQA Logits] Using 1D tensor directly, shape: {first_token_indices.shape}")
                 elif token_indices.dim() == 2:
                     # [num_tokens, top_k] 形状，取第一个token
                     first_token_indices = token_indices[0]
-                    first_token_logits = token_logits[0]
+                    first_token_probs = token_probs_raw[0]
                     self.logger.debug(f"[VQA Logits] Taking first token from 2D tensor, shape: {first_token_indices.shape}")
                 else:
                     # [batch, num_tokens, top_k] 形状，取第一个batch的第一个token
                     first_token_indices = token_indices[0, 0]
-                    first_token_logits = token_logits[0, 0]
+                    first_token_probs = token_probs_raw[0, 0]
                     self.logger.debug(f"[VQA Logits] Taking first batch, first token from 3D tensor, shape: {first_token_indices.shape}")
 
-                # 🔧 Step 1: 应用温度缩放到logits
-                # 标准公式：soft_probs = softmax(logits / temperature)
-                scaled_logits = first_token_logits / self.temperature
+                # 🔧 修复：不需要再应用温度缩放！概率已经计算好了
+                # teacher_model 已经应用了温度缩放：probs = softmax(logits / temperature)
+                # 我们直接使用这个概率值即可
 
                 # ===== 🔧 三层防护策略（VQA过滤标准实践） =====
                 # 第一层：黑名单（核心防线）- 拦截不可能作为单字答案的Token
@@ -308,7 +344,7 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
                 # 第三层：Top-K兜底（多样性保障）- 防止过滤后分布过于稀疏
                 # ==========================================================
 
-                valid_token_mask = torch.zeros_like(scaled_logits, dtype=torch.bool)
+                valid_token_mask = torch.zeros_like(first_token_probs, dtype=torch.bool)
                 primary_answer_lower = primary_answer.lower() if primary_answer else None
 
                 # 🔧 新增：获取hard_label对应的token ID（用于第二层保护）
@@ -360,12 +396,10 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
                     self.logger.info(f"[Top-K Fallback] Only {num_valid} tokens remaining, supplementing from Top-{self.top_k}")
 
                     # 从原始Top-K中补充未被黑名单拦截的token
-                    # 计算原始概率分布
-                    token_probs_raw = torch.softmax(scaled_logits, dim=-1)
-
+                    # 🔧 修复：first_token_probs 已经是概率，不需要再计算 softmax
                     # 按概率排序，取Top-50（或更多）
-                    top_k_fallback = min(self.top_k * 2, len(first_token_indices))  # 取2倍的top_k作为候选集
-                    top_k_indices = torch.topk(token_probs_raw, top_k_fallback).indices
+                    top_k_fallback = min(self.top_k * 2, len(first_token_probs))  # 取2倍的top_k作为候选集
+                    top_k_indices = torch.topk(first_token_probs, top_k_fallback).indices
 
                     # 补充逻辑：从Top-K中添加未被过滤的token
                     for idx in top_k_indices:
@@ -389,21 +423,29 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
 
                     self.logger.info(f"[Top-K Fallback] After supplementation: {valid_token_mask.sum().item()} tokens")
 
-                # 🔧 应用mask到logits（将无效token的logits设为极小值）
+                # 🔧 应用mask到概率（将无效token的概率设为0）
                 if num_valid > 0 or valid_token_mask.sum().item() > 0:
                     # 有有效token，应用过滤
-                    # 将无效token的logits设为-1e9（softmax后会接近0）
-                    scaled_logits_filtered = scaled_logits.clone()
-                    scaled_logits_filtered[~valid_token_mask] = -1e9
+                    # 🔧 修复：first_token_probs 已经是概率，不需要再计算 softmax
+                    # 将无效token的概率设为0
+                    token_probs = first_token_probs.clone()
+                    token_probs[~valid_token_mask] = 0.0
 
-                    # 计算softmax得到概率
-                    token_probs = torch.softmax(scaled_logits_filtered, dim=-1)
+                    # 🔧 重新归一化（确保概率和为1）
+                    prob_sum = token_probs.sum()
+                    if prob_sum > 0:
+                        token_probs = token_probs / prob_sum
+                    else:
+                        # 极端情况：所有概率都为0（不应该发生）
+                        self.logger.warning("[Probability Error] All probabilities are zero after filtering!")
+                        # 回退到原始概率
+                        token_probs = first_token_probs.clone()
                 else:
                     # 极端情况：所有token都被过滤（不应该发生，因为有硬标签保护）
                     self.logger.warning(f"[Emergency Fallback] All tokens filtered! Using raw top-{self.top_k}")
 
-                    # 回退到原始top-k策略：保留概率最高的k个token
-                    token_probs = torch.softmax(scaled_logits, dim=-1)
+                    # 🔧 修复：直接使用原始概率（已经是 softmax 后的值）
+                    token_probs = first_token_probs.clone()
 
                     # 取top-k（保留原始配置的top_k数量）
                     top_k = min(self.top_k, len(token_probs))
@@ -412,69 +454,69 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
                     # 只保留top-k的概率，其余置零
                     token_probs_filtered = torch.zeros_like(token_probs)
                     token_probs_filtered[top_k_indices] = token_probs[top_k_indices]
+                    # 重新归一化
+                    prob_sum = token_probs_filtered.sum()
+                    if prob_sum > 0:
+                        token_probs_filtered = token_probs_filtered / prob_sum
                     token_probs = token_probs_filtered
 
                 # 🔧 Step 5: 提取并解码
                 items = []
                 for idx, prob_val in zip(first_token_indices, token_probs):
-                    # 过滤掉概率太小的
-                    if prob_val < 0.001:  # 过滤掉小于 0.1% 的
-                        continue
                     try:
                         word = self.teacher.tokenizer.decode([idx.item()])
                         word = word.strip().lower()
 
-                        # 过滤特殊 token
-                        if word and word not in ['<s>', '</s>', '<pad>', '<|im', '|>', '<|', '|>', 'the', 'a', 'an']:
-                            # 🔧 新增：过滤下标和上标字符（单字符且非数字）
-                            # 这些字符通常是噪音，如：₀₁₂₃₄₅₆₇₈₉ 和 ⁰¹²³⁴⁵⁶⁷⁸⁹
-                            if len(word) == 1 and not word.isdigit():
-                                # 检查是否是下标或上标数字/字母
-                                # Unicode范围：
-                                # - 下标数字：U+2080-U+2089
-                                # - 上标数字：U+2070, U+00B9, U+00B2, U+00B3, U+2074-U+2079
-                                # - 下标字母：U+2090-U+209C
-                                # - 上标字母：U+1D43-U+1DBF
-                                char_code = ord(word)
-                                is_subscript = (0x2080 <= char_code <= 0x2089 or  # 下标数字
-                                                0x2090 <= char_code <= 0x209C)    # 下标字母
-                                is_superscript = (0x2070 == char_code or           # 上标0
-                                                  char_code == 0x00B9 or          # 上标1
-                                                  0x00B2 <= char_code <= 0x00B3 or # 上标2-3
-                                                  0x2074 <= char_code <= 0x2079 or # 上标4-9
-                                                  0x1D43 <= char_code <= 0x1DBF)   # 上标字母
-                                if is_subscript or is_superscript:
-                                    self.logger.debug(f"[Token Filter] Filtered out subscript/superscript: '{word}' (U+{char_code:04X})")
-                                    continue
+                        # 🔧 修复：硬标签强制保留，跳过所有过滤规则
+                        # 这是最高优先级的保护，确保硬标签永远不会丢失
+                        is_hard_label = False
+                        if primary_answer_lower and word == primary_answer_lower:
+                            is_hard_label = True
 
-                            # 🔧 新增：验证token完整性（可选，更严格的检查）
-                            # 检查解码后的word是否对应单个token（防止BPE碎片）
-                            # 方法：重新编码，检查是否能得到相同的token ID
-                            try:
-                                re_encoded_ids = self.teacher.tokenizer.encode(word, add_special_tokens=False)
+                        # 硬标签：无条件保留（跳过所有过滤）
+                        if is_hard_label:
+                            items.append((word, float(prob_val)))
+                            self.logger.debug(f"[Hard Label Protection] ✓ Reserved hard label in final extraction: '{word}' (prob: {prob_val:.6f})")
+                            continue
 
-                                # 如果重新编码后：
-                                # 1. 只得到一个token ID
-                                # 2. 且该ID与原ID一致
-                                # 则认为是完整单词，保留
-                                # 否则认为是BPE碎片，跳过
-                                if len(re_encoded_ids) == 1 and re_encoded_ids[0] == idx.item():
-                                    # 是完整单词
-                                    if len(word) > 1 or word.isdigit():
-                                        items.append((word, float(prob_val)))
-                                else:
-                                    # 是BPE碎片，跳过（除非是硬标签）
-                                    primary_answer_lower = primary_answer.lower() if primary_answer else None
-                                    if primary_answer_lower and word == primary_answer_lower:
-                                        # 硬标签即使是碎片也保留（安全网）
-                                        items.append((word, float(prob_val)))
-                                        self.logger.debug(f"[Token Validation] Reserved hard label fragment: '{word}'")
-                                    else:
-                                        self.logger.debug(f"[Token Validation] Skipped BPE fragment: '{word}' (ID: {idx.item()})")
-                            except Exception as e:
-                                # 如果验证失败，保守地保留（避免过度过滤）
-                                if len(word) > 1 or word.isdigit():
-                                    items.append((word, float(prob_val)))
+                        # 非硬标签：应用过滤规则
+
+                        # 过滤1：概率太小的（低于0.1%）
+                        if prob_val < 0.001:
+                            continue
+
+                        # 过滤2：特殊 token
+                        if not word or word in ['<s>', '</s>', '<pad>', '<|im', '|>', '<|', '|>', 'the', 'a', 'an']:
+                            continue
+                            # 过滤3：单字符且非数字（可能是噪音）
+                        if len(word) == 1 and not word.isdigit():
+                            # 检查是否是下标或上标字符
+                            char_code = ord(word)
+                            is_subscript = (0x2080 <= char_code <= 0x2089 or 0x2090 <= char_code <= 0x209C)
+                            is_superscript = (0x2070 == char_code or char_code == 0x00B9 or
+                                              0x00B2 <= char_code <= 0x00B3 or
+                                              0x2074 <= char_code <= 0x2079 or
+                                              0x1D43 <= char_code <= 0x1DBF)
+                            if is_subscript or is_superscript:
+                                self.logger.debug(f"[Token Filter] Filtered out subscript/superscript: '{word}'")
+                                continue
+
+                        # 过滤4：BPE碎片检查
+                        # 检查解码后的word是否对应单个token
+                        try:
+                            re_encoded_ids = self.teacher.tokenizer.encode(word, add_special_tokens=False)
+
+                            # 如果是完整单词（重新编码得到单个token且ID一致）
+                            if len(re_encoded_ids) == 1 and re_encoded_ids[0] == idx.item():
+                                # 是完整单词，保留
+                                items.append((word, float(prob_val)))
+                            else:
+                                # 是BPE碎片，跳过
+                                self.logger.debug(f"[Token Filter] Skipped BPE fragment: '{word}'")
+                        except Exception:
+                            # 验证失败，保守保留
+                            if len(word) > 1 or word.isdigit():
+                                items.append((word, float(prob_val)))
                     except Exception:
                         pass
 
@@ -567,6 +609,30 @@ class VQASoftLabelGenerator(BaseSoftLabelGenerator):
                 # 构建 distribution（使用过滤后的items）
                 for word, prob in filtered_items:
                     distribution[word] = prob
+
+                # 🔧 关键修复：确保硬标签在分布中
+                # 如果硬标签不在分布中，强制添加（保底策略）
+                if primary_answer_lower and primary_answer_lower not in distribution:
+                    # 尝试从原始概率中查找硬标签
+                    hard_label_prob = 0.01  # 默认最小概率
+                    for idx, prob_val in zip(first_token_indices, first_token_probs):
+                        try:
+                            word = self.teacher.tokenizer.decode([idx.item()]).strip().lower()
+                            if word == primary_answer_lower:
+                                hard_label_prob = float(prob_val)
+                                break
+                        except:
+                            pass
+
+                    distribution[primary_answer_lower] = hard_label_prob
+                    self.logger.warning(
+                        f"[Hard Label Fallback] Force added '{primary_answer_lower}' to distribution (prob: {hard_label_prob:.6f})"
+                    )
+
+                # 🔧 重新归一化分布（确保概率和为1）
+                total_prob = sum(distribution.values())
+                if total_prob > 0:
+                    distribution = {k: v/total_prob for k, v in distribution.items()}
 
         # 方法2：如果没有 logits，使用 confidence 构建
         elif primary_answer and confidence:
