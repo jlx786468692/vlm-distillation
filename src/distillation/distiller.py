@@ -437,6 +437,10 @@ class Distiller:
                                     task_result['hard_label'] = labels_result['hard_label']
                                     task_result['soft_label'] = labels_result['soft_label']
 
+                                    # 🔧 新增：输出候选答案池
+                                    if 'candidate_pool' in labels_result:
+                                        task_result['candidate_pool'] = labels_result['candidate_pool']
+
                                     self.logger.info(
                                         f"[Label Gen] ✓ 软硬标签生成完成: "
                                         f"answer={labels_result['hard_label']['answer']}, "

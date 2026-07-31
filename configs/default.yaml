@@ -37,7 +37,7 @@ teacher:
   # 使用GPU 1（如果GPU 0被占用）：cuda_devices: "1"
   # 使用双卡张量并行：cuda_devices: "0,1" 且 tensor_parallel_size: 2
   # 留空则使用所有可见GPU
-  cuda_devices: "0,1"  # 单卡运行（32B-AWQ约20GB显存）
+  cuda_devices: "0"  # 单卡运行（32B-AWQ约20GB显存）
 
   # 🔧 模型选择（Qwen2.5-VL 系列）
   # 3B: ~6GB 显存，单卡
@@ -156,7 +156,7 @@ data:
   # Processing parameters
   batch_size: 4
   num_workers: 4
-  max_samples: 10  # 【优化】先用10个样本测试参数调整效果，后续可增加到5000
+  max_samples: 3  # 【优化】先用10个样本测试参数调整效果，后续可增加到5000
 
   # Image preprocessing
   image_size: 224
@@ -182,7 +182,7 @@ distillation:
   # Soft label configuration
   soft_labels:
     enabled: true  # VQA软标签生成
-    temperature: 4  # 温度缩放参数，控制分布平滑度
+    temperature: 3  # 温度缩放参数，控制分布平滑度
     top_k_logits: 50  # Top-K兜底策略
     save_format: "json"
 
@@ -194,6 +194,7 @@ distillation:
   # Chain-of-Thought configuration
   cot:
     enabled: true
+    temperature: 0.1  # 🔧 CoT生成温度（低温度采样，保证生成质量）
     max_length: 512
     include_intermediate_steps: true
     structured_output: true  # Generate structured reasoning with steps

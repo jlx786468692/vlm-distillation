@@ -92,11 +92,8 @@ class CoTGenerator:
             structured = self._structure_vqa_reasoning(full_response)
             cot_data['structured_reasoning'] = structured
 
-        # Validate reasoning quality
-        quality_metrics = self._validate_reasoning_quality(full_response, task='vqa')
-        cot_data['quality_metrics'] = {
-            'is_valid': quality_metrics.get('is_valid', False)
-        }
+        # 🔧 移除验证操作：蒸馏阶段不做任何数据清洗和验证
+        # 清洗逻辑由下游 cleaning 模块处理（RewardModelScorer）
 
         return cot_data
 

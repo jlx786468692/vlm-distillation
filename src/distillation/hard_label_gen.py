@@ -142,11 +142,12 @@ class HardLabelGenerator:
             'confidence': result.get('confidence', 0.0),
         }
 
-        # 置信度过滤
+        # 🔧 移除置信度过滤：蒸馏阶段不做任何数据清洗和验证
+        # 清洗逻辑由下游 cleaning 模块处理（RewardModelScorer）
+        # 仅记录低置信度日志，不标记 filtered
         if hard_label['confidence'] < self.confidence_threshold:
-            hard_label['filtered'] = True
             self.logger.debug(
-                f"VQA result filtered: confidence {hard_label['confidence']:.4f} < threshold {self.confidence_threshold}"
+                f"[Low Confidence] {hard_label['confidence']:.4f} < {self.confidence_threshold} (保留样本，由下游清洗模块处理)"
             )
 
         return hard_label

@@ -24,7 +24,6 @@ from pathlib import Path
 from ..models.teacher_model import TeacherModel
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
-from ..cleaning.open_answer_cleaner import OpenAnswerCleaner  # 🔧 新增：正则清洗器
 
 
 class OpenSampleInferencer:
@@ -69,14 +68,10 @@ Question: {question}
 Please provide a comprehensive answer based on what you observe in the image."""
         )
 
-        # 🔧 新增：初始化正则清洗器
-        self.cleaner = OpenAnswerCleaner()
-
         self.logger.info("✓ 开放样本推理器初始化完成（官方标准）")
         self.logger.info(f"  - max_new_tokens: {self.max_new_tokens}")
         self.logger.info(f"  - temperature: {self.temperature}")
         self.logger.info(f"  - output_scores: False（官方标准）")
-        self.logger.info(f"  - 正则清洗: 启用（Markdown、CoT检测、长度筛选）")
 
     def generate_vqa_open(
         self,
@@ -141,31 +136,22 @@ Please provide a comprehensive answer based on what you observe in the image."""
 
         raw_answer = result.get('answer', '')
 
-        # 🔧 新增：正则清洗（官方标准）
-        cleaned_answer, is_valid, metadata = self.cleaner.clean(raw_answer)
-
-        if not is_valid:
-            # 清洗后发现格式问题，记录日志
-            self.logger.warning(f"开放问答清洗失败: {metadata['issues']}")
-            self.logger.warning(f"  原始答案: {raw_answer[:100]}...")
+        # 🔧 修复：推理阶段不做清洗，直接返回原始答案
+        # 清洗逻辑由下游 RewardModelScorer 处理
+        # 参考日志：这里不需要进行字符串检测
 
         output = {
-            "answer": cleaned_answer,  # 清洗后的答案
+            "answer": raw_answer,  # 原始答案，清洗由下游处理
             "img_path": image_path,
             "question": question,
             "question_type": "open_descriptive",
-            "inference_mode": "open",
-            "cleaning_metadata": metadata  # 🔧 新增：清洗元数据
+            "inference_mode": "open"
         }
 
         if image_id:
             output["image_id"] = image_id
 
-        # 🔧 改进：日志输出更详细
-        if is_valid:
-            self.logger.info(f"✓ 开放问答推理完成，回答长度: {len(output['answer'])} 字符")
-        else:
-            self.logger.warning(f"✗ 开放问答清洗失败，问题: {metadata['issues']}")
+        self.logger.info(f"✓ 开放问答推理完成，回答长度: {len(output['answer'])} 字符")
 
         return output
 

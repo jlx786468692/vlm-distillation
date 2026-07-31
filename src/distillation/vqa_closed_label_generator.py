@@ -6,16 +6,18 @@ VQA闭合问题标签生成器（官方标准）
 
 官方流程（严格顺序）：
 步骤1：前置分流 + 加载候选词列表
-步骤2：阶段1推理 - 提取候选词原始logits（关键裁剪）
-步骤3：温度缩放 + softmax归一化
-步骤4：由软标签推导硬标签
+步骤2：阶段1推理 - 提取候选词原始logits（关键裁剪，T=0贪婪解码）
+步骤3：温度缩放 + softmax归一化（软标签）
+步骤4：由软标签推导硬标签（置信度用 T=1）
 步骤5：阶段2推理 - 生成CoT
 
 核心要点：
 - 软标签 → 硬标签（不是反过来）
 - 只提取候选词logits（裁剪）
-- 温度缩放 T=3.0（固定）
-- 硬标签从软标签分布推导
+- 推理生成：T=0（贪婪解码，确定性）
+- 软标签温度缩放：从配置读取（用于知识蒸馏）
+- 硬标签置信度：T=1 原始logits直接softmax（反映模型真实置信度）
+- CoT生成：从配置读取单独的温度参数
 """
 
 import torch
@@ -56,8 +58,18 @@ class VQAClosedLabelGenerator:
         self.config = config or ConfigManager()
         self.logger = get_logger()
 
-        # 官方标准：温度参数 T=3.0（固定）
-        self.temperature = 3.0
+        # ───────────────────────────────────────────────────────
+        # 温度参数：从配置中读取
+        # ───────────────────────────────────────────────────────
+        # 软标签温度缩放（用于知识蒸馏，软化分布）
+        self.soft_label_temperature = self.config.get(
+            "distillation.soft_labels.temperature", 4.0
+        )
+
+        # CoT生成温度（用于采样生成思维链）
+        self.cot_temperature = self.config.get(
+            "distillation.cot.temperature", 0.1
+        )
 
         # 候选词列表（官方标准）
         self.candidate_sets = {
@@ -67,8 +79,9 @@ class VQAClosedLabelGenerator:
             'location': ['left', 'right', 'top', 'bottom', 'center', 'middle', 'front', 'back']
         }
 
-        self.logger.info("✓ VQA闭合问题标签生成器初始化完成（官方标准）")
-        self.logger.info(f"  - 温度参数: T={self.temperature}")
+        self.logger.info("✓ VQA闭合问题标签生成器初始化完成")
+        self.logger.info(f"  - 软标签温度缩放: T={self.soft_label_temperature}")
+        self.logger.info(f"  - CoT生成温度: T={self.cot_temperature}")
         self.logger.info(f"  - 候选集: binary={len(self.candidate_sets['binary'])}, counting={len(self.candidate_sets['counting'])}, color={len(self.candidate_sets['color'])}")
 
     def generate_labels(
@@ -84,8 +97,8 @@ class VQAClosedLabelGenerator:
         步骤：
         1. 加载候选词列表
         2. 推理并提取候选词logits
-        3. 温度缩放 + softmax
-        4. 从软标签推导硬标签
+        3. 温度缩放 + softmax (软标签)
+        4. 从软标签推导硬标签（置信度用 T=1 原始logits计算）
 
         Args:
             image_path: 图像路径
@@ -142,22 +155,24 @@ class VQAClosedLabelGenerator:
         self.logger.info(f"[Label Gen] 提取的候选词logits: {candidate_logits}")
 
         # ───────────────────────────────────────────────────────
-        # 步骤3：温度缩放 + softmax归一化（官方标准）
+        # 步骤3：温度缩放 + softmax归一化（官方标准，用于软标签）
         # ───────────────────────────────────────────────────────
         soft_label = self._compute_soft_label(candidate_logits, candidate_answers)
 
         self.logger.info(f"[Label Gen] 软标签分布: {soft_label['answer_distribution']}")
 
         # ───────────────────────────────────────────────────────
-        # 步骤4：由软标签推导硬标签（官方标准）
+        # 步骤4：由软标签推导硬标签
+        # 🔧 关键：置信度使用 T=1 原始logits直接softmax计算
         # ───────────────────────────────────────────────────────
-        hard_label = self._derive_hard_label(soft_label)
+        hard_label = self._derive_hard_label(soft_label, candidate_logits)
 
         self.logger.info(f"[Label Gen] 硬标签: answer={hard_label['answer']}, confidence={hard_label['confidence']:.4f}")
 
         return {
             'hard_label': hard_label,
-            'soft_label': soft_label
+            'soft_label': soft_label,
+            'candidate_pool': candidate_answers  # 🔧 新增：输出候选答案池
         }
 
     def _get_candidate_answers(self, question_type: str) -> List[str]:
@@ -287,10 +302,10 @@ class VQAClosedLabelGenerator:
         candidate_answers: List[str]
     ) -> Dict[str, Any]:
         """
-        温度缩放 + softmax归一化（官方标准）
+        温度缩放 + softmax归一化
 
         公式：p_i = softmax(z_i / T)
-        T = 3.0（固定）
+        T 从配置读取（distillation.soft_labels.temperature）
 
         Args:
             candidate_logits: {候选词: logit值}
@@ -311,14 +326,14 @@ class VQAClosedLabelGenerator:
             }
 
         # ───────────────────────────────────────────────────────
-        # 官方标准：温度缩放
+        # 温度缩放：logits / T（从配置读取）
         # ───────────────────────────────────────────────────────
         # 转换为tensor
         candidates = list(candidate_logits.keys())
         logits = torch.tensor([candidate_logits[c] for c in candidates])
 
         # 温度缩放：logits / T
-        logits_scaled = logits / self.temperature
+        logits_scaled = logits / self.soft_label_temperature
 
         # ───────────────────────────────────────────────────────
         # 官方标准：softmax归一化
@@ -345,17 +360,26 @@ class VQAClosedLabelGenerator:
             'allowed_answers': candidates  # 所有候选词
         }
 
-    def _derive_hard_label(self, soft_label: Dict[str, Any]) -> Dict[str, Any]:
+    def _derive_hard_label(
+        self,
+        soft_label: Dict[str, Any],
+        candidate_logits: Dict[str, float]
+    ) -> Dict[str, Any]:
         """
-        由软标签推导硬标签（官方标准）
+        由软标签推导硬标签
 
         步骤：
         1. 遍历answer_distribution，取概率最大值对应的候选文本
         2. 该候选文本标准化后存入hard_label["answer"]
-        3. hard_label["confidence"]取最大概率原始数值
+        3. hard_label["confidence"]使用 T=1 原始logits直接softmax计算
+
+        🔧 关键改进：
+        - 软标签使用 T=3.0 温度缩放（用于知识蒸馏）
+        - 硬标签置信度使用 T=1 原始logits（反映模型真实置信度）
 
         Args:
             soft_label: 软标签字典
+            candidate_logits: 原始候选词logits
 
         Returns:
             {'answer': str, 'confidence': float}
@@ -363,12 +387,46 @@ class VQAClosedLabelGenerator:
         answer_distribution = soft_label['answer_distribution']
         primary_answer = soft_label['primary_answer']
 
-        # 获取最大概率
-        max_prob = answer_distribution.get(primary_answer, 0.0)
+        # ───────────────────────────────────────────────────────
+        # 🔧 关键改进：使用 T=1 原始logits计算置信度
+        # ───────────────────────────────────────────────────────
+        # 构建与answer_distribution相同顺序的logits tensor
+        candidates = list(answer_distribution.keys())
+
+        if not candidates or not candidate_logits:
+            # 回退：使用软标签概率
+            max_prob = answer_distribution.get(primary_answer, 0.0)
+            return {
+                'answer': primary_answer,
+                'confidence': max_prob
+            }
+
+        # 提取原始logits（按照candidates的顺序）
+        logits_list = []
+        for c in candidates:
+            logit_val = candidate_logits.get(c, candidate_logits.get(c.lower(), 0.0))
+            logits_list.append(logit_val)
+
+        logits_tensor = torch.tensor(logits_list)
+
+        # 🔧 T=1：原始logits直接softmax（不缩放）
+        probs_t1 = F.softmax(logits_tensor, dim=0)
+
+        # 找到primary_answer在candidates中的索引
+        primary_idx = candidates.index(primary_answer) if primary_answer in candidates else 0
+
+        # 获取T=1置信度
+        confidence_t1 = probs_t1[primary_idx].item()
+
+        self.logger.debug(
+            f"[Hard Label] T=1 置信度计算: primary={primary_answer}, "
+            f"confidence={confidence_t1:.4f} "
+            f"(T={self.soft_label_temperature} soft_label prob={answer_distribution.get(primary_answer, 0.0):.4f})"
+        )
 
         return {
             'answer': primary_answer,
-            'confidence': max_prob
+            'confidence': confidence_t1
         }
 
 
@@ -383,14 +441,17 @@ if __name__ == "__main__":
 
     print("\n官方标准流程：")
     print("  步骤1：前置分流 + 加载候选词列表")
-    print("  步骤2：阶段1推理 - 提取候选词原始logits")
-    print("  步骤3：温度缩放 + softmax归一化")
-    print("  步骤4：由软标签推导硬标签")
-    print("  步骤5：阶段2推理 - 生成CoT")
+    print("  步骤2：阶段1推理 - 提取候选词原始logits（T=0贪婪解码）")
+    print("  步骤3：温度缩放 + softmax归一化（软标签，T从配置读取）")
+    print("  步骤4：由软标签推导硬标签（置信度用 T=1）")
+    print("  步骤5：阶段2推理 - 生成CoT（T从配置读取）")
 
-    print("\n关键参数：")
-    print(f"  - 温度参数: T=3.0（固定）")
-    print(f"  - 候选集裁剪: 只保留5-20个候选词logits")
-    print(f"  - 顺序: 软标签 → 硬标签（不是反过来）")
+    print("\n关键参数（从配置读取）：")
+    print("  - 推理生成温度: T=0（贪婪解码，确定性）")
+    print("  - 软标签温度缩放: T=4（默认，用于知识蒸馏）")
+    print("  - 硬标签置信度: T=1（原始logits直接softmax）")
+    print("  - CoT生成温度: T=0.1（默认，低温度采样）")
+    print("  - 候选集裁剪: 只保留5-20个候选词logits")
+    print("  - 顺序: 软标签 → 硬标签（不是反过来）")
 
     print("\n" + "="*70)
