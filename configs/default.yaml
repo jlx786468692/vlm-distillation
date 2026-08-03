@@ -18,11 +18,10 @@ prompts_config: "configs/prompts_en.yaml"  # 英文版本（数据集为英文�
 # Pipeline 运行控制
 pipeline:
   # 默认运行的步骤（可通过命令行 --steps 覆盖）
+  # 🔧 改进：initial_validation 和 final_validation 已合并到 cleaning 中
   default_steps:
-    - "distillation"
-    # - "initial_validation"
-    # - "cleaning"
-    # - "final_validation"
+    # - "distillation"
+    - "cleaning"
     # - "quality_validation"
     # - "visualization"  # 可视化默认不运行，需要显式指定
 
@@ -156,7 +155,7 @@ data:
   # Processing parameters
   batch_size: 4
   num_workers: 4
-  max_samples: 3  # 【优化】先用10个样本测试参数调整效果，后续可增加到5000
+  max_samples: 4  # 【优化】先用10个样本测试参数调整效果，后续可增加到5000
 
   # Image preprocessing
   image_size: 224
@@ -212,9 +211,12 @@ output:
   compress_outputs: false  # Compress large soft label arrays
   save_metadata: true
 
+  # ============================================================
   # 各步骤输出目录（单步运行时自动使用作为默认输入）
+  # ============================================================
   merged_dir: "./outputs/merged"        # Distillation 输出
   cleaned_dir: "./outputs/cleaned"      # Cleaning 输出
+  valided_dir: "./outputs/valided"      # Quality Validation 输出（有效样本验证报告）
   visualization_dir: "./outputs/visualizations"  # Visualization 输出
 
 logging:
@@ -228,47 +230,49 @@ validation:
   check_image_paths: true
   min_samples_per_task: 10
 
+  # ============================================================
+  # Initial validation thresholds（粗粒度分布指标）
+  # ============================================================
+  initial:
+    ece_warning_threshold: 0.3        # ECE预警阈值
+    top1_abort_threshold: 0.6         # Top-1终止阈值（60%）
+    top3_threshold: 0.95              # Top-3参考阈值
+    conflict_warning_threshold: 0.1   # 标签冲突预警阈值（10%）
+
+  # ============================================================
+  # Final validation comparison（清洗对比）
+  # ============================================================
+  final:
+    track_sample_retention: true      # 跟踪样本保留率
+    track_empty_reduction: true       # 跟踪空样本下降
+    track_judge_score: true           # 跟踪Judge分数（如启用）
+    track_hallucination_removal: true # 跟踪幻觉剔除
+
+  # ============================================================
+  # Quality validation thresholds（训练准入）
+  # ============================================================
+  quality:
+    # Closed sample thresholds（闭合样本阈值）
+    ece_threshold: 0.15               # ECE阈值（严格）
+    top1_threshold: 0.90              # Top-1匹配率阈值
+    top3_threshold: 0.95              # Top-3匹配率阈值
+    kl_threshold: 0.5                 # KL稳定性阈值
+    conflict_threshold: 0.05          # 标签冲突阈值（严格）
+
+    # General thresholds（通用阈值）
+    hallucination_threshold: 0.03     # 幻觉占比阈值
+    repetition_threshold: 0.10        # 文本重复度阈值
+
 # ============================================================
 # 数据清洗配置 (Data Cleaning Configuration)
 # ============================================================
+# 🔧 配置结构说明：
+# - 所有清洗配置（路径、阈值、详细参数）都在 configs/cleaning.yaml 文件中
+# - 代码通过 cleaning.config_file 读取清洗配置
+# ============================================================
 cleaning:
-  # 是否启用数据清洗
-  enabled: true
-
-  # 异常检测阈值
-  min_confidence: 0.3            # 最低置信度阈值（降低到0.3，允许更多低置信度数据通过）
-  max_confidence: 0.95           # 最高置信度阈值（高于此值可能过于自信）
-  min_quality_score: 35.0        # 最低质量分数阈值（降低到35，基于实际数据质量调整）
-  min_cot_quality: 0.3           # 最低CoT逻辑流畅度分数（降低到0.3）
-
-  # 答案长度限制
-  min_answer_length: 3           # 最短答案长度（字符）
-  max_answer_length: 100         # 最长答案长度（字符）
-
-  # 清洗策略
-  auto_remove_invalid: true      # 自动移除无效数据（invalid_answer/empty_result）
-  remove_empty_results: false    # 移除有空结果的样本（设置为false保留部分任务数据）
-  auto_repair_bbox: true         # 自动修复异常检测框
-  deduplicate_answers: true      # 答案去重（标记但不移除）
-
-  # 报告设置
-  save_removed_data: true        # 保存被移除的数据供分析
-  max_removed_samples_display: 20  # 报告中最多展示的被移除样本数
-
-  # 无效答案列表（会被自动移除）
-  invalid_answers:
-    - "unknown"
-    - "n/a"
-    - "none"
-    - "null"
-    - "nothing"
-    - "i don't know"
-    - "cannot determine"
-    - "unclear"
-    - "no answer"
-    - "not sure"
-    - "indeterminate"
-    - " "
+  # 清洗配置文件路径（指向详细配置）
+  config_file: "configs/cleaning.yaml"
 
 # ============================================================
 # 数据可视化配置 (Visualization Configuration)

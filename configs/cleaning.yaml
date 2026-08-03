@@ -1,0 +1,163 @@
+# ============================================================
+# 数据清洗专用配置 (Data Cleaning Specific Configuration)
+# ============================================================
+# 本配置文件包含清洗流程的所有配置参数（包括路径和详细参数）
+# 通过 default.yaml 中的 cleaning.config_file 加载
+# ============================================================
+
+# ============================================================
+# 输出路径配置（统一管理）
+# ============================================================
+# 所有清洗输出都在 base_dir 下
+output:
+  base_dir: "./outputs/cleaned"                    # 清洗输出根目录
+  clean_valid_dir: "./outputs/cleaned/clean_valid" # 合格样本（final_score ≥ 70）
+  need_fix_dir: "./outputs/cleaned/need_fix"       # 待修复样本（40 ≤ final_score < 70）
+  discard_dir: "./outputs/cleaned/discard"         # 丢弃样本（final_score < 40）
+  train_jsonl: "./outputs/cleaned/train.jsonl"     # 训练数据（JSON Lines 格式）
+
+# ============================================================
+# 分区阈值（基于 final_score）
+# ============================================================
+clean_valid_threshold: 70  # final_score ≥ 70 → clean_valid（合格样本）
+need_fix_threshold: 40     # 40 ≤ final_score < 70 → need_fix（待修复样本）
+                              # final_score < 40 → discard（丢弃样本）
+
+# ============================================================
+# 闭合样本校验配置
+# ============================================================
+# strict_closed_mode: 控制校验A和校验B的严格程度
+# - true: 一票否决（校验失败直接丢弃）
+# - false: 重度扣分（校验A失败扣22分，校验B失败扣20分）
+strict_closed_mode: true
+
+# ============================================================
+# GT真值映射缓存配置
+# ============================================================
+# 避免每次运行都重新构建映射，节省时间
+gt_mapping:
+  # 缓存模式（枚举）
+  # - "auto": 优先使用缓存，缓存不存在才构建并保存（推荐）
+  # - "rebuild": 强制重新构建，更新缓存文件
+  # - "disabled": 禁用缓存，每次从COCO标注构建
+  cache_mode: "auto"
+
+  # 缓存文件路径
+  cache_file: "./data/gt_mapping_cache.json"
+
+# ============================================================
+# 置信度分层策略（从配置文件读取，不写死）
+# ============================================================
+# 黄金区间：全部保留
+# 高置信度：限流控制
+# 超高置信度：严格控制
+confidence:
+  medium_zone: [0.4, 0.95]   # 黄金区间：[min, max]，全部保留
+  ultra_high_conf: 0.98      # > ultra_high_conf: 超高置信度，严格控制
+
+# 置信度占比限流控制（在quality_validation阶段执行）
+confidence_control:
+  max_high_conf_ratio: 0.35      # 高置信度（> 0.95）占比上限
+  max_ultra_high_conf_ratio: 0.15  # 超高置信度（> 0.98）占比上限
+
+  # ECE 动态调整阈值
+  ece_low_threshold: 0.1   # ECE < 0.1: 校准良好，放宽占比上限
+  ece_high_threshold: 0.2  # ECE > 0.2: 校准失效，收紧占比上限
+
+# ============================================================
+# 是否启用数据清洗
+# ============================================================
+enabled: true
+
+# ============================================================
+# 异常检测阈值
+# ============================================================
+min_confidence: 0.3            # 最低置信度阈值（降低到0.3，允许更多低置信度数据通过）
+max_confidence: 0.95           # 最高置信度阈值（高于此值可能过于自信）
+min_quality_score: 30.0        # 最低质量分数阈值（分区器的clean_valid阈值）
+min_cot_quality: 0.3           # 最低CoT逻辑流畅度分数（降低到0.3）
+
+# 答案长度限制
+min_answer_length: 3           # 最短答案长度（字符）
+max_answer_length: 100         # 最长答案长度（字符）
+
+# ============================================================
+# 清洗策略
+# ============================================================
+auto_remove_invalid: true      # 自动移除无效数据（invalid_answer/empty_result）
+remove_empty_results: false    # 移除有空结果的样本（设置为false保留部分任务数据）
+auto_repair_bbox: true         # 自动修复异常检测框
+deduplicate_answers: true      # 答案去重（标记但不移除）
+
+# ============================================================
+# 报告设置
+# ============================================================
+save_removed_data: true        # 保存被移除的数据供分析
+max_removed_samples_display: 20  # 报告中最多展示的被移除样本数
+
+# ============================================================
+# 无效答案列表（会被自动移除）
+# ============================================================
+invalid_answers:
+  - "unknown"
+  - "n/a"
+  - "none"
+  - "null"
+  - "nothing"
+  - "i don't know"
+  - "cannot determine"
+  - "unclear"
+  - "no answer"
+  - "not sure"
+  - "indeterminate"
+  - " "
+
+# ============================================================
+# 奖励模型打分配置（混合打分系统）
+# ============================================================
+enable_reward_scoring: true    # 启用奖励模型打分
+
+# 混合打分权重
+scoring:
+  rule_weight: 0.4            # 规则层权重
+  model_weight: 0.6           # 模型层权重
+  min_pass_score: 3.0         # 及格线（<3分为discard）
+
+# 规则层配置（5分制，扣分制）
+rule_scoring:
+  # 通用规则扣分
+  missing_field_penalty: 0.5     # 缺失关键字段扣分/个
+  markdown_penalty: 0.3          # 包含markdown扣分
+  truncation_penalty: 0.5        # 文本残缺扣分
+  language_mixing_penalty: 0.3   # 中英混杂扣分
+
+  # 开放问题阈值（使用tokenizer统计）
+  open_min_tokens: 80            # 开放问题最小token数
+  open_max_tokens: 1600          # 开放问题最大token数（不建议超过1800）
+
+  # 闭合问题阈值（使用tokenizer统计）
+  closed_min_answer_length: 2    # 闭合问题最小答案长度（字符）
+  closed_min_cot_tokens: 30      # CoT最小token数（推理过于简略则丢弃）
+  closed_max_cot_tokens: 600     # CoT最大token数（冗余灌水则丢弃）
+
+# 模型打分配置
+model_scoring:
+  enabled: true                  # 是否启用模型打分
+  use_lightweight_fallback: true # 模型不可用时使用轻量级打分
+  max_new_tokens: 50             # 打分模型最大输出token
+  temperature: 0.0               # 确定性生成
+
+# ============================================================
+# 数据分区配置（开源标准）
+# ============================================================
+partition:
+  min_quality_score: 30        # clean_valid的最低质量分数
+  min_confidence: 0.3          # 最低置信度
+  max_confidence: 0.95         # 最高置信度
+
+# ============================================================
+# 人工抽样校验配置
+# ============================================================
+sampling:
+  sample_size: 100             # 抽样数量
+  dirty_threshold: 0.10        # 脏样本阈值（10%）

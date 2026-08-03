@@ -54,6 +54,29 @@ class ConfigManager:
                     # 如果没有 'prompts' 键，直接合并到 prompts section
                     self._merge_config(self.config, prompts_config, "prompts")
 
+        # ============================================================
+        # Load cleaning config if specified (嵌套配置文件)
+        # ============================================================
+        cleaning_config_path = self.get('cleaning.config_file')
+        if cleaning_config_path:
+            cleaning_path = Path(cleaning_config_path)
+            if not cleaning_path.is_absolute():
+                # 如果是相对路径，相对于 config_root
+                cleaning_path = self.config_root / cleaning_path.name
+
+            if cleaning_path.exists():
+                with open(cleaning_path, 'r', encoding='utf-8') as f:
+                    cleaning_config = yaml.safe_load(f)
+
+                # 🔧 简化逻辑：直接合并所有清洗配置（包括路径）
+                # 所有清洗配置都在 cleaning.yaml 中
+                if 'cleaning' not in self.config:
+                    self.config['cleaning'] = {}
+
+                # 合并 cleaning.yaml 的所有配置
+                for key, value in cleaning_config.items():
+                    self.config['cleaning'][key] = value
+
         # Load model config if exists
         model_config_path = self.config_root / "model_config.yaml"
         if model_config_path.exists():

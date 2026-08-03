@@ -16,11 +16,10 @@ Supported tasks:
 - Object Detection
 
 Data cleaning features:
-- Anomaly detection (7 types)
-- Quality scoring (0-100)
-- Data filtering and repair
-- Deduplication
-- Comprehensive cleaning reports
+- Reward model scoring (rule-based + model-based)
+- Quality validation and filtering
+- Data partitioning and storage
+- Confidence control
 
 Author: VLM-Distillation Team
 Version: 1.0.0
@@ -34,7 +33,12 @@ from .models import TeacherModel
 from .distillation import Distiller
 from .utils import ConfigManager, setup_logger
 from .export import JSONExporter
-from .cleaning import DataCleaner
+from .cleaning import (
+    RewardModelScorer,
+    RewardModelJudge,
+    DataPartitioner,
+    ConfidenceController
+)
 
 __all__ = [
     "COCODataLoader",
@@ -44,5 +48,8 @@ __all__ = [
     "ConfigManager",
     "setup_logger",
     "JSONExporter",
-    "DataCleaner",
+    "RewardModelScorer",
+    "RewardModelJudge",
+    "DataPartitioner",
+    "ConfidenceController",
 ]

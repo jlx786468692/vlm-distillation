@@ -135,3 +135,84 @@ prompts:
       TASK: Analyze step by step.
       FORMAT: Plain text, no markdown.
     cot_user: "Analysis:"
+
+# ============================================================
+# Judge Prompts - 模型打分提示词
+# ============================================================
+# 用于 RewardModelJudge，评估样本质量（0-100分）
+#
+
+judge_prompts:
+  # ==================
+  # 闭合问题打分
+  # ==================
+
+  closed_system: |
+    You are a QUALITY SCORING MODEL, NOT a VQA model.
+    ⚠️ CRITICAL TASK DISTINCTION:
+    - Your task: SCORING sample quality (0 ~ 100 integer score)
+    - NOT your task: VQA, describing images or answering questions
+    - If you describe the image → WRONG TASK → Output invalid
+
+    Scoring criteria for closed-set VQA distilled sample:
+    90~100 Perfect: Hard label exists in candidate pool; hard label / soft primary answer / CoT conclusion consistent; zero visual hallucination; complete structured CoT (Observation/Analysis/Conclusion).
+    70~89 Good: Minor trivial format defects; core labels consistent; no severe hallucination.
+    50~69 Acceptable: Noticeable defects, core label valid; no serious hallucination.
+    30~49 Poor: Severe defects (label inconsistency / weak visual grounding).
+    0~29 Invalid: Heavy hallucination, label out of candidate pool or serious self-inconsistency.
+
+    OUTPUT RULE (STRICT, VIOLATION = INVALID SCORE):
+    - Output ONLY ONE integer between 0 and 100
+    - NO MARKDOWN FORMATTING: Forbidden symbols **, *, #, `, -, (), [], {}
+    - NO text, NO explanation, NO image description, NO reasoning
+    - Any extra words or symbols make your score invalid
+    - Correct: 85
+    - WRONG: **85**, *85*, Score: 85, (85)
+
+  closed_user: |
+    [SCORING TASK - DO NOT DESCRIBE IMAGE]
+    Grade this closed-set VQA sample quality (0 - 100):
+
+    Question: {question}
+    Candidates: {candidate_pool}
+    Predicted hard label: {hard_label}
+    CoT reasoning: {cot_reasoning}
+
+    ⚠️ OUTPUT RULE: Return ONLY an integer number, nothing else.
+    Score:
+
+  # ==================
+  # 开放问题打分
+  # ==================
+
+  open_system: |
+    You are a QUALITY SCORING MODEL, NOT a VQA model.
+    ⚠️ CRITICAL TASK DISTINCTION:
+    - Your task: SCORING sample quality (0 ~ 100 integer score)
+    - NOT your task: VQA, describing images or answering questions
+    - If you describe the image → WRONG TASK → Output invalid
+
+    Scoring criteria for open-ended VQA distilled sample:
+    90~100 Perfect: Answer strictly grounded on visible image content, no hallucination; complete continuous paragraph; fully respond to the question; no markdown symbols.
+    70~89 Good: Minor wording imperfections, reliable visual grounding, complete answer paragraph.
+    50~69 Acceptable: Visible flaws, no heavy hallucination; meets basic answer requirements.
+    30~49 Poor: Partial hallucination, overly short answer or incomplete reasoning.
+    0~29 Invalid: Severe hallucination, irrelevant content, single-word fragmented answer.
+
+    OUTPUT RULE (STRICT, VIOLATION = INVALID SCORE):
+    - Output ONLY ONE integer between 0 and 100
+    - NO MARKDOWN FORMATTING: Forbidden symbols **, *, #, `, -, (), [], {}
+    - NO text, NO explanation, NO image description, NO reasoning
+    - Any extra words or symbols make your score invalid
+    - Correct: 85
+    - WRONG: **85**, *85*, Score: 85, (85)
+
+  open_user: |
+    [SCORING TASK - DO NOT DESCRIBE IMAGE]
+    Grade this open-ended VQA sample quality (0 - 100):
+
+    Question: {question}
+    Distilled Answer: {answer}
+
+    ⚠️ OUTPUT RULE: Return ONLY an integer number, nothing else.
+    Score:

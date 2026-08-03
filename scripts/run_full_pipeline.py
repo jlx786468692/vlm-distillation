@@ -86,7 +86,10 @@ from collections import OrderedDict
 try:
     from src import (
         ConfigManager, TeacherModel, Distiller, COCODataLoader,
-        setup_logger, DataCleaner
+        setup_logger
+    )
+    from src.cleaning import (
+        RewardModelScorer, DataPartitioner, ConfidenceController
     )
     from src.utils.data_visualizer import DataVisualizer
     from src.utils.validation_comparator import ValidationComparator
@@ -96,7 +99,10 @@ except ImportError:
     sys.path.insert(0, str(project_root))
     from src import (
         ConfigManager, TeacherModel, Distiller, COCODataLoader,
-        setup_logger, DataCleaner
+        setup_logger
+    )
+    from src.cleaning import (
+        RewardModelScorer, DataPartitioner, ConfidenceController
     )
     from src.utils.data_visualizer import DataVisualizer
     from src.utils.validation_comparator import ValidationComparator
@@ -162,8 +168,9 @@ class FullPipelineRunner:
         self.quality_validator = None
 
         # Default steps (可视化已包含在默认流程中)
-        self.DEFAULT_STEPS = ['distillation', 'initial_validation', 'cleaning', 'final_validation', 'quality_validation', 'visualization']
-        self.ALL_STEPS = ['distillation', 'initial_validation', 'cleaning', 'final_validation', 'quality_validation', 'visualization']
+        # 🔧 改进：initial_validation 已合并到 cleaning 中
+        self.DEFAULT_STEPS = ['distillation', 'cleaning', 'quality_validation', 'visualization']
+        self.ALL_STEPS = ['distillation', 'cleaning', 'quality_validation', 'visualization']
 
     def run_full_pipeline(
         self,
@@ -259,15 +266,15 @@ class FullPipelineRunner:
             step_start = datetime.now()
 
             # 检查步骤依赖
-            if step in ['initial_validation', 'cleaning', 'final_validation', 'quality_validation', 'visualization']:
+            if step in ['cleaning', 'quality_validation', 'visualization']:
                 if current_input_dir is None:
                     self.logger.error(f"✗ Step {step} requires input from previous step, but input directory not found")
                     self.logger.error("")
                     self.logger.error("Solution:")
                     self.logger.error("  1. Run 'distillation' step first to generate data")
                     self.logger.error("  2. Or ensure the default input directory exists:")
-                    self.logger.error(f"     - For cleaning/initial_validation: {merged_dir}")
-                    self.logger.error(f"     - For visualization/final_validation/quality_validation: {cleaned_dir}")
+                    self.logger.error(f"     - For cleaning: {merged_dir}")
+                    self.logger.error(f"     - For visualization/quality_validation: {cleaned_dir}")
                     self.logger.error("")
                     step_results[step] = {'success': False, 'error': 'Missing input directory'}
                     continue
@@ -279,34 +286,13 @@ class FullPipelineRunner:
                     )
                     current_input_dir = result.get('merged_output') or merged_dir
 
-                elif step == 'initial_validation':
-                    # Initialize validation_comparator on demand
-                    if self.validation_comparator is None:
-                        self.validation_comparator = ValidationComparator(self.logger)
-                    result = self.validation_comparator.run_validation(
-                        current_input_dir, 'initial'
-                    )
-
                 elif step == 'cleaning':
+                    # 🔧 修复：传入 cleaned_dir 而不是根目录
+                    # 让 DataPartitioner 使用配置文件中的完整路径
                     result = self._run_cleaning(
-                        current_input_dir, min_quality, min_confidence, output_dir
+                        current_input_dir, min_quality, min_confidence, cleaned_dir  # ← 使用 cleaned_dir
                     )
                     current_input_dir = result.get('cleaned_output') or cleaned_dir
-
-                elif step == 'final_validation':
-                    # Initialize validation_comparator on demand
-                    if self.validation_comparator is None:
-                        self.validation_comparator = ValidationComparator(self.logger)
-                    result = self.validation_comparator.run_validation(
-                        current_input_dir, 'final'
-                    )
-                    # Compare validation results
-                    if 'initial_validation' in step_results:
-                        comparison = self.validation_comparator.compare_validation_results(
-                            step_results['initial_validation'],
-                            result
-                        )
-                        result['comparison'] = comparison
 
                 elif step == 'quality_validation':
                     # 最终质量校验，在清洗后进行深度质量评估
@@ -626,7 +612,11 @@ class FullPipelineRunner:
         output_dir: Optional[str]
     ) -> Dict[str, Any]:
         """
-        Run cleaning step
+        Run cleaning step with new RewardModelScorer and DataPartitioner
+
+        🔧 改进：将 initial_validation 和 cleaning 合并为一个过程
+        使用 RewardModelScorer 进行混合打分（规则层 + 模型层）
+        使用 DataPartitioner 进行数据分区存储（clean_valid/need_fix/discard）
 
         Args:
             input_dir: Input data directory (蒸馏输出)
@@ -637,7 +627,7 @@ class FullPipelineRunner:
         Returns:
             Cleaning result
         """
-        self.logger.info("\nSTEP: DATA CLEANING")
+        self.logger.info("\nSTEP: DATA CLEANING (Reward Model Scoring + Partitioning)")
         self.logger.info(f"Input: {input_dir}")
         self.logger.info(f"Parameters: min_quality={min_quality}, min_confidence={min_confidence}")
 
@@ -648,46 +638,89 @@ class FullPipelineRunner:
             if not input_dir:
                 raise ValueError("Input directory is required for cleaning step")
 
-            output_path = output_dir or './outputs/cleaned'
+            output_path = Path(output_dir or './outputs/cleaned')
 
-            # Update cleaning config
-            self.config.set('cleaning.min_quality_score', min_quality)
-            self.config.set('cleaning.min_confidence', min_confidence)
+            # ============================================================
+            # [Phase 1] 加载数据
+            # ============================================================
+            self.logger.info("\n[1/4] Loading distilled data...")
+            data_list = self._load_data_from_dir(input_dir)
+            self.logger.info(f"  Loaded {len(data_list)} samples")
 
-            # Initialize cleaner
-            cleaner = DataCleaner(self.config)
+            if not data_list:
+                self.logger.warning("No data files found for cleaning")
+                return {
+                    'success': False,
+                    'error': 'No data files',
+                    'duration_seconds': 0
+                }
 
-            # Run cleaning
-            self.logger.info("\n" + "-"*70)
-            self.logger.info("Running data cleaning...")
-            self.logger.info("-"*70)
+            # ============================================================
+            # [Phase 2] 奖励模型打分
+            # ============================================================
+            self.logger.info("\n[2/4] Running reward model scoring...")
 
-            result = cleaner.clean_directory(
-                data_dir=input_dir,
-                output_dir=output_path
+            # 初始化打分器（传递 logger 确保日志统一）
+            scorer = RewardModelScorer(self.config, logger=self.logger)
+
+            # 🔧 简化：直接调用批量打分，所有逻辑在 RewardModelScorer 内部处理
+            scored_samples = scorer.score_batch(data_list)
+
+            # 统计结果（从样本中提取）
+            scoring_stats = {
+                'total': len(scored_samples),
+                'valid': sum(1 for s in scored_samples if s.get('quality_score', {}).get('is_valid', False)),
+                'invalid': sum(1 for s in scored_samples if not s.get('quality_score', {}).get('is_valid', False)),
+                'avg_score': sum(s.get('quality_score', {}).get('final_score', 0) for s in scored_samples) / len(scored_samples) if scored_samples else 0.0
+            }
+
+            self.logger.info(f"  Scored {scoring_stats['total']} samples")
+            self.logger.info(f"  Valid: {scoring_stats['valid']}, Invalid: {scoring_stats['invalid']}")
+            self.logger.info(f"  Average score: {scoring_stats['avg_score']:.2f}")
+
+            # ============================================================
+            # [Phase 3] 数据分区存储
+            # ============================================================
+            self.logger.info("\n[3/4] Partitioning data...")
+
+            # 🔧 简化：DataPartitioner 从 config 读取路径，传递 logger 确保日志统一
+            partitioner = DataPartitioner(self.config, logger=self.logger)
+
+            # 执行分区
+            partition_report = partitioner.partition(
+                samples=scored_samples,
+                cleaning_metadata={'scoring_stats': scoring_stats}
             )
+
+            # ============================================================
+            # [Phase 4] 置信度占比限流控制（可选，在quality_validation阶段执行）
+            # ============================================================
+            # 这里不执行，留给 quality_validation 阶段
 
             step_end = datetime.now()
             duration = (step_end - step_start).total_seconds()
 
-            # Build output paths (DataCleaner creates 'cleaned' and 'removed' subdirs)
-            output_path_obj = Path(output_path)
-            cleaned_output = str(output_path_obj / "cleaned")
-            removed_output = str(output_path_obj / "removed")
+            # 获取分区路径
+            clean_valid_dir = str(output_path / "clean_valid")
+            need_fix_dir = str(output_path / "need_fix")
+            discard_dir = str(output_path / "discard")
 
-            # Get stats from result
-            summary = result.get('summary', {})
+            # 获取统计
+            summary = partition_report.get('summary', {})
 
             # Prepare result report
             result_report = {
                 'success': True,
-                'cleaned_output': cleaned_output,
-                'removed_output': removed_output,
+                'cleaned_output': clean_valid_dir,
+                'need_fix_output': need_fix_dir,
+                'discard_output': discard_dir,
                 'stats': {
-                    'cleaned_count': summary.get('cleaned_count', 0),
-                    'removed_count': summary.get('removed_count', 0),
-                    'total_input': summary.get('total_input', 0),
+                    'clean_valid_count': summary.get('clean_valid_count', 0),
+                    'need_fix_count': summary.get('need_fix_count', 0),
+                    'discard_count': summary.get('discard_count', 0),
+                    'total_input': summary.get('total_samples', len(data_list)),
                 },
+                'scoring_stats': scoring_stats,
                 'duration_seconds': duration,
                 'start_time': step_start.isoformat(),
                 'end_time': step_end.isoformat(),
@@ -698,8 +731,9 @@ class FullPipelineRunner:
             self.logger.info("Cleaning Summary:")
             self.logger.info("-"*70)
             stats = result_report.get('stats', {})
-            self.logger.info(f"  ✓ Cleaned: {stats.get('cleaned_count', 0)} samples")
-            self.logger.info(f"  ✓ Removed: {stats.get('removed_count', 0)} samples")
+            self.logger.info(f"  ✓ Clean Valid: {stats.get('clean_valid_count', 0)} samples")
+            self.logger.info(f"  ✓ Need Fix: {stats.get('need_fix_count', 0)} samples")
+            self.logger.info(f"  ✓ Discard: {stats.get('discard_count', 0)} samples")
             self.logger.info(f"  ✓ Output: {result_report['cleaned_output']}")
             self.logger.info(f"  ✓ Time: {duration:.1f}s")
 
@@ -864,9 +898,12 @@ class FullPipelineRunner:
             distiller = Distiller(self.config, teacher)
             self.logger.info("✓ Distiller initialized")
 
-            # 测试清洗器
-            cleaner = DataCleaner(self.config)
-            self.logger.info("✓ DataCleaner initialized")
+            # 测试清洗器（新模块）
+            scorer = RewardModelScorer(self.config, logger=self.logger)
+            self.logger.info("✓ RewardModelScorer initialized")
+
+            partitioner = DataPartitioner(config=self.config, logger=self.logger)
+            self.logger.info("✓ DataPartitioner initialized")
 
             # 显示配置参数
             self.logger.info(f"\nConfiguration Summary:")
@@ -1063,8 +1100,7 @@ def main():
         '--steps',
         nargs='+',
         default=None,
-        choices=['distillation', 'quality_validation', 'initial_validation', 'cleaning',
-                 'final_validation', 'visualization'],
+        choices=['distillation', 'cleaning', 'quality_validation', 'visualization'],
         help='Steps to run (overrides pipeline.default_steps in config)'
     )
 
