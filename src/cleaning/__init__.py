@@ -10,6 +10,7 @@
 - ClosedSampleValidator: 闭合样本校验器（三元自洽 + GT一致性校验）
 - DataPartitioner: 数据分区存储器（开源标准）
 - ConfidenceController: 置信度占比限流控制器
+- TextCleaner: 后置文本清洗器（移除 Markdown 符号）
 
 已清理：
 - OpenAnswerCleaner: 已废弃，功能整合到 RewardModelScorer
@@ -24,11 +25,15 @@ from .reward_model_judge import RewardModelJudge
 from .closed_sample_validator import ClosedSampleValidator
 from .data_partitioner import DataPartitioner
 from .confidence_controller import ConfidenceController
+from .text_cleaner import TextCleaner, clean_text, clean_cot
 
 __all__ = [
     'RewardModelScorer',
     'RewardModelJudge',
     'ClosedSampleValidator',
     'DataPartitioner',
-    'ConfidenceController'
+    'ConfidenceController',
+    'TextCleaner',
+    'clean_text',
+    'clean_cot'
 ]

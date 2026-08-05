@@ -342,20 +342,76 @@ class ClosedSampleValidator:
     # 校验B：GT真值与Hard标签语义一致性校验
     # ============================================================
 
+    def parse_answer_to_set(self, answer: str) -> set:
+        """
+        将答案拆解为集合（支持多答案情况）
+
+        示例：
+        - "red" → {red}
+        - "red and black" → {red, black}
+        - "red, blue, green" → {red, blue, green}
+        - "red or blue" → {red, blue}
+
+        Args:
+            answer: 答案文本
+
+        Returns:
+            答案集合
+        """
+        # 归一化
+        answer_norm = self.normalize(answer)
+
+        if not answer_norm:
+            return set()
+
+        # 拆分关键词
+        split_keywords = [
+            ' and ',   # red and black
+            ' or ',    # red or blue
+            ',',       # red, blue, green
+            ';',       # red; blue
+            '/'        # red/blue
+        ]
+
+        # 尝试拆分
+        parts = [answer_norm]
+        for keyword in split_keywords:
+            if keyword in answer_norm:
+                parts = answer_norm.split(keyword)
+                break
+
+        # 清理并去重
+        result = set()
+        for part in parts:
+            cleaned = part.strip()
+            if cleaned:
+                # 同义词归一化
+                normalized = self.synonym_dict.get(cleaned, cleaned)
+                result.add(normalized)
+
+        return result
+
     def validate_gt_hard_consistency(
         self,
         ground_truth: str,
         hard_label_answer: str
     ) -> Tuple[bool, str]:
         """
-        校验B：GT真值与Hard标签语义一致性校验
+        校验B：GT真值与Hard标签语义一致性校验（支持多答案）
 
         校验目标：教师生成硬标签与原始数据集标注答案相符
 
-        流程：
-        ① 字符串完全一致 → 通过
-        ② 不一致，查同义词等价 → 通过
-        ③ 调用MNLI判断语义等价（阈值>0.65）
+        🔧 改进：答案集合拆解 + 子集判断
+
+        规则（行业通用，大量COCO VQA蒸馏项目在用）：
+        ✅ 允许：预测集合 ⊆ GT集合（只漏颜色，不新增不存在颜色）
+        ❌ 拒绝：预测集合包含GT不存在的颜色（凭空多出颜色）
+        ❌ 拒绝：GT是单色，预测输出多色（无中生有增加属性）
+
+        示例：
+        - "red and black" vs "red" → ✅ 通过（{red} ⊆ {red, black}）
+        - "red and black" vs "red, yellow" → ❌ 拒绝（yellow不在GT中）
+        - "red" vs "red and black" → ❌ 拒绝（GT是单色，预测多色）
 
         Args:
             ground_truth: 数据集标注答案
@@ -386,6 +442,33 @@ class ClosedSampleValidator:
         if self.check_synonym_equivalence(gt_norm, hard_norm):
             self.logger.info("✓ GT与Hard同义（词典匹配），校验通过")
             return True, ""
+
+        # ───────────────────────────────────────────────────────
+        # 🔧 新增：答案集合拆解 + 子集判断
+        # ───────────────────────────────────────────────────────
+        gt_set = self.parse_answer_to_set(ground_truth)
+        hard_set = self.parse_answer_to_set(hard_label_answer)
+
+        self.logger.info(f"  - GT集合: {gt_set}")
+        self.logger.info(f"  - Hard集合: {hard_set}")
+
+        # 规则1：✅ 预测集合 ⊆ GT集合 → 通过
+        if hard_set.issubset(gt_set):
+            self.logger.info(f"✓ Hard集合是GT集合的子集，校验通过")
+            return True, ""
+
+        # 规则2：❌ GT是单色，预测是多色 → 拒绝（无中生有）
+        if len(gt_set) == 1 and len(hard_set) > 1:
+            reason = f"GT是单色'{gt_set}'，预测多色'{hard_set}'（无中生有）"
+            self.logger.warning(f"【校验B失败】{reason}")
+            return False, reason
+
+        # 规则3：❌ 预测集合包含GT不存在的颜色 → 拒绝（凭空多出颜色）
+        extra_colors = hard_set - gt_set
+        if extra_colors:
+            reason = f"预测包含GT不存在的颜色: {extra_colors}（凭空多出颜色）"
+            self.logger.warning(f"【校验B失败】{reason}")
+            return False, reason
 
         # ───────────────────────────────────────────────────────
         # ③ 调用MNLI语义等价（阈值>0.65）
@@ -521,7 +604,7 @@ if __name__ == "__main__":
 
     print("\n校验规则：")
     print("  A. 三元自洽校验（hard/soft/cot）")
-    print("  B. GT真值与Hard标签校验")
+    print("  B. GT真值与Hard标签校验（支持多答案）")
 
     print("\n开关控制：")
     print("  strict_closed_mode=false（默认）：重度扣分")
@@ -530,5 +613,47 @@ if __name__ == "__main__":
     print("\n扣分规则：")
     print("  A校验失败：-22分")
     print("  B校验失败：-20分")
+
+    print("\n校验B多答案规则：")
+    print("  ✅ 预测集合 ⊆ GT集合 → 通过（允许漏检）")
+    print("  ❌ 预测包含GT不存在的颜色 → 拒绝（凭空多出）")
+    print("  ❌ GT单色，预测多色 → 拒绝（无中生有）")
+
+    print("\n" + "="*70)
+
+    # 🔧 新增：多答案校验测试
+    print("\n多答案校验测试：")
+
+    validator = ClosedSampleValidator()
+
+    # 测试1：子集规则（✅ 通过）
+    gt1 = "red and black"
+    hard1 = "red"
+    is_valid1, reason1 = validator.validate_gt_hard_consistency(gt1, hard1)
+    status1 = "✓" if is_valid1 else "✗"
+    print(f"\n{status1} 测试1: GT='{gt1}', Hard='{hard1}'")
+    print(f"  结果: {'通过' if is_valid1 else '拒绝'}")
+    if not is_valid1:
+        print(f"  原因: {reason1}")
+
+    # 测试2：凭空多出颜色（❌ 拒绝）
+    gt2 = "red and black"
+    hard2 = "red and yellow"
+    is_valid2, reason2 = validator.validate_gt_hard_consistency(gt2, hard2)
+    status2 = "✓" if is_valid2 else "✗"
+    print(f"\n{status2} 测试2: GT='{gt2}', Hard='{hard2}'")
+    print(f"  结果: {'通过' if is_valid2 else '拒绝'}")
+    if not is_valid2:
+        print(f"  原因: {reason2}")
+
+    # 测试3：无中生有（❌ 拒绝）
+    gt3 = "red"
+    hard3 = "red and black"
+    is_valid3, reason3 = validator.validate_gt_hard_consistency(gt3, hard3)
+    status3 = "✓" if is_valid3 else "✗"
+    print(f"\n{status3} 测试3: GT='{gt3}', Hard='{hard3}'")
+    print(f"  结果: {'通过' if is_valid3 else '拒绝'}")
+    if not is_valid3:
+        print(f"  原因: {reason3}")
 
     print("\n" + "="*70)

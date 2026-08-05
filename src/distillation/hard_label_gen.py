@@ -5,7 +5,10 @@ Hard Label Generator for VQA Tasks
 专注于VQA任务的硬标签生成器。
 Optimized for Qwen2.5-VL-32B
 
-🔧 新增：集成候选集封闭，引导模型生成更精准的logits
+🔧 新方案：不再使用候选集封闭模块
+- closed_enumerate 使用弱约束prompt，不强制从列表选
+- closed_yesno 固定候选池 ["yes", "no"]
+- closed_choice 动态提取候选池
 """
 
 import json
@@ -18,14 +21,6 @@ from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
 from ..utils.answer_normalizer import normalize_answer
 
-# 🔧 新增：导入候选集封闭模块
-try:
-    from tools.candidate.candidate_closure import CandidateClosure
-    CANDIDATE_CLOSURE_AVAILABLE = True
-except ImportError:
-    CANDIDATE_CLOSURE_AVAILABLE = False
-    CandidateClosure = None
-
 
 class HardLabelGenerator:
     """
@@ -36,6 +31,8 @@ class HardLabelGenerator:
     Optimized for 32B model:
     - Lower confidence threshold (32B model more reliable)
     - Longer max_new_tokens (32B can generate better reasoning)
+
+    🔧 新方案：不再使用候选集封闭模块
     """
 
     def __init__(
@@ -59,25 +56,7 @@ class HardLabelGenerator:
             "distillation.hard_labels.confidence_threshold", 0.4
         )
 
-        # 🔧 新增：初始化候选集封闭模块
-        try:
-            candidate_config = {
-                'enable_classifier': self.config.get("distillation.soft_labels.enable_candidate_classifier", False),
-                'temperature': self.config.get("distillation.soft_labels.temperature", 2.0),
-                'min_probability': self.config.get("distillation.soft_labels.min_probability", 0.01),
-                'max_candidates': self.config.get("distillation.soft_labels.max_candidates", 100)
-            }
-
-            if CANDIDATE_CLOSURE_AVAILABLE and CandidateClosure:
-                self.candidate_closure = CandidateClosure(candidate_config)
-                self.logger.info("✓ HardLabelGenerator: 候选集封闭模块初始化成功")
-                self.logger.info(f"  VQA词表大小: {len(self.candidate_closure.vqa_vocab)}个")
-            else:
-                self.candidate_closure = None
-                self.logger.warning("HardLabelGenerator: 候选集封闭模块未加载")
-        except Exception as e:
-            self.logger.warning(f"HardLabelGenerator: 候选集封闭模块初始化失败: {e}")
-            self.candidate_closure = None
+        self.logger.info("✓ HardLabelGenerator 初始化完成（新方案：无候选集封闭）")
 
     def generate_vqa_hard_labels(
         self,

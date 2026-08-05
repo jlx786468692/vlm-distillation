@@ -12,6 +12,15 @@ from ..models.teacher_model import TeacherModel
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
 
+# 🔧 新增：导入后置文本清洗模块
+try:
+    from ..cleaning.text_cleaner import clean_text, TextCleaner
+    TEXT_CLEANER_AVAILABLE = True
+    text_cleaner = TextCleaner()
+except ImportError:
+    TEXT_CLEANER_AVAILABLE = False
+    text_cleaner = None
+
 
 class CoTGenerator:
     """
@@ -152,6 +161,14 @@ class CoTGenerator:
                             break
 
                     content = response_part[start_idx:end_idx].strip()
+
+                    # 🔧 新增：后置文本清洗（移除 Markdown 符号和多余引号）
+                    if TEXT_CLEANER_AVAILABLE and content:
+                        # 先清洗闭合问题 CoT 中的引号
+                        content = text_cleaner.clean_cot_quotes(content)
+                        # 再清洗其他 Markdown 符号
+                        content = clean_text(content)
+
                     if content:
                         structured[key] = content
                         self.logger.debug(f"[Structure] Extracted {key}: {content[:100]}")

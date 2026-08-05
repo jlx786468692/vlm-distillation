@@ -18,6 +18,11 @@ VQA闭合问题标签生成器（官方标准）
 - 软标签温度缩放：从配置读取（用于知识蒸馏）
 - 硬标签置信度：T=1 原始logits直接softmax（反映模型真实置信度）
 - CoT生成：从配置读取单独的温度参数
+
+🔧 候选池策略：
+- closed_choice：动态从问题中提取候选池（如 "A or B?" → ["A", "B"]）
+- closed_yesno：固定候选池 ["yes", "no"]（从配置读取）
+- closed_enumerate：无固定候选池，使用弱约束prompt（不强制从列表选）
 """
 
 import torch
@@ -29,6 +34,15 @@ from ..models.teacher_model import TeacherModel
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
 from ..utils.answer_normalizer import normalize_answer
+
+# 🔧 新增：导入答案标准化模块（遵守三条红线）
+try:
+    from .answer_handler import normalize_hard_label, clean_soft_label
+    ANSWER_HANDLER_AVAILABLE = True
+except ImportError:
+    ANSWER_HANDLER_AVAILABLE = False
+    normalize_hard_label = None
+    clean_soft_label = None
 
 
 class VQAClosedLabelGenerator:
@@ -71,25 +85,42 @@ class VQAClosedLabelGenerator:
             "distillation.cot.temperature", 0.1
         )
 
-        # 候选词列表（官方标准）
-        self.candidate_sets = {
-            'binary': ['yes', 'no'],
-            'counting': ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'],
-            'color': ['red', 'blue', 'green', 'yellow', 'orange', 'purple', 'pink', 'black', 'white', 'brown', 'gray'],
-            'location': ['left', 'right', 'top', 'bottom', 'center', 'middle', 'front', 'back']
-        }
+        # ───────────────────────────────────────────────────────
+        # 🔧 候选池策略（新方案）
+        # ───────────────────────────────────────────────────────
+        # - closed_choice：动态从问题中提取（无需预定义）
+        # - closed_yesno：固定候选池（从配置读取）
+        # - closed_enumerate：无固定候选池（弱约束prompt）
+        # ───────────────────────────────────────────────────────
+
+        # closed_yesno 的固定候选池（从配置读取）
+        self.yes_no_candidates = self.config.get(
+            "candidate_pools.yes_no", ["yes", "no"]
+        )
+
+        # 🔧 防御性检查：确保yes_no候选池只包含["yes", "no"]
+        if self.yes_no_candidates != ["yes", "no"]:
+            self.logger.warning(
+                f"⚠️ yes_no候选池配置异常: {self.yes_no_candidates}，"
+                f"预期应该是 ['yes', 'no']"
+            )
+            # 强制修正
+            self.yes_no_candidates = ["yes", "no"]
+            self.logger.info(f"已自动修正为: {self.yes_no_candidates}")
 
         self.logger.info("✓ VQA闭合问题标签生成器初始化完成")
         self.logger.info(f"  - 软标签温度缩放: T={self.soft_label_temperature}")
         self.logger.info(f"  - CoT生成温度: T={self.cot_temperature}")
-        self.logger.info(f"  - 候选集: binary={len(self.candidate_sets['binary'])}, counting={len(self.candidate_sets['counting'])}, color={len(self.candidate_sets['color'])}")
+        self.logger.info(f"  - closed_yesno候选池: {self.yes_no_candidates}")
+        self.logger.info(f"  - closed_enumerate候选池: 无固定候选池（使用弱约束prompt）")
 
     def generate_labels(
         self,
         image_path: str,
         question: str,
         question_type: str,
-        image_id: Optional[str] = None
+        image_id: Optional[str] = None,
+        candidate_pool: Optional[List[str]] = None  # 🔧 新增：动态候选答案池（用于 CHOICE 类型）
     ) -> Dict[str, Any]:
         """
         生成软硬标签（官方标准流程）
@@ -103,8 +134,9 @@ class VQAClosedLabelGenerator:
         Args:
             image_path: 图像路径
             question: 问题文本
-            question_type: 问题类型（binary/counting/color/location）
+            question_type: 问题类型（binary/counting/color/location/choice）
             image_id: 图像ID
+            candidate_pool: 动态候选答案池（用于 CHOICE 类型，如 ["day", "night"]）
 
         Returns:
             {
@@ -118,27 +150,127 @@ class VQAClosedLabelGenerator:
         """
         self.logger.info(f"[Label Gen] 开始生成标签，问题类型: {question_type}")
 
-        # ───────────────────────────────────────────────────────
-        # 步骤1：加载候选词列表（官方标准）
-        # ───────────────────────────────────────────────────────
-        candidate_answers = self._get_candidate_answers(question_type)
+        # 🔧 新增：转换问题类型为枚举（用于答案标准化）
+        from ..classification.question_classifier import QuestionType
+        try:
+            question_type_enum = QuestionType(question_type)
+        except ValueError:
+            # 如果转换失败，使用默认类型
+            self.logger.warning(f"[Label Gen] 无效的问题类型: {question_type}，使用默认类型")
+            question_type_enum = QuestionType.OPEN
 
+        # 🔧 新增：判断是否为强候选池类型
+        # closed_choice / closed_yesno → 强候选池（MUST pick from list）
+        # closed_enumerate → 弱候选池（MAY consider list）
+        major_category = question_type_enum.to_major_category()
+        is_strong_pool = major_category in [QuestionType.CLOSED_CHOICE, QuestionType.CLOSED_YESNO]
+
+        self.logger.info(f"[Label Gen] 候选池类型: {'强候选池' if is_strong_pool else '弱候选池'} ({major_category.value})")
+
+        # ───────────────────────────────────────────────────────
+        # 步骤1：加载候选词列表（新方案）
+        # ───────────────────────────────────────────────────────
+        # 🔧 候选池策略：
+        # - closed_choice：动态从问题中提取候选池（如 "A or B?" → ["A", "B"]）
+        # - closed_yesno：固定候选池 ["yes", "no"]
+        # - closed_enumerate：无固定候选池，使用弱约束prompt
+        # ───────────────────────────────────────────────────────
+
+        # 🔧 新增：优先使用动态候选答案池（CHOICE 类型）
+        if candidate_pool:
+            candidate_answers = candidate_pool
+            self.logger.info(f"[Label Gen] 使用动态候选答案池: {candidate_answers}")
+        else:
+            candidate_answers = self._get_candidate_answers(question_type)
+
+        # 🔧 防御性检查：确保candidate_answers不包含问题类型名称
+        if candidate_answers:
+            invalid_values = ['closed_enumerate', 'open', 'closed_choice', 'closed_yesno']
+            invalid_items = [x for x in candidate_answers if x in invalid_values]
+            if invalid_items:
+                self.logger.warning(
+                    f"[Label Gen] ⚠️ candidate_answers包含无效值: {invalid_items}，"
+                    f"这可能是bug！原始列表: {candidate_answers}"
+                )
+                # 移除无效项
+                candidate_answers = [x for x in candidate_answers if x not in invalid_values]
+                self.logger.warning(f"[Label Gen] 已过滤无效项，剩余: {candidate_answers}")
+
+        # 🔧 关键判断：是否有固定候选池
         if not candidate_answers:
-            self.logger.warning(f"[Label Gen] 无候选词列表，问题类型: {question_type}")
-            return None
+            # ───────────────────────────────────────────────────────
+            # closed_enumerate（counting/color/location）
+            # ───────────────────────────────────────────────────────
+            # 策略：
+            # 1. 使用弱约束prompt（不强制从列表选）
+            # 2. 生成完整的CoT推理
+            # 3. 生成软标签分布（用于知识蒸馏）
+            # 4. 在数据清洗阶段做过滤
+            # ───────────────────────────────────────────────────────
 
-        self.logger.info(f"[Label Gen] 候选词列表: {candidate_answers}")
+            self.logger.info(f"[Label Gen] closed_enumerate类型（{question_type}）")
+            self.logger.info(f"[Label Gen] 使用弱约束prompt + 生成软标签")
+
+            # 🔧 步骤1：硬标签生成（贪婪解码）
+            result = self.teacher.inference_vqa(
+                image=image_path,
+                question=question,
+                return_logits=True,
+                generate_cot=False,
+                candidate_answers=None,  # 无候选池约束
+                is_strong_pool=False  # 弱约束
+            )
+
+            # 提取硬标签
+            answer = result.get('answer', '')
+            confidence = result.get('confidence', 0.0)
+
+            self.logger.info(f"[Label Gen] 硬标签: {answer} (置信度: {confidence:.4f})")
+
+            # 🔧 步骤2：软标签生成（使用logits）
+            # 对于closed_enumerate，我们从top-k logits中提取概率分布
+            logits_data = result.get('logits', {})
+
+            # 提取top-k候选词的logits（用于软标签）
+            top_k_logits = self._extract_top_k_logits(logits_data, top_k=50)
+
+            if top_k_logits:
+                # 温度缩放 + softmax（生成软标签）
+                soft_label = self._compute_soft_label_from_logits(top_k_logits)
+
+                self.logger.info(f"[Label Gen] 软标签分布（top-5）: {dict(list(soft_label['answer_distribution'].items())[:5])}")
+            else:
+                # 如果无法提取logits，使用硬标签作为软标签
+                soft_label = {
+                    'answer_distribution': {answer: confidence},
+                    'primary_answer': answer,
+                    'allowed_answers': [answer]
+                }
+                self.logger.warning(f"[Label Gen] 无法提取logits，使用硬标签作为软标签")
+
+            # 🔧 返回完整结果（包含软标签）
+            return {
+                'hard_label': {'answer': answer, 'confidence': confidence},
+                'soft_label': soft_label,  # ✅ 包含软标签
+                'candidate_pool': None  # 无固定候选池
+            }
+
+        self.logger.info(f"[Label Gen] 使用固定候选池: {candidate_answers}")
 
         # ───────────────────────────────────────────────────────
         # 步骤2：阶段1推理 - 提取候选词原始logits（关键裁剪）
         # ───────────────────────────────────────────────────────
+        # 🔧 关键：根据候选池类型选择合适的prompt
+        # - 强候选池（closed_choice/closed_yesno）：使用强约束prompt（MUST pick from list）
+        # - 弱候选池（closed_enumerate）：使用弱约束prompt（MAY consider list）
         # 推理获取完整logits
         result = self.teacher.inference_vqa(
             image=image_path,
             question=question,
             return_logits=True,  # 获取logits
             generate_cot=False,
-            candidate_answers=candidate_answers  # 传入候选词（用于prompt）
+            candidate_answers=candidate_answers,  # 传入候选词（用于prompt）
+            is_strong_pool=is_strong_pool  # 🔧 新增：根据候选池类型选择prompt
         )
 
         # 提取候选词logits
@@ -175,15 +307,20 @@ class VQAClosedLabelGenerator:
             'candidate_pool': candidate_answers  # 🔧 新增：输出候选答案池
         }
 
-    def _get_candidate_answers(self, question_type: str) -> List[str]:
+    def _get_candidate_answers(self, question_type: str) -> Optional[List[str]]:
         """
-        获取候选词列表（官方标准）
+        获取候选词列表（新方案）
+
+        🔧 候选池策略：
+        - closed_yesno：固定候选池 ["yes", "no"]（从配置读取）
+        - closed_choice：动态从问题中提取（在generate_labels中处理）
+        - closed_enumerate：无固定候选池，返回None（使用弱约束prompt）
 
         Args:
             question_type: 问题类型
 
         Returns:
-            候选答案列表
+            候选答案列表，或None（表示无固定候选池）
         """
         # 标准化问题类型
         type_mapping = {
@@ -191,12 +328,147 @@ class VQAClosedLabelGenerator:
             'binary': 'binary',
             'counting': 'counting',
             'color': 'color',
-            'location': 'location'
+            'location': 'location',
+            'choice': 'choice'
         }
 
         normalized_type = type_mapping.get(question_type, question_type)
 
-        return self.candidate_sets.get(normalized_type, [])
+        # closed_yesno：返回固定候选池
+        if normalized_type == 'binary':
+            return self.yes_no_candidates
+
+        # closed_choice：动态提取（在generate_labels中处理）
+        if normalized_type == 'choice':
+            # 返回None，表示需要在generate_labels中动态提取
+            return None
+
+        # closed_enumerate：无固定候选池
+        # counting/color/location 使用弱约束prompt，不强制从列表选
+        if normalized_type in ['counting', 'color', 'location']:
+            # 🔧 返回None，表示无固定候选池
+            # 模型将使用弱约束prompt（MAY consider list）
+            return None
+
+        # 未知类型：返回None
+        self.logger.warning(f"[Candidate Pool] 未知问题类型: {question_type}")
+        return None
+
+    def _extract_top_k_logits(
+        self,
+        logits_data: Dict[str, Any],
+        top_k: int = 50
+    ) -> Dict[str, float]:
+        """
+        从logits中提取top-k候选词及其概率
+
+        用于closed_enumerate的软标签生成
+
+        Args:
+            logits_data: logits数据
+            top_k: 提取的候选词数量
+
+        Returns:
+            {候选词: logit值}
+        """
+        candidate_logits = {}
+
+        # 获取原始logits
+        raw_logits = logits_data.get('raw_logits')
+        top_k_indices = logits_data.get('top_k_indices')
+        top_k_values = logits_data.get('top_k_values')
+
+        if raw_logits is not None:
+            # 从完整logits中提取
+            if raw_logits.dim() == 3:
+                raw_logits = raw_logits[0]
+
+            # 取第一个token位置的logits
+            first_token_logits = raw_logits[0]
+
+            # 获取top-k
+            top_k_values, top_k_indices = torch.topk(first_token_logits, min(top_k, first_token_logits.size(0)))
+
+            for idx, (value, token_id) in enumerate(zip(top_k_values, top_k_indices)):
+                token = self.teacher.tokenizer.decode([token_id.item()])
+                token = token.strip().lower()
+
+                # 过滤无效token
+                if token and len(token) > 0 and not token.startswith('<') and not token.startswith('['):
+                    candidate_logits[token] = value.item()
+
+        elif top_k_indices is not None and top_k_values is not None:
+            # 从top-k数据中提取
+            if top_k_indices.dim() >= 2:
+                top_k_indices = top_k_indices[0]
+                top_k_values = top_k_values[0]
+
+            for idx, (token_id, logit_value) in enumerate(zip(top_k_indices[:top_k], top_k_values[:top_k])):
+                token = self.teacher.tokenizer.decode([token_id.item()])
+                token = token.strip().lower()
+
+                if token and len(token) > 0 and not token.startswith('<') and not token.startswith('['):
+                    candidate_logits[token] = logit_value.item()
+
+        return candidate_logits
+
+    def _compute_soft_label_from_logits(
+        self,
+        candidate_logits: Dict[str, float]
+    ) -> Dict[str, Any]:
+        """
+        从logits生成软标签分布（温度缩放 + softmax）
+
+        Args:
+            candidate_logits: {候选词: logit值}
+
+        Returns:
+            {
+                'answer_distribution': {候选词: 概率},
+                'primary_answer': str,
+                'allowed_answers': List[str]
+            }
+        """
+        if not candidate_logits:
+            return {
+                'answer_distribution': {},
+                'primary_answer': '',
+                'allowed_answers': []
+            }
+
+        import torch
+        import torch.nn.functional as F
+
+        # 转换为tensor
+        candidates = list(candidate_logits.keys())
+        logits_list = [candidate_logits[c] for c in candidates]
+        logits_tensor = torch.tensor(logits_list, dtype=torch.float32)
+
+        # 温度缩放
+        scaled_logits = logits_tensor / self.soft_label_temperature
+
+        # Softmax归一化
+        probs = F.softmax(scaled_logits, dim=0)
+
+        # 构建概率分布
+        answer_distribution = {}
+        for i, candidate in enumerate(candidates):
+            prob = probs[i].item()
+            if prob > 0.001:  # 过滤极小概率
+                answer_distribution[candidate] = prob
+
+        # 找到primary answer
+        primary_answer = max(answer_distribution.items(), key=lambda x: x[1])[0]
+
+        # allowed_answers（top-10）
+        sorted_candidates = sorted(answer_distribution.items(), key=lambda x: x[1], reverse=True)
+        allowed_answers = [c for c, p in sorted_candidates[:10]]
+
+        return {
+            'answer_distribution': answer_distribution,
+            'primary_answer': primary_answer,
+            'allowed_answers': allowed_answers
+        }
 
     def _extract_candidate_logits(
         self,

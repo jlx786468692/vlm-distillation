@@ -241,7 +241,8 @@ class TeacherModel:
         use_cached_visual: bool = False,  # 🔧 新增：是否使用缓存的视觉特征
         image_id: Optional[str] = None,  # 🔧 新增：图像ID（用于缓存）
         custom_prompt: Optional[str] = None,  # 🔧 新增：自定义 prompt（用于开放推理）
-        is_open_question: bool = False  # 🔧 新增：是否为开放问题（返回完整答案）
+        is_open_question: bool = False,  # 🔧 新增：是否为开放问题（返回完整答案）
+        is_strong_pool: bool = True  # 🔧 新增：是否为强候选池（MUST pick from list）
     ) -> Dict[str, Any]:
         """
         Perform VQA inference.
@@ -259,6 +260,7 @@ class TeacherModel:
             image_id: Image ID for caching (auto-extracted from path if not provided)
             custom_prompt: Custom prompt for open inference (optional)
             is_open_question: Whether this is an open question (return full answer instead of first word)
+            is_strong_pool: Whether to use strong pool constraint (MUST pick from list) vs weak pool (MAY consider list)
 
         Returns:
             Dictionary with answer, confidence, and optionally logits/cot
@@ -270,11 +272,11 @@ class TeacherModel:
             user_prompt = custom_prompt.format(question=question) if '{question}' in custom_prompt else custom_prompt
         elif generate_cot:
             # CoT阶段：使用allowed_answers（从软标签分布中提取）
-            system_prompt, user_prompt = self._construct_cot_prompt(question, task="vqa", primary_answer=primary_answer, allowed_answers=allowed_answers)
+            system_prompt, user_prompt = self._construct_cot_prompt(question, task="vqa", primary_answer=primary_answer, allowed_answers=allowed_answers, is_strong_pool=is_strong_pool)
         else:
             # 硬标签阶段：使用candidate_answers（从VQA词表得到）
             system_prompt = None
-            user_prompt = self._construct_prompt(question, task="vqa", candidate_answers=candidate_answers)
+            user_prompt = self._construct_prompt(question, task="vqa", candidate_answers=candidate_answers, is_strong_pool=is_strong_pool)
 
         # Transformers 推理
         return self._inference_vqa_transformers(
@@ -314,32 +316,47 @@ class TeacherModel:
 
         return result
 
-    def _construct_prompt(self, question: str, task: str, candidate_answers: Optional[List[str]] = None) -> str:
+    def _construct_prompt(self, question: str, task: str, candidate_answers: Optional[List[str]] = None, is_strong_pool: bool = True) -> str:
         """
         Construct task-specific prompt from configuration file.
 
         🔧 改进：支持候选答案集（candidate_answers），用于硬标签生成阶段
+        🔧 新增：根据候选池类型选择不同的prompt（强候选池 vs 弱候选池）
 
         概念区分：
         - candidate_answers: 从VQA词表/训练集得到的预定义答案集，用于引导模型
         - allowed_answers: 从软标签分布中提取的可能答案，用于CoT生成阶段
+        - is_strong_pool: 强候选池（MUST pick from list）vs 弱候选池（MAY consider list）
 
         Args:
             question: Question for VQA (empty for other tasks)
             task: Task type (vqa/captioning/detection/keypoints)
             candidate_answers: List of candidate answers from VQA vocabulary (optional)
+            is_strong_pool: Whether to use strong pool constraint (default: True)
 
         Returns:
             Formatted prompt string
         """
+        # 🔧 根据候选池类型选择不同的prompt模板
+        if is_strong_pool:
+            # 强候选池：closed_choice / closed_yesno
+            prompt_key = f'prompts.standard.{task}_strong'
+            fallback_key = f'prompts.standard.{task}'
+            pool_type_log = "强候选池（MUST pick from list）"
+        else:
+            # 弱候选池：closed_enumerate (counting/color/location)
+            prompt_key = f'prompts.standard.{task}_weak'
+            fallback_key = f'prompts.standard.{task}'
+            pool_type_log = "弱候选池（MAY consider list）"
+
         # 从配置文件读取 prompt
         prompt_template = self.config.get(
-            f'prompts.standard.{task}',
-            self.config.get('prompts.default.standard', "Analyze this image.")
+            prompt_key,
+            self.config.get(fallback_key, "Analyze this image.")
         )
 
         # 调试日志：显示实际使用的 prompt
-        self.logger.debug(f"Loading prompt for task '{task}' from config")
+        self.logger.debug(f"Loading prompt for task '{task}' from config ({pool_type_log})")
         self.logger.debug(f"Prompt template (first 100 chars): {prompt_template[:100]}")
 
         # 支持变量插值 - 使用replace代替format避免大括号冲突
@@ -360,34 +377,52 @@ class TeacherModel:
 
         return prompt.strip()
 
-    def _construct_cot_prompt(self, question: str, task: str, primary_answer: Optional[str] = None, allowed_answers: Optional[List[str]] = None) -> tuple:
+    def _construct_cot_prompt(self, question: str, task: str, primary_answer: Optional[str] = None, allowed_answers: Optional[List[str]] = None, is_strong_pool: bool = True) -> tuple:
         """
         Construct Chain-of-Thought prompt with system/user role separation.
 
         🔧 核心拆分原则：
         - YAML层：只存储纯文本内容，无角色标识
         - 代码层：完成角色分配，规则作system消息，参数作user消息
+        🔧 新增：根据候选池类型选择不同的prompt（强候选池 vs 弱候选池）
 
         Args:
             question: Question for VQA
             task: Task type
             primary_answer: Reference answer from hard_label (optional)
             allowed_answers: List of allowed answers from soft_label (optional)
+            is_strong_pool: Whether to use strong pool constraint (default: True)
 
         Returns:
             (system_prompt, user_prompt) tuple
         """
+        # 🔧 根据候选池类型选择不同的prompt模板
+        if is_strong_pool:
+            # 强候选池：closed_choice / closed_yesno
+            system_key = f'prompts.cot.{task}_system_strong'
+            user_key = f'prompts.cot.{task}_user_strong'
+            fallback_system_key = f'prompts.cot.{task}_system'
+            fallback_user_key = f'prompts.cot.{task}_user'
+            pool_type_log = "强候选池（MUST select from list）"
+        else:
+            # 弱候选池：closed_enumerate (counting/color/location)
+            system_key = f'prompts.cot.{task}_system_weak'
+            user_key = f'prompts.cot.{task}_user_weak'
+            fallback_system_key = f'prompts.cot.{task}_system'
+            fallback_user_key = f'prompts.cot.{task}_user'
+            pool_type_log = "弱候选池（MAY consider list）"
+
         # 🔧 从配置读取 system 规则和 user 模板（分离存储）
         system_template = self.config.get(
-            f'prompts.cot.{task}_system',
-            "Analyze this image step by step."
+            system_key,
+            self.config.get(fallback_system_key, "Analyze this image step by step.")
         )
         user_template = self.config.get(
-            f'prompts.cot.{task}_user',
-            "{question}"
+            user_key,
+            self.config.get(fallback_user_key, "{question}")
         )
 
-        self.logger.debug(f"Loading CoT prompt for task '{task}' from config")
+        self.logger.debug(f"Loading CoT prompt for task '{task}' from config ({pool_type_log})")
 
         # 🔧 system 消息：通用硬性规则（无需变量替换）
         system_prompt = system_template.strip()

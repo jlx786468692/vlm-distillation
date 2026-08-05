@@ -17,15 +17,69 @@ prompts:
   # ==================
   # Standard Prompt (闭合问题) - 两阶段约束推理
   # ==================
+  #
+  # 🔧 关键区分：
+  # - closed_choice / closed_yesno：强候选池（MUST pick from list）
+  # - closed_enumerate：弱候选池（MAY consider list，但不强制）
+  #
 
   standard:
-    # VQA - 单词答案，简洁直接
-    # 🔧 改进：添加候选答案集提示，引导模型生成更精准的logits
+    # ==================
+    # VQA - 强候选池（closed_choice / closed_yesno）
+    # ==================
+    # 适用：选择型问题（A or B?）、是否问题（yes/no）
+    # 特点：必须从候选列表中选择，不允许其他答案
     #
-    # 概念区分：
-    # - candidate_answers: 从VQA词表/训练集得到的预定义答案集（硬标签阶段）
-    # - allowed_answers: 从软标签分布中提取的可能答案（CoT阶段）
+    vqa_strong: |
+      Look at the image and answer the following question.
+      Question: {question}
+
+      CANDIDATE ANSWERS (you MUST pick the EXACT text from this list ONLY):
+      {candidate_answers}
+
+      STRICT REQUIREMENTS:
+      1. Output ONLY the exact candidate text, single word only.
+      2. All characters lowercase only.
+      3. No punctuation, no extra explanations, no additional words.
+      4. Examples:
+          Candidates ["yes", "no"] → output "yes"
+          Candidates ["day", "night"] → output "day"
+
+      Answer:
+
+    # ==================
+    # VQA - 弱候选池（closed_enumerate）
+    # ==================
+    # 适用：计数问题（counting）、颜色问题（color）、位置问题（location）
+    # 特点：候选池仅为参考，如果正确答案不在列表中，可以输出正确答案
+    # ❌ 禁止强约束：不要写 "you MUST pick from list"
     #
+    vqa_weak: |
+      Look at the image and answer the following question.
+      Question: {question}
+
+      REFERENCE ANSWERS (for guidance, you may consider these common answers):
+      {candidate_answers}
+
+      OUTPUT REQUIREMENTS:
+      1. Output a single word or number as your answer.
+      2. If your answer matches one of the reference answers, use the exact text.
+      3. If your answer is NOT in the reference list, output the correct answer anyway.
+      4. For counting questions: use Arabic numerals (1, 2, 3) NOT words (one, two).
+      5. For color questions: use lowercase color words (red, blue, dark blue).
+      6. For location questions: use lowercase location words (left, right, top-left).
+      7. No punctuation, no extra explanations.
+
+      EXAMPLES:
+      - Reference: ["one", "two", "three"] → Output: "2" (Arabic numeral)
+      - Reference: ["red", "blue", "green"] → Output: "dark blue" (if correct color is dark blue)
+      - Reference: ["left", "right", "center"] → Output: "top-left" (if correct location is top-left)
+
+      Answer:
+
+    # ==================
+    # 兼容旧版本（保持向后兼容）
+    # ==================
     vqa: |
       Look at the image and answer the following question.
       Question: {question}
@@ -40,19 +94,142 @@ prompts:
       4. No punctuation, no extra explanations, no additional words.
       5. Examples:
           Candidates ["yes", "no"] → output "yes"
-          Candidates ["one", "two", "three"] → output "one" (NOT "1")
+          Candidates ["one", "two", "three"] → output "1"
 
       Answer:
 
   # ==================
   # CoT Prompt - 32B优化版
   # ==================
+  #
+  # 🔧 关键区分：
+  # - closed_choice / closed_yesno：强候选池（MUST select from list）
+  # - closed_enumerate：弱候选池（MAY consider list，但不强制）
+  #
 
   cot:
     # ============================================================
-    # VQA - 视觉问答（32B优化）
+    # VQA - 强候选池（closed_choice / closed_yesno）
     # ============================================================
+    # 适用：选择型问题（A or B?）、是否问题（yes/no）
+    # 特点：必须从候选列表中选择，不允许其他答案
+    #
 
+    # system: 强约束版本
+    vqa_system_strong: |
+      TASK: Answer the question by selecting exactly one answer from the given allowed answer list.
+
+      STRICT MANDATORY RULES:
+      1. Observation Writing Rule
+        Only write visual features that directly help distinguish different candidate answers.
+        - Remove all irrelevant background, scene description, environmental introduction.
+        - Do not add common sense popular science, light/depth color change logic and other extra knowledge.
+        - No repeated descriptions of the same visual feature, keep sentences concise.
+        - Do not use list symbols such as "-" to split content.
+
+      2. Analysis Writing Rule
+        Reason based on probability distribution, start reasoning with the highest probability primary answer.
+        - Do not copy and repeat the visual description content in Observation.
+        - Only compare the matching degree between visual facts and each candidate answer, and eliminate inconsistent answers.
+        - No redundant expansion of similar irrelevant options.
+
+      3. Output Format Absolute Restrictions (Violation is prohibited)
+        - FORBID ALL MARKDOWN SYMBOLS: No #, ###, *, **, backtick, separator line, bold mark, title mark of any kind.
+        - The output must contain only three plain text paragraphs, with paragraph names fixed as Observation, Analysis, Conclusion.
+        - No extra line breaks, decorative symbols, indent marks.
+        - Conclusion rule: Output only the single answer text selected from the allowed answers, without any explanatory sentences, guiding sentences or punctuation.
+
+      STANDARD CORRECT OUTPUT EXAMPLE FOR REFERENCE:
+      Observation: Only one person on the left foreground wears headphones, and no other people in the picture have headphones.
+      Analysis: The primary answer with the highest probability is one. The visual count matches one, and there is no visual evidence supporting other numerical answers.
+      Conclusion: one
+
+    # user: 强约束版本
+    vqa_user_strong: |
+      Question: {question}
+      ALLOWED ANSWERS (you MUST select from this list): {allowed_answers}
+      PRIMARY ANSWER: {primary_answer}
+      PROBABILITY DISTRIBUTION: {answer_distribution}
+
+      INSTRUCTIONS:
+      1. Observation: Describe ONLY visual features that help distinguish between the allowed answers
+      2. Analysis: Use the probability distribution to reason about which answer best matches
+      3. Conclusion: Select ONE answer from the allowed answers list
+
+      Observation: Focus on answer-relevant features
+      Analysis: Use probability distribution to guide reasoning
+      Conclusion: Final Answer: {primary_answer}
+
+    # ============================================================
+    # VQA - 弱候选池（closed_enumerate）
+    # ============================================================
+    # 适用：计数问题（counting）、颜色问题（color）、位置问题（location）
+    # 特点：候选池仅为参考，如果正确答案不在列表中，可以输出正确答案
+    # ❌ 禁止强约束：不要写 "you MUST select from list"
+    #
+
+    # system: 弱约束版本
+    vqa_system_weak: |
+      TASK: Answer the visual enumeration question concisely based on image content.
+
+      STRICT MANDATORY RULES:
+      1. Observation Writing Rule
+        Only write visual features that directly help answer the question.
+        - Remove all irrelevant background, scene description, environmental introduction.
+        - Do not add common‑sense popular science and extra outside knowledge.
+        - No repeated descriptions of the same visual feature, keep sentences concise.
+        - Do not use list symbols such as "-" to split content.
+
+      2. Analysis Writing Rule
+        Reason based on visual evidence.
+        - Do not copy and repeat visual description content in Observation.
+        - Only reason about what answer matches visual facts.
+        - Keep reasoning brief, avoid redundant expansion.
+
+      3. Output Format Absolute Restrictions (Violation is prohibited)
+        - FORBID ALL MARKDOWN SYMBOLS: No #, ###, *, **, backtick, separator line, bold mark, title mark of any kind.
+        - The output must contain only three plain text paragraphs, with paragraph names fixed as Observation, Analysis, Conclusion.
+        - No extra line breaks, decorative symbols, indent marks.
+        - Conclusion rule: Output only the final answer phrase, without any explanatory sentences, guiding sentences or punctuation.
+
+      4. Sub‑type special output rules
+        - For counting questions: Output arabic numerals such as 1,2,3. Never use english number words like one, two, three.
+        - For color questions: Output concise color description, light/dark modifiers are allowed.
+        - For location questions: Output concise spatial position phrase.
+
+      STANDARD CORRECT OUTPUT EXAMPLES FOR REFERENCE:
+      Example(counting):
+      Observation: There are three cups placed on the table.
+      Analysis: Visual evidence shows total quantity is 3.
+      Conclusion: 3
+
+      Example(color):
+      Observation: The surface of the chair shows dark blue tone.
+      Analysis: Visual color feature matches dark blue.
+      Conclusion: dark blue
+
+      Example(location):
+      Observation: The book lies upon the desk surface.
+      Analysis: Visual spatial relationship shows the book is on the desk.
+      Conclusion: on the desk
+
+    # user: 弱约束版本
+    vqa_user_weak: |
+      Question: {question}
+      ENUM_SUBTYPE: {enum_subtype}
+
+      INSTRUCTIONS:
+      1. Observation: Describe ONLY visual features relevant to the question
+      2. Analysis: Reason based on visual evidence
+      3. Conclusion: Output concise answer following subtype rules
+
+      Observation: Focus on question‑relevant visual features
+      Analysis: Brief reasoning based on image
+      Conclusion:
+
+    # ============================================================
+    # 兼容旧版本（保持向后兼容）
+    # ============================================================
     # system: 简洁的任务定义和规则
     vqa_system: |
       TASK: Answer the question by selecting exactly one answer from the given allowed answer list.
@@ -112,15 +289,17 @@ prompts:
       vqa: |
         Role: Professional visual teacher model for open-ended VQA data distillation.
         Core High-Priority Constraints (must strictly follow first):
-        1. No markdown formatting of any kind: forbid #, ##, ###, numeric ordered list (1./2./3.), bullet symbols (-/*), bold tags **, dividing lines. Only plain continuous paragraphs are allowed.
-        2. Do NOT generate any closed-set task content: hard_label, soft_label, candidate word lists, probability values, structured three-part CoT (observation/analysis/conclusion) are all forbidden.
+        1. No markdown formatting of any kind: forbid #, ##, ###, numeric ordered list, bullet symbols, bold tags, dividing lines. Only plain continuous paragraphs are allowed.
+        2. Do NOT generate any closed-set task content: hard_label, soft_label, candidate word lists, probability values, explicit observation/analysis/conclusion segmented structures are all forbidden.
+        3. DO NOT list multiple separate possible explanations. You must output only the single most reasonable inference strongly supported by visual evidence, no alternative guesses, no parallel speculation.
 
         Core Rules:
-        1. All reasoning and answers must be derived only from visible elements in the image, strictly prohibit hallucinations of non-existent objects, actions or relationships.
-        2. Output one or multiple connected plain text paragraphs only. Single-word replies, extremely short single sentences, fragmented phrases are strictly forbidden.
-        3. For reasoning questions starting with why / how / what reason: First describe the key visible visual details of the image, then logically derive the complete conclusion based on those visual facts.
-        4. Output length is unlimited; provide sufficient supporting visual details to make your reasoning fully persuasive.
-        5. If critical areas of the image are obscured, blurry or blocked, clearly point out the unclear region in your answer instead of guessing uncertain information.
+        1. All reasoning and answers must be derived only from visible elements in the image, strictly prohibit hallucinations.
+        2. Output smooth, connected plain text paragraphs only. No fragmented phrases, no redundant repetition.
+        3. For why / how / what reason questions: first describe key visible visual details, then naturally derive the final single conclusion.
+        4. Provide sufficient visual details to support your reasoning, but do not expand irrelevant content.
+        5. If key regions are blurry or blocked, state the uncertainty clearly instead of guessing.
+        6. Place your final core conclusion naturally at the end of the paragraph.
 
         User Question: {question}
         Answer:

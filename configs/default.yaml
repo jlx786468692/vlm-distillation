@@ -20,8 +20,8 @@ pipeline:
   # 默认运行的步骤（可通过命令行 --steps 覆盖）
   # 🔧 改进：initial_validation 和 final_validation 已合并到 cleaning 中
   default_steps:
-    # - "distillation"
-    - "cleaning"
+    - "distillation"
+    # - "cleaning"
     # - "quality_validation"
     # - "visualization"  # 可视化默认不运行，需要显式指定
 
@@ -155,7 +155,7 @@ data:
   # Processing parameters
   batch_size: 4
   num_workers: 4
-  max_samples: 4  # 【优化】先用10个样本测试参数调整效果，后续可增加到5000
+  max_samples: 20  # 【优化】先用10个样本测试参数调整效果，后续可增加到5000
 
   # Image preprocessing
   image_size: 224
@@ -390,8 +390,8 @@ visualization:
 vqa_token_filter:
   # 配置文件路径（独立的YAML文件）
   config_file: "configs/vqa_token_filter.yaml"
-  # 候选集封闭数据（使用工具生成）
-  candidate_sets: "outputs/candidate_sets/closure_data.json"
+  # ⚠️ 已废弃：不再使用候选集封闭数据
+  # candidate_sets: "outputs/candidate_sets/closure_data.json"
 
 # ============================================================
 # 问题分类器配置（分层策略：规则 + 模型兜底）
@@ -412,10 +412,35 @@ question_classifier:
   # 是否启用模型推理（False则仅使用规则匹配）
   enable_model: true
 
-  # 分类类别（与车载VQA标准对齐）
+  # 问题分类体系（4大类 + 细分类型）
+  # 4大类：closed_choice / closed_yesno / closed_enumerate / open
+  # 细分类型：counting / color / yes_no / location / choice / open_descriptive
   categories:
-    - "counting"      # 计数问题（官方标准命名）
-    - "color"         # 颜色问题
-    - "yes_no"        # 是非问题（官方标准命名）
-    - "location"      # 位置问题
-    - "open_descriptive"  # 开放式描述问题（官方标准命名）
+    - "counting"      # 计数问题 → closed_enumerate
+    - "color"         # 颜色问题 → closed_enumerate
+    - "yes_no"        # 是非问题 → closed_yesno
+    - "location"      # 位置问题 → closed_enumerate
+    - "choice"        # 选择型闭合问题 → closed_choice
+    - "open_descriptive"  # 开放式描述问题 → open
+
+  # 4大类问题类型（用于答案标准化）
+  major_categories:
+    - "closed_choice"      # 选择型闭合问题（强候选池）
+    - "closed_yesno"       # 是否型闭合问题（固定候选池）
+    - "closed_enumerate"   # 枚举型闭合问题（弱候选池）
+    - "open"               # 开放问题（无候选池）
+
+# ============================================================
+# 候选池配置（仅用于强候选池类型）
+# ============================================================
+# 🔧 重要说明：
+# - closed_choice：动态从问题中提取候选池（如 "A or B?" → ["A", "B"]）
+# - closed_yesno：固定候选池 ["yes", "no"]
+# - closed_enumerate：无固定候选池，使用弱约束prompt（MAY consider list）
+# - open：无候选池
+#
+candidate_pools:
+  # closed_yesno 的固定候选池
+  yes_no:
+    - "yes"
+    - "no"

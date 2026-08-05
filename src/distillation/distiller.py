@@ -356,6 +356,7 @@ class Distiller:
 
                         # 🔧 新增：问题分类（官方标准分流逻辑）
                         question_type = None
+                        classification = None  # 🔧 新增：保存分类结果
                         if self.question_classifier:
                             try:
                                 classification = self.question_classifier.classify(question)
@@ -367,6 +368,11 @@ class Distiller:
                                     f"confidence={classification.confidence:.3f}, "
                                     f"method={classification.method}"
                                 )
+                                # 🔧 新增：显示候选答案池（如果是 CHOICE 类型）
+                                if classification.candidate_pool:
+                                    self.logger.info(
+                                        f"[Question Classifier] 候选答案池: {classification.candidate_pool}"
+                                    )
                             except Exception as e:
                                 self.logger.warning(f"问题分类失败: {e}，使用默认闭合推理")
                                 question_type = None
@@ -420,16 +426,26 @@ class Distiller:
                             # 步骤4：由软标签推导硬标签
                             # 步骤5：阶段2推理 - 生成CoT
                             # ───────────────────────────────────────────────────────
+
+                            # 🔧 新增：检查是否为 CHOICE 类型（选择型闭合问题）
+                            candidate_pool = None
+                            if question_type == 'choice' and classification.candidate_pool:
+                                # 使用分类器提取的候选答案池（如 ["day", "night"]）
+                                candidate_pool = classification.candidate_pool
+                                self.logger.info(f"[CHOICE] 使用动态候选答案池: {candidate_pool}")
+
                             self.logger.info(f"[Routing] Image {image_id}: 使用闭合推理路径（官方标准）")
 
                             # 🔧 关键修复：使用官方标准标签生成器
                             if self.closed_label_gen:
                                 # 官方标准流程：一次性生成软硬标签
+                                # 🔧 新增：如果是 CHOICE 类型，传入候选答案池
                                 labels_result = self.closed_label_gen.generate_labels(
                                     image_path=image_path,
                                     question=question,
                                     question_type=question_type,
-                                    image_id=str(image_id)
+                                    image_id=str(image_id),
+                                    candidate_pool=candidate_pool  # 🔧 新增：动态候选答案池
                                 )
 
                                 if labels_result:

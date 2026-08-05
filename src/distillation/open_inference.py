@@ -25,6 +25,13 @@ from ..models.teacher_model import TeacherModel
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
 
+# 🔧 新增：导入后置文本清洗模块
+try:
+    from ..cleaning.text_cleaner import clean_text
+    TEXT_CLEANER_AVAILABLE = True
+except ImportError:
+    TEXT_CLEANER_AVAILABLE = False
+
 
 class OpenSampleInferencer:
     """
@@ -136,12 +143,17 @@ Please provide a comprehensive answer based on what you observe in the image."""
 
         raw_answer = result.get('answer', '')
 
-        # 🔧 修复：推理阶段不做清洗，直接返回原始答案
-        # 清洗逻辑由下游 RewardModelScorer 处理
-        # 参考日志：这里不需要进行字符串检测
+        # 🔧 新增：后置文本清洗（移除 Markdown 符号）
+        if TEXT_CLEANER_AVAILABLE and raw_answer:
+            clean_answer = clean_text(raw_answer)
+            if clean_answer != raw_answer:
+                self.logger.debug(f"[Open Inference] 文本清洗: {len(raw_answer)} -> {len(clean_answer)} 字符")
+            answer = clean_answer
+        else:
+            answer = raw_answer
 
         output = {
-            "answer": raw_answer,  # 原始答案，清洗由下游处理
+            "answer": answer,  # 清洗后的答案
             "img_path": image_path,
             "question": question,
             "question_type": "open_descriptive",
