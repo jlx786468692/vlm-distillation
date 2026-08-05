@@ -11,6 +11,7 @@ import random
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from collections import defaultdict
+from datetime import datetime
 
 try:
     from pycocotools.coco import COCO
@@ -62,8 +63,16 @@ class COCODataLoader:
         self.keypoints_data: Dict[int, List[Dict]] = defaultdict(list)  # Person keypoints
         self.vqa_data_by_image: Dict[int, List[Dict]] = defaultdict(list)
 
-        # 🔧 新增：VQA标注答案（ground truth）
+        # 🔧 新增：VQA标注答案（ground truth）及置信度
         self.vqa_answers_by_question: Dict[int, Dict] = {}  # question_id -> annotation
+
+        # 🔧 新增：VQA标注置信度信息
+        # 存储格式：{
+        #     'answer': str,              # 最终答案（过滤no后最常见）
+        #     'gt_consistency': float,    # 置信度（最常见答案频率）
+        #     'gt_dist': Dict[str, float] # 答案分布
+        # }
+        self.vqa_gt_with_confidence: Dict[int, Dict] = {}  # question_id -> gt_info
 
         # Categories
         self.categories: Dict[int, str] = {}
@@ -180,6 +189,23 @@ class COCODataLoader:
         self._initialized = True
         self.logger.info("COCO dataset initialization complete")
 
+        # 🔧 新增：构建GT映射缓存（包含置信度和分布）
+        # 在加载VQA标注后立即构建，供硬标签生成使用
+        if self.vqa_gt_with_confidence:
+            try:
+                cache_mode = self.config.get("cleaning.gt_mapping.cache_mode", "auto")
+                cache_file = self.config.get("cleaning.gt_mapping.cache_file", "./data/gt_mapping_cache.json")
+
+                self.logger.info("Building GT mapping cache with confidence...")
+                gt_mapping = self.build_gt_mapping(
+                    cache_mode=cache_mode,
+                    cache_file=cache_file
+                )
+                self.logger.info(f"✓ GT mapping cache built: {len(gt_mapping)} entries")
+            except Exception as e:
+                self.logger.warning(f"Failed to build GT mapping cache: {e}")
+                self.logger.warning("GT data will be used from memory")
+
     def _load_caption_json(self, ann_file: Path) -> None:
         """Load caption annotations from JSON directly (fallback)."""
         with open(ann_file, 'r') as f:
@@ -218,7 +244,7 @@ class COCODataLoader:
 
     def _load_vqa_annotations(self, ann_file: Path) -> None:
         """
-        🔧 新增：加载VQA标注答案（ground truth）
+        🔧 新增：加载VQA标注答案（ground truth）并计算置信度
 
         VQA标注文件格式：
         {
@@ -237,6 +263,18 @@ class COCODataLoader:
                 ...
             ]
         }
+
+        🔧 置信度计算方法：
+        1. 过滤掉 answer_confidence="no" 的标注
+        2. 统计剩余有效标注的答案分布
+        3. gt_consistency = 最常见答案的频率
+        4. gt_dist = 答案分布字典
+
+        示例：
+        - 原始10条标注，过滤掉2条"no"，剩余8条
+        - 答案"3"出现6次 → 6/8 = 0.75
+        - 答案"2"出现2次 → 2/8 = 0.25
+        - 结果：{'answer': '3', 'gt_consistency': 0.75, 'gt_dist': {'3': 0.75, '2': 0.25}}
         """
         with open(ann_file, 'r') as f:
             data = json.load(f)
@@ -245,10 +283,79 @@ class COCODataLoader:
         for annotation in data.get('annotations', []):
             question_id = annotation.get('question_id')
             if question_id:
+                # 存储原始标注
                 self.vqa_answers_by_question[question_id] = annotation
+
+                # 🔧 新增：计算置信度
+                gt_info = self._compute_gt_confidence(annotation)
+                self.vqa_gt_with_confidence[question_id] = gt_info
+
                 count += 1
 
-        self.logger.info(f"Loaded {count} VQA annotations (ground truth answers)")
+        self.logger.info(f"Loaded {count} VQA annotations with confidence scores")
+
+    def _compute_gt_confidence(self, annotation: Dict) -> Dict:
+        """
+        🔧 新增：计算VQA标注的置信度
+
+        Args:
+            annotation: VQA标注数据（包含10个answers）
+
+        Returns:
+            {
+                'answer': str,              # 最终答案
+                'gt_consistency': float,    # 置信度
+                'gt_dist': Dict[str, float] # 答案分布
+            }
+        """
+        answers_list = annotation.get('answers', [])
+
+        # ───────────────────────────────────────────────────────
+        # 步骤1：过滤掉 answer_confidence="no" 的标注
+        # ───────────────────────────────────────────────────────
+        valid_answers = []
+        for ans_data in answers_list:
+            confidence = ans_data.get('answer_confidence', 'yes')
+            answer = ans_data.get('answer', '').strip().lower()
+
+            # 过滤掉 "no" 置信度的标注
+            if confidence != 'no' and answer:
+                valid_answers.append(answer)
+
+        # 如果没有有效答案，使用原始的 multiple_choice_answer
+        if not valid_answers:
+            mc_answer = annotation.get('multiple_choice_answer', '').strip().lower()
+            return {
+                'answer': mc_answer,
+                'gt_consistency': 1.0,  # 默认置信度
+                'gt_dist': {mc_answer: 1.0}
+            }
+
+        # ───────────────────────────────────────────────────────
+        # 步骤2：统计答案分布
+        # ───────────────────────────────────────────────────────
+        from collections import Counter
+        answer_counts = Counter(valid_answers)
+        total_count = len(valid_answers)
+
+        # 计算频率分布
+        gt_dist = {
+            answer: count / total_count
+            for answer, count in answer_counts.items()
+        }
+
+        # ───────────────────────────────────────────────────────
+        # 步骤3：获取最常见答案（gt_consistency）
+        # ───────────────────────────────────────────────────────
+        most_common = answer_counts.most_common(1)[0]
+        most_common_answer = most_common[0]
+        gt_consistency = most_common[1] / total_count
+
+        return {
+            'answer': most_common_answer,
+            'gt_consistency': round(gt_consistency, 4),  # 保留4位小数
+            'gt_dist': {k: round(v, 4) for k, v in gt_dist.items()}  # 保留4位小数
+        }
 
     def _load_keypoints_json(self, ann_file: Path) -> None:
         """Load keypoints annotations from JSON directly (fallback)."""
@@ -335,19 +442,36 @@ class COCODataLoader:
         """
         return self.vqa_data_by_image.get(image_id, [])
 
-    def get_vqa_ground_truth(self, question_id: int) -> Optional[str]:
+    def get_vqa_ground_truth(self, question_id: int) -> Optional[Dict]:
         """
-        🔧 新增：获取VQA问题的标注答案（ground truth）
+        🔧 新增：获取VQA问题的标注答案及置信度
 
         Args:
             question_id: VQA问题ID
 
         Returns:
-            标注答案（投票最多的答案），如果不存在则返回None
+            {
+                'answer': str,              # 最终答案
+                'gt_consistency': float,    # 置信度（过滤no后最常见答案的频率）
+                'gt_dist': Dict[str, float] # 答案分布
+            }
+            如果不存在则返回None
         """
-        annotation = self.vqa_answers_by_question.get(question_id)
-        if annotation:
-            return annotation.get('multiple_choice_answer')
+        return self.vqa_gt_with_confidence.get(question_id)
+
+    def get_vqa_ground_truth_answer(self, question_id: int) -> Optional[str]:
+        """
+        🔧 兼容性方法：仅获取答案文本
+
+        Args:
+            question_id: VQA问题ID
+
+        Returns:
+            标注答案文本，如果不存在则返回None
+        """
+        gt_info = self.vqa_gt_with_confidence.get(question_id)
+        if gt_info:
+            return gt_info.get('answer')
         return None
 
     def get_vqa_annotation(self, question_id: int) -> Optional[Dict]:
@@ -364,14 +488,22 @@ class COCODataLoader:
 
     def _save_gt_mapping_to_cache(
         self,
-        gt_mapping: Dict[Tuple[str, str], str],
+        gt_mapping: Dict[Tuple[str, str], Dict],
         cache_path: str
     ) -> bool:
         """
         保存GT映射到缓存文件
 
+        🔧 新格式：保存完整的GT信息（answer、gt_consistency、gt_dist）
+
         Args:
-            gt_mapping: GT映射数据
+            gt_mapping: GT映射数据 {
+                (image_id, question): {
+                    'answer': str,
+                    'gt_consistency': float,
+                    'gt_dist': Dict[str, float]
+                }
+            }
             cache_path: 缓存文件路径
 
         Returns:
@@ -382,19 +514,30 @@ class COCODataLoader:
             cache_file = Path(cache_path)
             cache_file.parent.mkdir(parents=True, exist_ok=True)
 
+            # 构建保存数据（包含元数据）
+            save_data = {
+                'metadata': {
+                    'created_at': datetime.now().isoformat(),
+                    'total_questions': len(gt_mapping),
+                    'cache_version': '2.0',  # 新版本（包含置信度）
+                    'description': 'GT mapping with confidence and distribution'
+                },
+                'mapping': {}
+            }
+
             # 将tuple key转换为字符串key（JSON不支持tuple作为key）
-            serializable_mapping = {}
-            for (image_id, question), answer in gt_mapping.items():
+            for (image_id, question), gt_info in gt_mapping.items():
                 # 使用 "image_id||question" 作为key（||是分隔符，不太可能出现在问题中）
                 key_str = f"{image_id}||{question}"
-                serializable_mapping[key_str] = answer
+                save_data['mapping'][key_str] = gt_info
 
             # 保存为JSON格式
             with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(serializable_mapping, f, ensure_ascii=False, indent=2)
+                json.dump(save_data, f, ensure_ascii=False, indent=2)
 
             self.logger.info(f"✓ GT映射已保存到缓存文件: {cache_file}")
             self.logger.info(f"  - 映射条目数: {len(gt_mapping)}")
+            self.logger.info(f"  - 缓存版本: 2.0 (包含置信度和分布)")
             return True
 
         except Exception as e:
@@ -404,9 +547,13 @@ class COCODataLoader:
     def _load_gt_mapping_from_cache(
         self,
         cache_path: str
-    ) -> Optional[Dict[Tuple[str, str], str]]:
+    ) -> Optional[Dict[Tuple[str, str], Dict]]:
         """
         从缓存文件加载GT映射
+
+        🔧 支持新旧两种格式：
+        - 新格式（v2.0）：包含metadata和mapping，mapping包含完整GT信息
+        - 旧格式（v1.0）：仅包含answer字符串
 
         Args:
             cache_path: 缓存文件路径
@@ -424,32 +571,52 @@ class COCODataLoader:
 
             # 加载JSON文件
             with open(cache_file, 'r', encoding='utf-8') as f:
-                serializable_mapping = json.load(f)
+                loaded_data = json.load(f)
 
-            # 将字符串key转换回tuple key
-            gt_mapping = {}
-            for key_str, answer in serializable_mapping.items():
-                # 解析 "image_id||question" 格式
-                if '||' in key_str:
-                    parts = key_str.split('||', 1)  # 只分割第一个||
-                    if len(parts) == 2:
-                        image_id, question = parts
-                        gt_mapping[(image_id, question)] = answer
+            # 判断格式类型
+            if isinstance(loaded_data, dict) and 'metadata' in loaded_data and 'mapping' in loaded_data:
+                # 新格式（v2.0）：包含metadata和mapping
+                metadata = loaded_data['metadata']
+                serializable_mapping = loaded_data['mapping']
 
-            self.logger.info(f"✓ 从缓存加载GT映射: {cache_file}")
-            self.logger.info(f"  - 映射条目数: {len(gt_mapping)}")
-            return gt_mapping
+                self.logger.info(f"加载GT映射缓存（v{metadata.get('cache_version', '2.0')}）")
+                self.logger.info(f"  - 创建时间: {metadata.get('created_at', 'N/A')}")
+                self.logger.info(f"  - 条目数: {metadata.get('total_questions', 'N/A')}")
+
+                # 将字符串key转换回tuple key
+                gt_mapping = {}
+                for key_str, gt_info in serializable_mapping.items():
+                    # 解析 "image_id||question" 格式
+                    if '||' in key_str:
+                        parts = key_str.split('||', 1)  # 只分割第一个||
+                        if len(parts) == 2:
+                            image_id, question = parts
+                            gt_mapping[(image_id, question)] = gt_info
+
+                self.logger.info(f"✓ GT映射缓存加载成功: {len(gt_mapping)} 条")
+                return gt_mapping
+
+            else:
+                # 旧格式（v1.0）：仅包含answer字符串
+                self.logger.warning("检测到旧格式缓存文件（仅包含answer），将重新构建")
+                return None
 
         except Exception as e:
             self.logger.warning(f"加载GT映射缓存失败: {e}")
             return None
 
-    def build_gt_mapping(self, cache_mode: str = "auto", cache_file: str = None) -> Dict[Tuple[str, str], str]:
+    def build_gt_mapping(self, cache_mode: str = "auto", cache_file: str = None) -> Dict[Tuple[str, str], Dict]:
         """
-        🔧 改进：构建GT真值映射（用于校验B），支持缓存机制
+        🔧 改进：构建GT真值映射（包含置信度信息），支持缓存机制
 
         通过遍历已加载的VQA问题和答案，构建：
-        {(image_id, question): ground_truth_answer}
+        {
+            (image_id, question): {
+                'answer': str,              # 最终答案
+                'gt_consistency': float,    # 置信度
+                'gt_dist': Dict[str, float] # 答案分布
+            }
+        }
 
         Args:
             cache_mode: 缓存模式（枚举）
@@ -459,7 +626,7 @@ class COCODataLoader:
             cache_file: 缓存文件路径（从配置文件读取）
 
         Returns:
-            GT真值映射
+            GT真值映射（包含置信度信息）
         """
         # ───────────────────────────────────────────────────────
         # 从配置读取缓存文件路径
@@ -501,12 +668,21 @@ class COCODataLoader:
                 self._save_gt_mapping_to_cache(gt_mapping, cache_file)
             return gt_mapping
 
-    def _build_gt_mapping_from_coco(self) -> Dict[Tuple[str, str], str]:
+    def _build_gt_mapping_from_coco(self) -> Dict[Tuple[str, str], Dict]:
         """
         从COCO标注构建GT真值映射（内部方法）
 
+        🔧 新方案：存储完整的GT信息（答案、置信度、分布）
+
         Returns:
             GT真值映射
+            {
+                (image_id, question): {
+                    'answer': str,
+                    'gt_consistency': float,
+                    'gt_dist': Dict[str, float]
+                }
+            }
         """
         gt_mapping = {}
 
@@ -519,15 +695,13 @@ class COCODataLoader:
                 if not question_id or not question_text:
                     continue
 
-                # 获取标注答案
-                annotation = self.vqa_answers_by_question.get(question_id)
-                if annotation:
-                    gt_answer = annotation.get('multiple_choice_answer', '')
-                    if gt_answer:
-                        # key: (image_id, question)
-                        gt_mapping[(str(image_id), question_text)] = gt_answer
+                # 🔧 新方案：获取完整的GT信息（包含置信度）
+                gt_info = self.vqa_gt_with_confidence.get(question_id)
+                if gt_info:
+                    # key: (image_id, question)
+                    gt_mapping[(str(image_id), question_text)] = gt_info
 
-        self.logger.info(f"✓ 构建了 {len(gt_mapping)} 条GT真值映射")
+        self.logger.info(f"✓ 构建了 {len(gt_mapping)} 条GT真值映射（包含置信度）")
         return gt_mapping
 
     def get_image_ids(self, task: Optional[str] = None) -> List[int]:

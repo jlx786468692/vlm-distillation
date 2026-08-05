@@ -120,16 +120,24 @@ class VQAClosedLabelGenerator:
         question: str,
         question_type: str,
         image_id: Optional[str] = None,
-        candidate_pool: Optional[List[str]] = None  # 🔧 新增：动态候选答案池（用于 CHOICE 类型）
+        candidate_pool: Optional[List[str]] = None,  # 动态候选答案池（用于 CHOICE 类型）
+        ground_truth: Optional[str] = None,  # COCO标注答案作为硬标签
+        gt_consistency: Optional[float] = 1.0,  # 🔧 新增：GT置信度
+        gt_dist: Optional[Dict[str, float]] = None  # 🔧 新增：GT答案分布
     ) -> Dict[str, Any]:
         """
         生成软硬标签（官方标准流程）
+
+        🔧 新方案：
+        - 硬标签：直接使用COCO标注（ground truth）
+        - 置信度：使用 gt_consistency（过滤no后最常见答案的频率）
+        - 软标签：教师模型推理得到概率分布
 
         步骤：
         1. 加载候选词列表
         2. 推理并提取候选词logits
         3. 温度缩放 + softmax (软标签)
-        4. 从软标签推导硬标签（置信度用 T=1 原始logits计算）
+        4. 硬标签来自COCO标注，置信度使用 gt_consistency
 
         Args:
             image_path: 图像路径
@@ -137,6 +145,9 @@ class VQAClosedLabelGenerator:
             question_type: 问题类型（binary/counting/color/location/choice）
             image_id: 图像ID
             candidate_pool: 动态候选答案池（用于 CHOICE 类型，如 ["day", "night"]）
+            ground_truth: COCO标注答案（用作硬标签）
+            gt_consistency: GT置信度（过滤no后最常见答案的频率，范围0-1）
+            gt_dist: GT答案分布（过滤no后的答案频率分布）
 
         Returns:
             {
@@ -211,19 +222,46 @@ class VQAClosedLabelGenerator:
             self.logger.info(f"[Label Gen] closed_enumerate类型（{question_type}）")
             self.logger.info(f"[Label Gen] 使用弱约束prompt + 生成软标签")
 
-            # 🔧 步骤1：硬标签生成（贪婪解码）
-            result = self.teacher.inference_vqa(
-                image=image_path,
-                question=question,
-                return_logits=True,
-                generate_cot=False,
-                candidate_answers=None,  # 无候选池约束
-                is_strong_pool=False  # 弱约束
-            )
+            # 🔧 步骤1：硬标签生成
+            # 🔧 新方案：硬标签直接使用COCO标注（ground_truth）
+            # 置信度使用 gt_consistency（过滤no后最常见答案的频率）
+            if ground_truth:
+                # 使用COCO标注作为硬标签
+                answer = ground_truth
+                confidence = gt_consistency if gt_consistency is not None else 1.0
+                self.logger.info(
+                    f"[Label Gen] 硬标签来自COCO标注: {answer} "
+                    f"(置信度: {confidence:.4f})"
+                )
 
-            # 提取硬标签
-            answer = result.get('answer', '')
-            confidence = result.get('confidence', 0.0)
+                # 🔧 新增：记录GT分布（用于分析）
+                if gt_dist:
+                    self.logger.debug(f"[Label Gen] GT分布: {gt_dist}")
+
+                # 仍然需要教师模型推理获取logits（用于软标签）
+                result = self.teacher.inference_vqa(
+                    image=image_path,
+                    question=question,
+                    return_logits=True,
+                    generate_cot=False,
+                    candidate_answers=None,  # 无候选池约束
+                    is_strong_pool=False  # 弱约束
+                )
+            else:
+                # 回退：使用教师模型推理生成硬标签（如果没有COCO标注）
+                self.logger.warning(f"[Label Gen] 无COCO标注，使用教师模型推理生成硬标签")
+                result = self.teacher.inference_vqa(
+                    image=image_path,
+                    question=question,
+                    return_logits=True,
+                    generate_cot=False,
+                    candidate_answers=None,  # 无候选池约束
+                    is_strong_pool=False  # 弱约束
+                )
+
+                # 提取硬标签
+                answer = result.get('answer', '')
+                confidence = result.get('confidence', 0.0)
 
             self.logger.info(f"[Label Gen] 硬标签: {answer} (置信度: {confidence:.4f})")
 
@@ -257,20 +295,17 @@ class VQAClosedLabelGenerator:
 
         self.logger.info(f"[Label Gen] 使用固定候选池: {candidate_answers}")
 
-        # ───────────────────────────────────────────────────────
-        # 步骤2：阶段1推理 - 提取候选词原始logits（关键裁剪）
-        # ───────────────────────────────────────────────────────
+        # 🔧 步骤2：推理获取logits（用于软标签）
         # 🔧 关键：根据候选池类型选择合适的prompt
         # - 强候选池（closed_choice/closed_yesno）：使用强约束prompt（MUST pick from list）
         # - 弱候选池（closed_enumerate）：使用弱约束prompt（MAY consider list）
-        # 推理获取完整logits
         result = self.teacher.inference_vqa(
             image=image_path,
             question=question,
             return_logits=True,  # 获取logits
             generate_cot=False,
             candidate_answers=candidate_answers,  # 传入候选词（用于prompt）
-            is_strong_pool=is_strong_pool  # 🔧 新增：根据候选池类型选择prompt
+            is_strong_pool=is_strong_pool  # 根据候选池类型选择prompt
         )
 
         # 提取候选词logits
@@ -294,12 +329,29 @@ class VQAClosedLabelGenerator:
         self.logger.info(f"[Label Gen] 软标签分布: {soft_label['answer_distribution']}")
 
         # ───────────────────────────────────────────────────────
-        # 步骤4：由软标签推导硬标签
-        # 🔧 关键：置信度使用 T=1 原始logits直接softmax计算
+        # 步骤4：硬标签生成
+        # 🔧 新方案：硬标签直接使用COCO标注（ground_truth）
+        # 置信度使用 gt_consistency（过滤no后最常见答案的频率）
         # ───────────────────────────────────────────────────────
-        hard_label = self._derive_hard_label(soft_label, candidate_logits)
+        if ground_truth:
+            # 使用COCO标注作为硬标签
+            hard_label = {'answer': ground_truth, 'confidence': gt_consistency if gt_consistency is not None else 1.0}
+            self.logger.info(
+                f"[Label Gen] 硬标签来自COCO标注: {ground_truth} "
+                f"(置信度: {hard_label['confidence']:.4f})"
+            )
 
-        self.logger.info(f"[Label Gen] 硬标签: answer={hard_label['answer']}, confidence={hard_label['confidence']:.4f}")
+            # 🔧 新增：记录GT分布（用于分析）
+            if gt_dist:
+                self.logger.debug(f"[Label Gen] GT分布: {gt_dist}")
+        else:
+            # 回退：从软标签推导硬标签
+            self.logger.warning(f"[Label Gen] 无COCO标注，从软标签推导硬标签")
+            hard_label = self._derive_hard_label(soft_label, candidate_logits)
+            self.logger.info(
+                f"[Label Gen] 硬标签: answer={hard_label['answer']}, "
+                f"confidence={hard_label['confidence']:.4f}"
+            )
 
         return {
             'hard_label': hard_label,

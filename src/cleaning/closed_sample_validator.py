@@ -399,6 +399,12 @@ class ClosedSampleValidator:
         """
         校验B：GT真值与Hard标签语义一致性校验（支持多答案）
 
+        🔧 已废弃：硬标签现在直接使用COCO标注，此校验不再需要
+        - 硬标签来源：直接从COCO标注获取（ground truth）
+        - 检验B目的：验证教师模型预测的硬标签与标注一致性
+        - 现状：硬标签本身就是标注，检验B永远通过
+        - 保留原因：历史记录和可能的回退场景
+
         校验目标：教师生成硬标签与原始数据集标注答案相符
 
         🔧 改进：答案集合拆解 + 子集判断
@@ -420,6 +426,9 @@ class ClosedSampleValidator:
         Returns:
             (是否一致, 不一致原因)
         """
+        self.logger.warning("【校验B】已废弃 - 硬标签直接使用COCO标注，此校验不再需要")
+        # 直接返回通过（因为硬标签本身就是标注）
+        return True, ""
         self.logger.info("【校验B】开始GT与Hard一致性校验...")
 
         # 归一化
@@ -527,7 +536,7 @@ class ClosedSampleValidator:
         # ───────────────────────────────────────────────────────
         hard_label_answer = vqa_data.get('hard_label', {}).get('answer', '')
         soft_label_primary_answer = vqa_data.get('soft_label', {}).get('primary_answer', '')
-        cot_conclusion = vqa_data.get('cot_reasoning', {}).get('structured_reasoning', {}).get('conclusion', '')
+        cot_conclusion = vqa_data.get('cot_reasoning', {}).get('answer', '')  # 🔧 修改：直接从cot_reasoning获取answer
         candidate_pool = vqa_data.get('candidate_pool', [])
 
         is_consistent_a, reason_a = self.validate_triple_consistency(
@@ -561,34 +570,37 @@ class ClosedSampleValidator:
 
         # ───────────────────────────────────────────────────────
         # 校验B：GT真值与Hard标签校验
+        # 🔧 新方案：硬标签直接使用COCO标注，检验B不再需要
         # ───────────────────────────────────────────────────────
-        if ground_truth:
-            is_consistent_b, reason_b = self.validate_gt_hard_consistency(
-                ground_truth,
-                hard_label_answer
-            )
-
-            result['validation_b'] = {
-                'is_consistent': is_consistent_b,
-                'reason': reason_b
-            }
-
-            # 处罚
-            if not is_consistent_b:
-                if self.strict_closed_mode:
-                    # 一票否决
-                    result['deductions']['validation_b'] = {
-                        'veto': True,
-                        'reason': reason_b
-                    }
-                else:
-                    # 重度扣分
-                    result['deductions']['validation_b'] = {
-                        'deduction': 20,
-                        'reason': reason_b
-                    }
-
-                result['overall_valid'] = False
+        # if ground_truth:
+        #     is_consistent_b, reason_b = self.validate_gt_hard_consistency(
+        #         ground_truth,
+        #         hard_label_answer
+        #     )
+        #
+        #     result['validation_b'] = {
+        #         'is_consistent': is_consistent_b,
+        #         'reason': reason_b
+        #     }
+        #
+        #     # 处罚
+        #     if not is_consistent_b:
+        #         if self.strict_closed_mode:
+        #             # 一票否决
+        #             result['deductions']['validation_b'] = {
+        #                 'veto': True,
+        #                 'reason': reason_b
+        #             }
+        #         else:
+        #             # 重度扣分
+        #             result['deductions']['validation_b'] = {
+        #                 'deduction': 20,
+        #                 'reason': reason_b
+        #             }
+        #
+        #         result['overall_valid'] = False
+        #
+        # self.logger.info("【校验B】已跳过（硬标签直接使用COCO标注，无需检验）")
 
         return result
 

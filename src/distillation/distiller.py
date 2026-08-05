@@ -351,8 +351,27 @@ class Distiller:
                 if task == 'vqa':
                     questions = batch_data['annotations']['vqa'].get(image_id, [])
                     if questions:
-                        question = questions[0].get('question', '')
+                        question_data = questions[0]  # 获取第一个问题
+                        question = question_data.get('question', '')
+                        question_id = question_data.get('question_id')  # 🔧 新增：获取问题ID
                         task_result['question'] = question
+
+                        # 🔧 新增：从COCO标注直接获取硬标签（ground truth）及置信度
+                        ground_truth_info = None
+                        if question_id:
+                            ground_truth_info = self.data_manager.coco_loader.get_vqa_ground_truth(question_id)
+                            if ground_truth_info:
+                                # 存储完整的GT信息（答案、置信度、分布）
+                                task_result['ground_truth'] = ground_truth_info['answer']
+                                task_result['gt_consistency'] = ground_truth_info['gt_consistency']
+                                task_result['gt_dist'] = ground_truth_info['gt_dist']
+                                self.logger.info(
+                                    f"[Hard Label] 使用COCO标注答案: {ground_truth_info['answer']} "
+                                    f"(置信度: {ground_truth_info['gt_consistency']:.4f})"
+                                )
+                                self.logger.debug(
+                                    f"[Hard Label] GT分布: {ground_truth_info['gt_dist']}"
+                                )
 
                         # 🔧 新增：问题分类（官方标准分流逻辑）
                         question_type = None
@@ -378,43 +397,71 @@ class Distiller:
                                 question_type = None
 
                         # 🔧 新增：根据问题类型选择推理路径
-                        # 开放问题：单阶段无约束推理
-                        # 闭合问题：两阶段约束推理（当前流程）
+                        # 🔧 统一方案：开放和闭合问题都生成硬标签、软标签、CoT
                         if question_type == 'open_descriptive' and self.open_inference_gen:
                             self.logger.info(f"[Routing] Image {image_id}: 使用开放推理路径")
 
                             # ───────────────────────────────────────────────────────
-                            # 开放问答处理（官方标准）
+                            # 开放问答处理（统一方案）
                             # ───────────────────────────────────────────────────────
-                            # 核心原则：
-                            # 1. 无候选集 → 不生成 soft/hard 标签
-                            # 2. 自由长文本回答无需强制结构化推理 → 不生成 CoT
-                            # 3. 仅输出完整自然语言 answer（唯一监督文本）
+                            # 🔧 新方案：
+                            # 1. 硬标签：从COCO标注获取（与其他类型统一）
+                            # 2. 软标签：教师模型推理获取概率分布
+                            # 3. CoT：统一两段式格式（推理+答案）
                             # ───────────────────────────────────────────────────────
 
-                            # 开放推理：仅生成完整答案文本
-                            open_result = self.open_inference_gen.generate_vqa_open(
-                                image_path=image_path,
-                                question=question,
-                                image_id=str(image_id)
-                            )
+                            # Step 1: 硬标签（来自COCO标注）
+                            if ground_truth_info:
+                                task_result['hard_label'] = {
+                                    'answer': ground_truth_info['answer'],
+                                    'confidence': ground_truth_info['gt_consistency']
+                                }
+                                task_result['gt_consistency'] = ground_truth_info['gt_consistency']
+                                task_result['gt_dist'] = ground_truth_info['gt_dist']
+                                self.logger.info(
+                                    f"[Hard Label] 使用COCO标注答案: {ground_truth_info['answer']} "
+                                    f"(置信度: {ground_truth_info['gt_consistency']:.4f})"
+                                )
 
-                            # ✅ 仅存储 answer 字段（符合官方标准）
-                            task_result['answer'] = open_result.get('answer', '')
+                            # Step 2: 软标签（教师模型推理）
+                            if self.enable_soft_labels and self.closed_label_gen:
+                                # 使用闭合标签生成器，但传入None作为候选池（开放问题无约束）
+                                labels_result = self.closed_label_gen.generate_labels(
+                                    image_path=image_path,
+                                    question=question,
+                                    question_type='open',  # 标记为开放类型
+                                    image_id=str(image_id),
+                                    candidate_pool=None,  # 无候选池约束
+                                    ground_truth=ground_truth_info['answer'] if ground_truth_info else None,
+                                    gt_consistency=ground_truth_info['gt_consistency'] if ground_truth_info else 1.0,
+                                    gt_dist=ground_truth_info['gt_dist'] if ground_truth_info else None
+                                )
 
-                            # 保留其他元数据字段（用于追踪和调试）
+                                if labels_result:
+                                    task_result['soft_label'] = labels_result['soft_label']
+                                    self.logger.info(
+                                        f"[Soft Label] 开放问题软标签生成完成: "
+                                        f"primary_answer={labels_result['soft_label'].get('primary_answer', 'N/A')}"
+                                    )
+
+                            # Step 3: CoT（统一两段式格式）
+                            if self.enable_cot:
+                                primary_answer = None
+                                if task_result.get('hard_label'):
+                                    primary_answer = task_result['hard_label']['answer']
+
+                                cot = self._generate_task_cot(
+                                    task, batch_data, image_id, image_path,
+                                    primary_answer=primary_answer,
+                                    allowed_answers=None,  # 开放问题无候选集
+                                    question_type='open_descriptive'  # 🔧 新增：标记为开放问题
+                                )
+                                task_result['cot_reasoning'] = cot
+
+                            # 保留问题类型标记
                             task_result['question_type'] = 'open_descriptive'
                             task_result['inference_mode'] = 'open'
 
-                            # ❌ 开放问题不生成以下字段：
-                            # - hard_label（无候选集）
-                            # - soft_label（无概率分布）
-                            # - cot_reasoning（无强制结构化推理）
-                            # - allowed_answers（无候选集）
-
-                            # 直接跳到下一个 task
-                            image_result['tasks'][task] = task_result
-                            continue
                         else:
                             # ───────────────────────────────────────────────────────
                             # 闭合问答处理（官方标准流水线）
@@ -436,20 +483,26 @@ class Distiller:
 
                             self.logger.info(f"[Routing] Image {image_id}: 使用闭合推理路径（官方标准）")
 
-                            # 🔧 关键修复：使用官方标准标签生成器
+                            # 🔧 关键修复：使用官方标准标签生成器（硬标签来自COCO标注）
                             if self.closed_label_gen:
-                                # 官方标准流程：一次性生成软硬标签
+                                # 官方标准流程：
+                                # - 硬标签：直接使用COCO标注（ground truth）
+                                # - 置信度：使用 gt_consistency（过滤no后最常见答案的频率）
+                                # - 软标签：教师模型推理得到概率分布
                                 # 🔧 新增：如果是 CHOICE 类型，传入候选答案池
                                 labels_result = self.closed_label_gen.generate_labels(
                                     image_path=image_path,
                                     question=question,
                                     question_type=question_type,
                                     image_id=str(image_id),
-                                    candidate_pool=candidate_pool  # 🔧 新增：动态候选答案池
+                                    candidate_pool=candidate_pool,  # 动态候选答案池
+                                    ground_truth=ground_truth_info['answer'] if ground_truth_info else None,  # COCO标注答案
+                                    gt_consistency=ground_truth_info['gt_consistency'] if ground_truth_info else 1.0,  # 置信度
+                                    gt_dist=ground_truth_info['gt_dist'] if ground_truth_info else None  # 答案分布
                                 )
 
                                 if labels_result:
-                                    # ✅ 软硬标签一致（从同一分布推导）
+                                    # ✅ 硬标签来自COCO标注，软标签来自教师模型推理
                                     task_result['hard_label'] = labels_result['hard_label']
                                     task_result['soft_label'] = labels_result['soft_label']
 
@@ -459,8 +512,9 @@ class Distiller:
 
                                     self.logger.info(
                                         f"[Label Gen] ✓ 软硬标签生成完成: "
-                                        f"answer={labels_result['hard_label']['answer']}, "
-                                        f"confidence={labels_result['hard_label']['confidence']:.4f}"
+                                        f"hard_label={labels_result['hard_label']['answer']} (from GT), "
+                                        f"confidence={labels_result['hard_label']['confidence']:.4f}, "
+                                        f"primary_answer={labels_result['soft_label'].get('primary_answer', 'N/A')}"
                                     )
                                 else:
                                     self.logger.warning(f"[Label Gen] 标签生成失败")
@@ -485,7 +539,7 @@ class Distiller:
                                     )
                                     task_result['soft_label'] = soft_labels
 
-                            # Step 3: 生成 CoT（单独推理）
+                            # Step 3: CoT（统一两段式格式）
                             if self.enable_cot:
                                 primary_answer = None
                                 allowed_answers = None
@@ -501,7 +555,8 @@ class Distiller:
                                 cot = self._generate_task_cot(
                                     task, batch_data, image_id, image_path,
                                     primary_answer=primary_answer,
-                                    allowed_answers=allowed_answers
+                                    allowed_answers=allowed_answers,
+                                    question_type=question_type  # 🔧 新增：传递问题类型
                                 )
                                 task_result['cot_reasoning'] = cot
 
@@ -622,7 +677,8 @@ class Distiller:
         image_id: int,
         image_path: str,
         primary_answer: Optional[str] = None,
-        allowed_answers: Optional[List[str]] = None
+        allowed_answers: Optional[List[str]] = None,
+        question_type: Optional[str] = None  # 🔧 新增：问题类型
     ) -> Dict[str, Any]:
         """
         Generate CoT for specific task.
@@ -634,6 +690,7 @@ class Distiller:
             image_path: Image path
             primary_answer: Reference answer from hard_label (for VQA CoT)
             allowed_answers: List of allowed answers from soft_label (for VQA CoT)
+            question_type: Question type (open_descriptive, closed_choice, etc.)
         """
         if task == 'vqa':
             questions = batch_data['annotations']['vqa'].get(image_id, [])
@@ -644,7 +701,8 @@ class Distiller:
                     question=question,
                     image_id=str(image_id),
                     primary_answer=primary_answer,
-                    allowed_answers=allowed_answers
+                    allowed_answers=allowed_answers,
+                    question_type=question_type  # 🔧 新增：传递问题类型
                 )
             return {}
 

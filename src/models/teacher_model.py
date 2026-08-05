@@ -236,13 +236,14 @@ class TeacherModel:
         generate_cot: bool = False,
         primary_answer: Optional[str] = None,
         allowed_answers: Optional[List[str]] = None,
-        candidate_answers: Optional[List[str]] = None,  # 🔧 新增：候选答案集（用于硬标签阶段）
-        cache_visual: bool = True,  # 🔧 新增：是否缓存视觉特征
-        use_cached_visual: bool = False,  # 🔧 新增：是否使用缓存的视觉特征
-        image_id: Optional[str] = None,  # 🔧 新增：图像ID（用于缓存）
-        custom_prompt: Optional[str] = None,  # 🔧 新增：自定义 prompt（用于开放推理）
-        is_open_question: bool = False,  # 🔧 新增：是否为开放问题（返回完整答案）
-        is_strong_pool: bool = True  # 🔧 新增：是否为强候选池（MUST pick from list）
+        candidate_answers: Optional[List[str]] = None,  # 候选答案集（用于硬标签阶段）
+        cache_visual: bool = True,  # 是否缓存视觉特征
+        use_cached_visual: bool = False,  # 是否使用缓存的视觉特征
+        image_id: Optional[str] = None,  # 图像ID（用于缓存）
+        custom_prompt: Optional[str] = None,  # 自定义 prompt（用于开放推理）
+        is_open_question: bool = False,  # 是否为开放问题（返回完整答案）
+        is_strong_pool: bool = True,  # 是否为强候选池（MUST pick from list）
+        question_type: Optional[str] = None  # 🔧 新增：问题类型
     ) -> Dict[str, Any]:
         """
         Perform VQA inference.
@@ -261,18 +262,23 @@ class TeacherModel:
             custom_prompt: Custom prompt for open inference (optional)
             is_open_question: Whether this is an open question (return full answer instead of first word)
             is_strong_pool: Whether to use strong pool constraint (MUST pick from list) vs weak pool (MAY consider list)
+            question_type: Question type (open_descriptive, closed_choice, etc.)
 
         Returns:
             Dictionary with answer, confidence, and optionally logits/cot
         """
         # Construct prompt
         if custom_prompt:
-            # 🔧 新增：使用自定义 prompt（开放推理）
+            # 使用自定义 prompt（开放推理）
             system_prompt = None
             user_prompt = custom_prompt.format(question=question) if '{question}' in custom_prompt else custom_prompt
         elif generate_cot:
             # CoT阶段：使用allowed_answers（从软标签分布中提取）
-            system_prompt, user_prompt = self._construct_cot_prompt(question, task="vqa", primary_answer=primary_answer, allowed_answers=allowed_answers, is_strong_pool=is_strong_pool)
+            system_prompt, user_prompt = self._construct_cot_prompt(
+                question, task="vqa", primary_answer=primary_answer,
+                allowed_answers=allowed_answers, is_strong_pool=is_strong_pool,
+                question_type=question_type  # 🔧 新增：传递问题类型
+            )
         else:
             # 硬标签阶段：使用candidate_answers（从VQA词表得到）
             system_prompt = None
@@ -285,7 +291,7 @@ class TeacherModel:
             cache_visual=cache_visual,
             use_cached_visual=use_cached_visual,
             image_id=image_id,
-            is_open_question=is_open_question  # 🔧 传递开放问题标志
+            is_open_question=is_open_question  # 传递开放问题标志
         )
 
     def _inference_vqa_transformers(
@@ -377,14 +383,14 @@ class TeacherModel:
 
         return prompt.strip()
 
-    def _construct_cot_prompt(self, question: str, task: str, primary_answer: Optional[str] = None, allowed_answers: Optional[List[str]] = None, is_strong_pool: bool = True) -> tuple:
+    def _construct_cot_prompt(self, question: str, task: str, primary_answer: Optional[str] = None, allowed_answers: Optional[List[str]] = None, is_strong_pool: bool = True, question_type: Optional[str] = None) -> tuple:
         """
         Construct Chain-of-Thought prompt with system/user role separation.
 
         🔧 核心拆分原则：
         - YAML层：只存储纯文本内容，无角色标识
         - 代码层：完成角色分配，规则作system消息，参数作user消息
-        🔧 新增：根据候选池类型选择不同的prompt（强候选池 vs 弱候选池）
+        🔧 新增：根据候选池类型选择不同的prompt（强候选池 vs 弱候选池 vs 开放问题）
 
         Args:
             question: Question for VQA
@@ -392,12 +398,20 @@ class TeacherModel:
             primary_answer: Reference answer from hard_label (optional)
             allowed_answers: List of allowed answers from soft_label (optional)
             is_strong_pool: Whether to use strong pool constraint (default: True)
+            question_type: Question type (open_descriptive, closed_choice, etc.)
 
         Returns:
             (system_prompt, user_prompt) tuple
         """
-        # 🔧 根据候选池类型选择不同的prompt模板
-        if is_strong_pool:
+        # 🔧 新增：根据问题类型选择不同的prompt模板
+        if question_type == 'open_descriptive':
+            # 开放问题：使用开放问题专用prompt
+            system_key = f'prompts.cot.{task}_system_open'
+            user_key = f'prompts.cot.{task}_user_open'
+            fallback_system_key = f'prompts.cot.{task}_system'
+            fallback_user_key = f'prompts.cot.{task}_user'
+            pool_type_log = "开放问题（无候选池约束）"
+        elif is_strong_pool:
             # 强候选池：closed_choice / closed_yesno
             system_key = f'prompts.cot.{task}_system_strong'
             user_key = f'prompts.cot.{task}_user_strong'

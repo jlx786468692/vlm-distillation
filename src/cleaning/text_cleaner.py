@@ -133,8 +133,12 @@ class TextCleaner:
         """
         清洗 CoT 结构中的文本
 
+        🔧 支持两种格式：
+        - 新格式（两段式）：reasoning_paragraph, answer
+        - 旧格式（三段式）：structured_reasoning: {observation, analysis, conclusion}
+
         Args:
-            cot_dict: CoT 字典，可能包含 observation, analysis, conclusion
+            cot_dict: CoT 字典
 
         Returns:
             清洗后的 CoT 字典
@@ -142,6 +146,25 @@ class TextCleaner:
         if not cot_dict:
             return cot_dict
 
+        # ───────────────────────────────────────────────────────
+        # 新格式：两段式（reasoning_paragraph + answer）
+        # ───────────────────────────────────────────────────────
+        if 'reasoning_paragraph' in cot_dict or 'answer' in cot_dict:
+            # 清洗推理段落
+            if 'reasoning_paragraph' in cot_dict and cot_dict['reasoning_paragraph']:
+                text = self.clean_cot_quotes(cot_dict['reasoning_paragraph'])
+                cot_dict['reasoning_paragraph'] = self.clean(text)
+
+            # 清洗答案
+            if 'answer' in cot_dict and cot_dict['answer']:
+                text = self.clean_cot_quotes(cot_dict['answer'])
+                cot_dict['answer'] = self.clean(text)
+
+            return cot_dict
+
+        # ───────────────────────────────────────────────────────
+        # 旧格式：三段式（structured_reasoning 或直接字段）
+        # ───────────────────────────────────────────────────────
         # 处理嵌套的 structured_reasoning
         if 'structured_reasoning' in cot_dict:
             structured = cot_dict['structured_reasoning']

@@ -746,15 +746,32 @@ class RewardModelScorer:
         # 3. CoT结构化错乱（缺少关键段落）
         cot_reasoning = vqa_data.get('cot_reasoning', {})
         if cot_reasoning:
-            # 🔧 修复：支持嵌套的 structured_reasoning 结构
-            # 数据结构可能是：
-            # 1. cot_reasoning.observation (直接子字段)
-            # 2. cot_reasoning.structured_reasoning.observation (嵌套结构)
-            if 'structured_reasoning' in cot_reasoning:
-                # 嵌套结构
+            # 🔧 修复：支持两种格式
+            # 新格式（两段式）：cot_reasoning.reasoning_paragraph + cot_reasoning.answer
+            # 旧格式（三段式）：cot_reasoning.structured_reasoning.{observation, analysis, conclusion}
+            if 'reasoning_paragraph' in cot_reasoning or 'answer' in cot_reasoning:
+                # 新格式：检查两段式字段
+                missing_fields = []
+                if 'reasoning_paragraph' not in cot_reasoning or not cot_reasoning['reasoning_paragraph']:
+                    missing_fields.append('reasoning_paragraph')
+                if 'answer' not in cot_reasoning or not cot_reasoning['answer']:
+                    missing_fields.append('answer')
+
+                if missing_fields:
+                    deductions['incomplete_cot'] = {
+                        'deduction': 10,
+                        'reason': f"CoT缺少字段: {missing_fields}"
+                    }
+            elif 'structured_reasoning' in cot_reasoning:
+                # 旧格式：嵌套结构
                 structured = cot_reasoning.get('structured_reasoning', {})
                 required_sections = ['observation', 'analysis', 'conclusion']
                 missing_sections = [s for s in required_sections if s not in structured or not structured[s]]
+                if missing_sections:
+                    deductions['incomplete_cot'] = {
+                        'deduction': 10,
+                        'reason': f"CoT缺少段落: {missing_sections}"
+                    }
             else:
                 # 直接子字段结构
                 required_sections = ['observation', 'analysis', 'conclusion']
@@ -798,7 +815,8 @@ class RewardModelScorer:
         triple_consistent = True  # 标记三元是否一致
         if self.closed_validator:
             soft_label_primary_answer = vqa_data.get('soft_label', {}).get('primary_answer', '')
-            cot_conclusion = vqa_data.get('cot_reasoning', {}).get('structured_reasoning', {}).get('conclusion', '')
+            # 🔧 修改：从新格式获取CoT答案
+            cot_conclusion = vqa_data.get('cot_reasoning', {}).get('answer', '')
 
             self.logger.info(f"【校验A检查】准备执行校验A...")
             self.logger.info(f"  - hard_label_answer: {hard_label_answer}")

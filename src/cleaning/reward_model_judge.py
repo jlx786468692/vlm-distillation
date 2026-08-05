@@ -290,10 +290,16 @@ Score:"""
                 # 提取 CoT reasoning
                 cot_data = vqa_data.get('cot_reasoning', {})
                 if isinstance(cot_data, dict):
-                    structured = cot_data.get('structured_reasoning', {})
-                    if structured:
-                        cot_reasoning = '\n'.join([
-                            f"{k}: {v}" for k, v in structured.items()
+                    # 🔧 修改：支持新格式（两段式）
+                    if 'reasoning_paragraph' in cot_data:
+                        # 新格式：reasoning_paragraph + answer
+                        cot_reasoning = f"Reasoning: {cot_data.get('reasoning_paragraph', '')}\nAnswer: {cot_data.get('answer', '')}"
+                    else:
+                        # 旧格式：structured_reasoning
+                        structured = cot_data.get('structured_reasoning', {})
+                        if structured:
+                            cot_reasoning = '\n'.join([
+                                f"{k}: {v}" for k, v in structured.items()
                         ])
 
             # ───────────────────────────────────────────────────────
