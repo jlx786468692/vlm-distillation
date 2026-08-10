@@ -57,13 +57,21 @@ class QuestionType(str, Enum):
             QuestionType.CLOSED_ENUMERATE
             >>> QuestionType.CHOICE.to_major_category()
             QuestionType.CLOSED_CHOICE
+
+        🔧 修复：location 答案空间开放，应归类为开放问题
         """
         mapping = {
             QuestionType.CHOICE: QuestionType.CLOSED_CHOICE,
             QuestionType.BINARY: QuestionType.CLOSED_YESNO,
             QuestionType.COUNT: QuestionType.CLOSED_ENUMERATE,
             QuestionType.COLOR: QuestionType.CLOSED_ENUMERATE,
-            QuestionType.LOCATION: QuestionType.CLOSED_ENUMERATE,
+            # 🔧 修复：location 答案空间开放，改为开放问题
+            # 原因：位置描述可以是任意自然语言表达，如：
+            # - "on the left side of the table"
+            # - "behind the tree in the background"
+            # - "next to the red car parked on the street"
+            # 不像颜色/计数有固定的候选集
+            QuestionType.LOCATION: QuestionType.OPEN_TYPE,  # 🔧 修改：CLOSED_ENUMERATE → OPEN_TYPE
             QuestionType.OPEN: QuestionType.OPEN_TYPE,
             # 4大类映射到自身
             QuestionType.CLOSED_CHOICE: QuestionType.CLOSED_CHOICE,
@@ -282,10 +290,29 @@ class QuestionClassifier:
         ]
 
         # 是非问句（需要检查是否以这些词开头）
+        # 🔧 修复：添加所有常见的情态动词开头
         self.yes_no_keywords = [
-            "is there", "are there", "is it", "are they",  # 官方标准
-            "does", "do you", "can you", "could you",
-            "is ", "are ", "was ", "were "
+            # 存在类问句
+            "is there", "are there", "is it", "are they",
+            "was there", "were there", "was it", "were they",
+
+            # 情态动词问句（Would/Should/Could/Might等）
+            "would", "should", "could", "might", "will", "shall",
+            "would you", "should you", "could you", "might you", "will you",
+            "would it", "should it", "could it", "might it", "will it",
+            "would there", "should there", "could there", "might there", "will there",
+
+            # 助动词问句
+            "does", "do you", "do they", "does it", "do these", "do those",
+            "did", "did you", "did it", "did they",
+
+            # 能力/许可问句
+            "can you", "can it", "can they", "can we",
+            "may", "may you", "may it",
+
+            # 状态问句
+            "is ", "are ", "was ", "were ",
+            "has ", "have ", "had "
         ]
 
         # 位置问句

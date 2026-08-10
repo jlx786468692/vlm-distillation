@@ -14,186 +14,147 @@
 
 prompts:
   # ==================
-  # Standard Prompt (闭合问题) - 两阶段约束推理
+  # Unified Prompts - 一次推理同时生成logits和CoT
   # ==================
+  # 🔧 新方案：一次推理同时获取：
+  # - logits（用于软标签）
+  # - 推理过程（用于CoT）
+  # - 最终答案（用于验证）
   #
-  # 🔧 关键区分：
-  # - closed_choice / closed_yesno：强候选池（MUST pick from list）
-  # - closed_enumerate：弱候选池（MAY consider list，但不强制）
-  #
-
-  standard:
-    # ==================
-    # VQA - 强候选池（closed_choice / closed_yesno）
-    # ==================
-    # 适用：选择型问题（A or B?）、是否问题（yes/no）
-    # 特点：必须从候选列表中选择，不允许其他答案
-    #
-    vqa_strong: |
-      Look at the image and answer the following question.
-      Question: {question}
-
-      CANDIDATE ANSWERS (you MUST pick the EXACT text from this list ONLY):
-      {candidate_answers}
-
-      STRICT REQUIREMENTS:
-      1. Output ONLY the exact candidate text, single word only.
-      2. All characters lowercase only.
-      3. No punctuation, no extra explanations, no additional words.
-      4. Examples:
-          Candidates ["yes", "no"] → output "yes"
-          Candidates ["day", "night"] → output "day"
-
-      Answer:
-
-    # ==================
-    # VQA - 弱候选池（closed_enumerate）
-    # ==================
-    # 适用：计数问题（counting）、颜色问题（color）、位置问题（location）
-    # 特点：候选池仅为参考，如果正确答案不在列表中，可以输出正确答案
-    # ❌ 禁止强约束：不要写 "you MUST pick from list"
-    #
-    vqa_weak: |
-      Look at the image and answer the following question.
-      Question: {question}
-
-      REFERENCE ANSWERS (for guidance, you may consider these common answers):
-      {candidate_answers}
-
-      OUTPUT REQUIREMENTS:
-      1. Output a single word or number as your answer.
-      2. If your answer matches one of the reference answers, use the exact text.
-      3. If your answer is NOT in the reference list, output the correct answer anyway.
-      4. For counting questions: use Arabic numerals (1, 2, 3) NOT words (one, two).
-      5. For color questions: use lowercase color words (red, blue, dark blue).
-      6. For location questions: use lowercase location words (left, right, top-left).
-      7. No punctuation, no extra explanations.
-
-      EXAMPLES:
-      - Reference: ["one", "two", "three"] → Output: "2" (Arabic numeral)
-      - Reference: ["red", "blue", "green"] → Output: "dark blue" (if correct color is dark blue)
-      - Reference: ["left", "right", "center"] → Output: "top-left" (if correct location is top-left)
-
-      Answer:
-
-    # ==================
-    # 兼容旧版本（保持向后兼容）
-    # ==================
-    vqa: |
-      Look at the image and answer the following question.
-      Question: {question}
-
-      CANDIDATE ANSWERS (you MUST pick the exact text from this list only):
-      {candidate_answers}
-
-      REQUIREMENTS:
-      1. Output ONLY the exact candidate text, single word only.
-      2. If candidate answers are number words (one/two/three), DO NOT output Arabic numerals like 1/2/3.
-      3. All characters lowercase only.
-      4. No punctuation, no extra explanations, no additional words.
-      5. Examples:
-          Candidates ["yes", "no"] → output "yes"
-          Candidates ["one", "two", "three"] → output "1"
-
-      Answer:
-
-  # ==================
-  # CoT Prompt - 统一两段式格式
-  # ==================
-  #
-  # 🔧 统一方案：
-  # - 内在逻辑：观察→分析→结论
-  # - 外在形式：两段式（[Reasoning]...[Answer]...）
-  # - 不使用显式分段标签（如"观察："/"分析："/"结论："）
+  # 输出格式：两段式
+  # [Reasoning] 推理段落
+  # [Answer] 最终答案
   #
 
-  cot:
-    # ============================================================
-    # VQA - 强候选池（closed_choice / closed_yesno）
-    # ============================================================
-    # 适用：选择型问题（A or B?）、是否问题（yes/no）
-    # 特点：必须从候选列表中选择，不允许其他答案
-    #
+  # ============================================================
+  # Type 1: 开放问题（Open Questions）
+  # ============================================================
+  # 适用：描述类、原因类、开放性问题
+  # 特点：无候选集约束，自由回答
+  #
 
-    # system: 强约束版本 - 两段式
-    vqa_system_strong: |
-      TASK: Answer the question by selecting exactly one answer from the given allowed answer list.
+  open:
+    vqa_system: |
+      TASK: Answer the open-ended question based on the image content.
+
+      You must provide:
+      1. A reasoning paragraph describing your visual analysis
+      2. A concise final answer
 
       STRICT MANDATORY RULES:
       1. Reasoning Writing Rule
         Write a coherent natural paragraph following the logic: observe visual features → analyze relevance → derive conclusion.
-        - Only describe visual features that directly help distinguish different candidate answers.
-        - Remove all irrelevant background, scene description, environmental introduction.
-        - Do not add common sense popular science, light/depth color change logic and other extra knowledge.
-        - No repeated descriptions of the same visual feature, keep sentences concise.
-        - Do not use list symbols such as "-" to split content.
-        - Do not use explicit section labels like "Observation:", "Analysis:", "Conclusion:".
+        - All reasoning must be derived ONLY from visible elements in the image
+        - Strictly prohibit hallucinations - do not describe what you cannot clearly see
+        - Provide sufficient visual details to support your reasoning
+        - Do not use list symbols such as "-" to split content
+        - Do not use explicit section labels like "Observation:", "Analysis:", "Conclusion:"
 
       2. Answer Writing Rule
-        Output only the single answer text selected from the allowed answers.
-        - No explanatory sentences, guiding sentences or punctuation.
-        - No markdown symbols.
+      Output a concise noun phrase (1-5 words maximum).
+      - The answer MUST be the direct answer, not a full sentence.
+      - Examples:
+        - Question: "What is the man sitting on?" → Answer: "bench"
+        - Question: "What is the person wearing?" → Answer: "white coat"
+        - Question: "What is the person doing?" → Answer: "sitting"
+      - FORBID complete sentences like "The man is sitting on a bench."
+      - No markdown symbols
 
       3. Output Format Absolute Restrictions (Violation is prohibited)
-        - FORBID ALL MARKDOWN SYMBOLS: No #, ###, *, **, backtick, separator line, bold mark, title mark of any kind.
+        - FORBID ALL MARKDOWN SYMBOLS: No #, ###, *, **, backtick, separator line, bold mark, title mark of any kind
         - The output must be exactly two parts with special markers:
           [Reasoning]Your coherent reasoning paragraph here.
           [Answer]Your final answer here.
-        - No extra line breaks, decorative symbols, indent marks.
+        - No extra line breaks, decorative symbols, indent marks
 
       STANDARD CORRECT OUTPUT EXAMPLE FOR REFERENCE:
-      [Reasoning] Only one person on the left foreground wears headphones, and no other people in the picture have headphones. The visual count matches one, and there is no visual evidence supporting other numerical answers.
-      [Answer] one
+      [Reasoning] The person is wearing a white coat and holding a stethoscope, standing in a room with medical equipment visible in the background. These visual cues indicate the person is likely a medical professional, specifically a doctor.
+      [Answer] A doctor
 
-    # user: 强约束版本
-    vqa_user_strong: |
+    vqa_user: |
       Question: {question}
-      ALLOWED ANSWERS (you MUST select from this list): {allowed_answers}
-      PRIMARY ANSWER: {primary_answer}
-      PROBABILITY DISTRIBUTION: {answer_distribution}
 
       INSTRUCTIONS:
       Write your response in exactly two parts:
-      [Reasoning]Write a coherent paragraph describing relevant visual features and reasoning which answer best matches.
-      [Answer]Select ONE answer from the allowed answers list.
+      [Reasoning] Write a coherent paragraph describing relevant visual features and deriving your answer.
+      [Answer] Provide your final answer.
 
-    # ============================================================
-    # VQA - 弱候选池（closed_enumerate）
-    # ============================================================
-    # 适用：计数问题（counting）、颜色问题（color）、位置问题（location）
-    # 特点：候选池仅为参考，如果正确答案不在列表中，可以输出正确答案
-    # ❌ 禁止强约束：不要写 "you MUST select from list"
-    #
+  # ============================================================
+  # Type 2: 有候选集的闭合问题（Closed with Candidates）
+  # ============================================================
+  # 适用：选择型问题（A or B?）、是否问题（yes/no）
+  # 特点：必须从候选列表中选择
+  #
 
-    # system: 弱约束版本 - 两段式
-    vqa_system_weak: |
+  closed_with_candidates:
+    vqa_system: |
+      TASK: You are given a question and a list of candidate answers. Select EXACTLY ONE candidate that is best supported by direct visual observation.
+
+      OUTPUT STRUCTURE (exactly two lines, no exceptions):
+      [Reasoning] A single paragraph following: observable visual evidence → comparison across candidates → selection.
+      [Answer] The exact text of your chosen candidate.
+
+      REASONING RULES:
+      1. Visual Grounding: Every claim must reference a specific, directly observable visual feature (color, shape, count, position, text, object presence/absence). No inferred states, intentions, or off-screen context.
+      2. Candidate Comparison: Explicitly state why the chosen candidate is supported AND why at least one other candidate is less supported or ruled out by what you see.
+      3. Language Ban: DO NOT use any of these words: seems, appears, suggests, indicates, implies, might, maybe, probably, likely, would, could, presumably, as if, looks like, gives the impression, it is possible, reasonably concludes.
+      4. No markdown, no list symbols (-, *, #), no section labels (Observation:, Analysis:), no extra line breaks.
+
+      ANSWER RULES:
+      - Output ONLY the exact text of one candidate from the list. No punctuation, no explanation, no extra words.
+      - If the candidate list contains "Yes" and "No", output exactly "Yes" or "No" (case-sensitive to match the list).
+
+      EXAMPLE:
+      [Reasoning] The vehicle has a long rectangular body with multiple rows of side windows and a flat front windshield, matching the structural layout of a bus. A car would have fewer windows and a shorter body; a truck would show an open cargo area. These traits are not present.
+      [Answer] bus
+
+    vqa_user: |
+      Question: {question}
+      CANDIDATE LIST: {candidate_answers}
+
+      Respond in exactly two lines: [Reasoning]... and [Answer]...
+
+  # ============================================================
+  # Type 3: 枚举类闭合问题（Closed Enumerate）
+  # ============================================================
+  # 适用：计数问题（counting）、颜色问题（color）、位置问题（location）
+  # 特点：有参考答案但可输出不在列表中的正确答案
+  #
+
+  closed_enumerate:
+    vqa_system: |
       TASK: Answer the visual enumeration question concisely based on image content.
+
+      You must provide:
+      1. A reasoning paragraph describing your visual analysis
+      2. A concise final answer
 
       STRICT MANDATORY RULES:
       1. Reasoning Writing Rule
         Write a coherent natural paragraph following the logic: observe visual features → analyze relevance → derive conclusion.
-        - Only write visual features that directly help answer the question.
-        - Remove all irrelevant background, scene description, environmental introduction.
-        - Do not add common‑sense popular science and extra outside knowledge.
-        - No repeated descriptions of the same visual feature, keep sentences concise.
-        - Do not use list symbols such as "-" to split content.
-        - Do not use explicit section labels like "Observation:", "Analysis:", "Conclusion:".
+        - Only write visual features that directly help answer the question
+        - Remove all irrelevant background, scene description, environmental introduction
+        - Do not add common-sense popular science and extra outside knowledge
+        - No repeated descriptions of the same visual feature, keep sentences concise
+        - Do not use list symbols such as "-" to split content
+        - Do not use explicit section labels like "Observation:", "Analysis:", "Conclusion:"
 
       2. Answer Writing Rule
         Output only the final answer phrase.
-        - No explanatory sentences, guiding sentences or punctuation.
-        - No markdown symbols.
+        - No explanatory sentences, guiding sentences or punctuation
+        - No markdown symbols
 
       3. Output Format Absolute Restrictions (Violation is prohibited)
-        - FORBID ALL MARKDOWN SYMBOLS: No #, ###, *, **, backtick, separator line, bold mark, title mark of any kind.
+        - FORBID ALL MARKDOWN SYMBOLS: No #, ###, *, **, backtick, separator line, bold mark, title mark of any kind
         - The output must be exactly two parts with special markers:
           [Reasoning]Your coherent reasoning paragraph here.
           [Answer]Your final answer here.
-        - No extra line breaks, decorative symbols, indent marks.
+        - No extra line breaks, decorative symbols, indent marks
 
-      4. Sub‑type special output rules
-        - For counting questions: Output arabic numerals such as 1,2,3. Never use english number words like one, two, three.
-        - For color questions: Output concise color description, light/dark modifiers are allowed.
+      4. Sub-type special output rules
+        - For counting questions: Output arabic numerals such as 1, 2, 3. Never use english number words like one, two, three.
+        - For color questions: 
+          - FORBIDDEN: compound color words (e.g., "greenish-blue", "blue-green", "purplish-red").
         - For location questions: Output concise spatial position phrase.
 
       STANDARD CORRECT OUTPUT EXAMPLES FOR REFERENCE:
@@ -209,117 +170,13 @@ prompts:
       [Reasoning] The book lies upon the desk surface. Visual spatial relationship shows the book is on the desk.
       [Answer] on the desk
 
-    # user: 弱约束版本
-    vqa_user_weak: |
-      Question: {question}
-      ENUM_SUBTYPE: {enum_subtype}
-
-      INSTRUCTIONS:
-      Write your response in exactly two parts:
-      [Reasoning]Write a coherent paragraph describing relevant visual features and reasoning.
-      [Answer]Output concise answer following subtype rules.
-
-    # ============================================================
-    # VQA - 开放问题（统一方案）
-    # ============================================================
-    # 🔧 新方案：开放问题也生成硬标签、软标签、CoT
-    # CoT格式与闭合问题统一：两段式（推理+答案）
-    #
-
-    # system: 开放问题版本 - 两段式
-    vqa_system_open: |
-      TASK: Answer the open-ended question based on image content.
-
-      STRICT MANDATORY RULES:
-      1. Reasoning Writing Rule
-        Write a coherent natural paragraph following the logic: observe visual features → analyze relevance → derive conclusion.
-        - All reasoning must be derived only from visible elements in the image.
-        - Strictly prohibit hallucinations - do not describe what you cannot clearly see.
-        - Provide sufficient visual details to support your reasoning.
-        - Do not use list symbols such as "-" to split content.
-        - Do not use explicit section labels like "Observation:", "Analysis:", "Conclusion:".
-        - Do not list multiple separate possible explanations - output only the single most reasonable inference.
-
-      2. Answer Writing Rule
-        Output only the final answer phrase or sentence.
-        - No explanatory sentences, guiding sentences.
-        - No markdown symbols.
-
-      3. Output Format Absolute Restrictions (Violation is prohibited)
-        - FORBID ALL MARKDOWN SYMBOLS: No #, ###, *, **, backtick, separator line, bold mark, title mark of any kind.
-        - The output must be exactly two parts with special markers:
-          [Reasoning]Your coherent reasoning paragraph here.
-          [Answer]Your final answer here.
-        - No extra line breaks, decorative symbols, indent marks.
-
-      STANDARD CORRECT OUTPUT EXAMPLE FOR REFERENCE:
-      [Reasoning]The person is wearing a white coat and holding a stethoscope, standing in a room with medical equipment visible in the background. These visual cues indicate the person is likely a medical professional, specifically a doctor.
-      [Answer]A doctor
-
-    # user: 开放问题版本
-    vqa_user_open: |
-      Question: {question}
-
-      INSTRUCTIONS:
-      Write your response in exactly two parts:
-      [Reasoning]Write a coherent paragraph describing relevant visual features and deriving the answer.
-      [Answer]Provide your final answer.
-
-    # ============================================================
-    # 兼容旧版本（保持向后兼容）
-    # ============================================================
-    # system: 简洁的任务定义和规则
-    vqa_system: |
-      TASK: Answer the question by selecting exactly one answer from the given allowed answer list.
-
-      STRICT MANDATORY RULES:
-      1. Reasoning Writing Rule
-        Write a coherent natural paragraph following the logic: observe visual features → analyze relevance → derive conclusion.
-        - Only write visual features that directly help distinguish different candidate answers.
-        - Remove all irrelevant background, scene description, environmental introduction.
-        - Do not add common sense popular science, light/depth color change logic and other extra knowledge.
-        - No repeated descriptions of the same visual feature, keep sentences concise.
-        - Do not use list symbols such as "-" to split content.
-        - Do not use explicit section labels like "Observation:", "Analysis:", "Conclusion:".
-
-      2. Answer Writing Rule
-        Output only the single answer text selected from the allowed answers.
-        - No explanatory sentences, guiding sentences or punctuation.
-        - No markdown symbols.
-
-      3. Output Format Absolute Restrictions (Violation is prohibited)
-        - FORBID ALL MARKDOWN SYMBOLS: No #, ###, *, **, backtick, separator line, bold mark, title mark of any kind.
-        - The output must be exactly two parts with special markers:
-          [Reasoning]Your coherent reasoning paragraph here.
-          [Answer]Your final answer here.
-        - No extra line breaks, decorative symbols, indent marks.
-
-      STANDARD CORRECT OUTPUT EXAMPLE FOR REFERENCE:
-      [Reasoning] Only one person on the left foreground wears headphones, and no other people in the picture have headphones. The visual count matches one, and there is no visual evidence supporting other numerical answers.
-      [Answer] one
-
-    # user: 具体问题和约束
     vqa_user: |
       Question: {question}
-      ALLOWED ANSWERS: {allowed_answers}
-      PRIMARY ANSWER: {primary_answer}
-      PROBABILITY DISTRIBUTION: {answer_distribution}
 
       INSTRUCTIONS:
       Write your response in exactly two parts:
-      [Reasoning]Write a coherent paragraph describing relevant visual features and reasoning which answer best matches.
-      [Answer]Select ONE answer from the allowed answers list.
-
-  # ==================
-  # Default
-  # ==================
-
-  default:
-    standard: "Analyze this image."
-    cot_system: |
-      TASK: Analyze step by step.
-      FORMAT: Plain text, no markdown.
-    cot_user: "Analysis:"
+      [Reasoning] Write a coherent paragraph describing relevant visual features and deriving your answer.
+      [Answer] Output concise answer following the enumeration rules.
 
 # ============================================================
 # Judge Prompts - 模型打分提示词

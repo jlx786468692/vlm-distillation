@@ -34,6 +34,10 @@ class VQATokenFilter:
             config_path: 主配置文件路径，默认为 configs/default.yaml
                         如果为None，则自动查找
         """
+        # 🔧 初始化 logger
+        import logging
+        self.logger = logging.getLogger(__name__)
+
         # 加载主配置文件，获取token过滤器配置路径
         self.main_config_path = config_path
         self.config = self._load_config()
@@ -146,6 +150,21 @@ class VQATokenFilter:
             if canonical not in self.canonical_to_variants:
                 self.canonical_to_variants[canonical] = []
             self.canonical_to_variants[canonical].append(variant)
+
+        # ───────────────────────────────────────────────────────
+        # 🔧 新增：候选词书写变体映射（用于固定候选池问题）
+        # ───────────────────────────────────────────────────────
+        # 关键：每个候选词独立合并，绝不跨候选合并
+        # 用途：closed_choice / closed_yesno 等固定候选池问题
+        # ───────────────────────────────────────────────────────
+        candidate_variants_config = self.config.get('candidate_variants', {})
+
+        self.candidate_variants = {}
+        for canonical, variants in candidate_variants_config.items():
+            # canonical 自身也算变体之一
+            self.candidate_variants[canonical] = [canonical] + (variants if isinstance(variants, list) else [])
+
+        self.logger.info(f"候选词变体映射: {len(self.candidate_variants)} 个canonical词")
 
     def _init_blacklists(self):
         """初始化黑名单"""
@@ -268,6 +287,116 @@ class VQATokenFilter:
         self.color_question_keywords = set(keywords_config.get('color', []))
         self.binary_question_keywords = set(keywords_config.get('binary', []))
 
+    # ===== 新增：非英文Token过滤 =====
+
+    def is_english_token(self, token: str, question_type: Optional[str] = None) -> bool:
+        """
+        判断token是否为有效英文token（剔除非英文字符）
+
+        规则：
+        - 数字类任务（counting）：保留 a-zA-Z0-9\-'
+        - 其他任务：保留 a-zA-Z\-'
+
+        Args:
+            token: 要检查的token
+            question_type: 问题类型（用于判断是否为数字类任务）
+
+        Returns:
+            True如果token符合英文规则，False如果包含非英文字符
+        """
+        if not token:
+            return False
+
+        # 🔧 根据任务类型选择正则规则
+        # 🔧 修复：QuestionType.BINARY = "yes_no"（不是"binary"）
+        if question_type == 'counting' or question_type in ['binary', 'yes_no', 'closed_yesno']:
+            # 数字类任务：允许数字字符
+            pattern = r'^[a-zA-Z0-9\-\' ]+$'
+        else:
+            # 其他任务：只允许字母和少量符号
+            pattern = r'^[a-zA-Z\-\' ]+$'
+
+        # 检查是否匹配
+        if re.match(pattern, token):
+            return True
+        else:
+            self.logger.debug(f"[English Filter] 过滤非英文token: '{token}'")
+            return False
+
+    # ===== 新增：残缺子词过滤 =====
+
+    def is_complete_word_token(
+        self,
+        token_id: int,
+        token_str: str,
+        tokenizer: Any
+    ) -> bool:
+        """
+        判断token是否为完整词（而非残缺子词片段）
+
+        关键点：
+        1. 不能只看字符串，要结合token_id和tokenizer元信息
+        2. 很多tokenizer的子词会带前缀 ▁（空格符号），解码后会丢失
+        3. 需要检查tokenizer的词汇表，判断是否为子词片段
+
+        Args:
+            token_id: token的ID
+            token_str: token解码后的字符串
+            tokenizer: tokenizer实例（用于检查元信息）
+
+        Returns:
+            True如果为完整词，False如果为残缺子词片段
+        """
+        if not token_str:
+            return False
+
+        # 🔧 方法1：检查tokenizer的词汇表
+        # 通过token_id获取原始token表示（包含子词标记）
+        try:
+            # 获取原始token表示（可能包含 ▁, Ġ 等子词标记）
+            raw_token = tokenizer.convert_ids_to_tokens(token_id)
+
+            # 🔧 检查是否为子词片段（带前缀）
+            # 常见子词前缀：
+            # - GPT系列：Ġ (表示空格后的词)
+            # - BERT: ## (表示子词)
+            # - SentencePiece: ▁ (表示词首)
+            subword_prefixes = ['Ġ', '##', '▁', '@@']
+
+            # 如果原始token以子词前缀开头，说明它是子词片段
+            for prefix in subword_prefixes:
+                if raw_token.startswith(prefix):
+                    # 但这是词首子词（如 ▁cat），是完整的词
+                    # 只有非词首的子词（如 ##cat）才是残缺片段
+                    if prefix in ['##', '@@']:
+                        self.logger.debug(
+                            f"[Subword Filter] 过滤残缺子词: '{token_str}' "
+                            f"(raw_token='{raw_token}', prefix='{prefix}')"
+                        )
+                        return False
+                    break
+
+            # 🔧 方法2：检查字符串特征（残缺片段模式）
+            # 常见残缺片段：explo, anthrop, rec 等
+            # 特征：短（3-6字符）、无空格、不是完整词
+            if len(token_str) <= 6 and ' ' not in token_str:
+                # 检查是否在已知残缺词黑名单中
+                if token_str.lower() in self.truncated_word_blacklist:
+                    self.logger.debug(
+                        f"[Subword Filter] 过滤已知残缺词: '{token_str}'"
+                    )
+                    return False
+
+            # 🔧 方法3：检查是否在有效短词白名单中
+            if len(token_str) <= 4 and token_str.lower() in self.valid_short_words:
+                return True
+
+        except Exception as e:
+            self.logger.warning(f"[Subword Filter] 检查token时出错: {e}, 保守保留")
+            return True  # 出错时保守保留
+
+        return True
+
     # ===== 过滤方法 =====
 
     def is_valid_token(self, token: str, question: Optional[str] = None) -> bool:
@@ -351,29 +480,36 @@ class VQATokenFilter:
 
         # 第二层：有效答案检查
 
-        # 检查是否在有效答案列表中
-        if token_lower in self.valid_answers:
+        # 🔧 改进：优先检查数字（支持数字形式答案）
+        # 数字答案可以是 "1", "2", "3" 或 "one", "two", "three"
+        # 纯数字token（如 "1", "2"）总是有效
+        if token_lower.isdigit():
             return True
 
-        # 检查是否是纯数字
-        if token_lower.isdigit():
+        # 检查是否在有效答案列表中
+        if token_lower in self.valid_answers:
             return True
 
         # 🔧 新增：检查是否在有效短词白名单中
         if token_lower in self.valid_short_words:
             return True
 
-        # 🔧 改进：长度检查（更严格，针对可能的截断词）
-        if len(token_lower) < 2 or len(token_lower) > 20:
+        # 🔧 改进：长度检查（但保留单个字符的数字）
+        # 单个字符：如果前面没有通过isdigit()检查，说明不是数字，可能是噪音
+        if len(token_lower) < 2:
             return False
 
-        # 🔧 新增：启发式规则 - 对短词（<=4字符）进行更严格的检查
+        # 长度过长也可能是噪音
+        if len(token_lower) > 20:
+            return False
+
+        # 🔧 新增：启发式规则 - 对短词（2-4字符）进行更严格的检查
         if len(token_lower) <= 4:
-            # 如果已经通过前面的黑名单检查，且在有效短词列表中，则允许
+            # 如果已经通过前面的检查，且在有效短词列表中，则允许
             if token_lower in self.valid_short_words:
                 return True
 
-            # 如果是数字，允许
+            # 如果是数字，允许（虽然前面已经检查过isdigit，但保留逻辑完整性）
             if token_lower.isdigit():
                 return True
 
@@ -599,26 +735,88 @@ class VQATokenFilter:
         """
         获取token的标准形式（用于合并等价token）
 
+        🔧 V2版本：增强标准化功能
+        - 去空格前缀/后缀
+        - 去尾标点
+        - 小写
+        - 单复数归一化（s/es/ies）
+        - 数字归一化（通过equivalent_tokens映射）
+
         Args:
             token: 输入token
 
         Returns:
-            标准形式的token
+            canonical_key: 标准形式
         """
-        token_lower = token.lower().strip()
+        if not token:
+            return token
 
-        # 如果在等价映射中，返回标准形式
-        if token_lower in self.equivalent_tokens:
-            return self.equivalent_tokens[token_lower]
+        # 步骤1：去空格前缀/后缀
+        canonical = token.strip()
 
-        # 自动去除引号
-        if token_lower and token_lower[0] in ['"', "'", '`']:
-            unquoted = token_lower[1:]
-            if unquoted in self.equivalent_tokens:
-                return self.equivalent_tokens[unquoted]
-            return unquoted
+        # 步骤2：去尾标点（保留数字）
+        while canonical and canonical[-1] in ['.', ',', '!', '?', ';', ':', '"', "'", ')', ']', '}', '-']:
+            canonical = canonical[:-1]
 
-        return token_lower
+        # 步骤3：去前缀标点
+        while canonical and canonical[0] in ['(', '[', '{', '"', "'", '-', '_']:
+            canonical = canonical[1:]
+
+        # 步骤4：小写
+        canonical = canonical.lower()
+
+        if not canonical:
+            return token
+
+        # 步骤5：检查等价映射（数字、同义词等）
+        if canonical in self.equivalent_tokens:
+            return self.equivalent_tokens[canonical]
+
+        # 步骤6：单复数归一化（改进规则）
+        # 🔧 修复：避免错误处理以'es'结尾但不是复数的词
+        # - "male", "female" 不应该被处理
+        # - "boxes", "glasses" 才应该被处理
+        if len(canonical) > 3:
+            if canonical.endswith('ies'):
+                # cities -> city
+                canonical = canonical[:-3] + 'y'
+            elif canonical.endswith('es'):
+                # boxes -> box, glasses -> glass
+                # 但要排除：male, female, table, apple 等词
+                # 规则：只有当去掉'es'后长度>=3且是常见复数模式
+                base = canonical[:-2]
+                # 只有明显是复数形式才处理（如 boxes, dishes, classes）
+                # 单音节词如 "male", "table" 不处理
+                if len(base) >= 3 and (
+                    base.endswith('x') or      # boxes
+                    base.endswith('s') or      # glasses
+                    base.endswith('sh') or     # dishes
+                    base.endswith('ch') or     # classes
+                    base.endswith('zz')        # buzzes
+                ):
+                    canonical = base
+                # 其他情况保持原样（如 male, female, table, apple）
+            elif canonical.endswith('s') and not canonical.endswith('ss'):
+                # dogs -> dog（但保留 class, bus 等）
+                canonical = canonical[:-1]
+
+        # 步骤7：再次检查等价映射（处理后的形式）
+        if canonical in self.equivalent_tokens:
+            return self.equivalent_tokens[canonical]
+
+        return canonical
+
+    def canon(self, token: str) -> str:
+        """
+        标准化token（简洁接口）
+
+        Args:
+            token: 输入token
+
+        Returns:
+            canonical_key: 标准形式
+        """
+        return self.get_canonical_token(token)
 
     def merge_equivalent_tokens(self, distribution: Dict[str, float]) -> Dict[str, float]:
         """

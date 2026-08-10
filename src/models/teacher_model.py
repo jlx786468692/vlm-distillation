@@ -387,10 +387,11 @@ class TeacherModel:
         """
         Construct Chain-of-Thought prompt with system/user role separation.
 
-        🔧 核心拆分原则：
-        - YAML层：只存储纯文本内容，无角色标识
-        - 代码层：完成角色分配，规则作system消息，参数作user消息
-        🔧 新增：根据候选池类型选择不同的prompt（强候选池 vs 弱候选池 vs 开放问题）
+        🔧 新方案：一次推理同时生成logits和CoT
+        根据问题类型选择统一的prompt：
+        - 开放问题：prompts.open.vqa_system/user
+        - 有候选集闭合：prompts.closed_with_candidates.vqa_system/user
+        - 枚举类闭合：prompts.closed_enumerate.vqa_system/user
 
         Args:
             question: Question for VQA
@@ -403,40 +404,45 @@ class TeacherModel:
         Returns:
             (system_prompt, user_prompt) tuple
         """
-        # 🔧 新增：根据问题类型选择不同的prompt模板
-        if question_type == 'open_descriptive':
-            # 开放问题：使用开放问题专用prompt
-            system_key = f'prompts.cot.{task}_system_open'
-            user_key = f'prompts.cot.{task}_user_open'
-            fallback_system_key = f'prompts.cot.{task}_system'
-            fallback_user_key = f'prompts.cot.{task}_user'
-            pool_type_log = "开放问题（无候选池约束）"
-        elif is_strong_pool:
-            # 强候选池：closed_choice / closed_yesno
-            system_key = f'prompts.cot.{task}_system_strong'
-            user_key = f'prompts.cot.{task}_user_strong'
-            fallback_system_key = f'prompts.cot.{task}_system'
-            fallback_user_key = f'prompts.cot.{task}_user'
-            pool_type_log = "强候选池（MUST select from list）"
+        # ───────────────────────────────────────────────────────
+        # 🔧 新方案：根据问题类型选择统一prompt
+        # ───────────────────────────────────────────────────────
+        # 问题类型映射：
+        # - open_descriptive → 开放问题
+        # - closed_choice / closed_yesno → 有候选集闭合
+        # - closed_enumerate (counting/color/location) → 枚举类闭合
+        # ───────────────────────────────────────────────────────
+
+        # 标准化问题类型
+        if question_type == 'open_descriptive' or question_type == 'open':
+            # 开放问题
+            system_key = 'prompts.open.vqa_system'
+            user_key = 'prompts.open.vqa_user'
+            pool_type_log = "开放问题（无候选池）"
+        elif question_type in ['closed_choice', 'closed_yesno', 'choice', 'binary', 'yes_no']:
+            # 有候选集的闭合问题
+            system_key = 'prompts.closed_with_candidates.vqa_system'
+            user_key = 'prompts.closed_with_candidates.vqa_user'
+            pool_type_log = "有候选集闭合（必须从列表选择）"
         else:
-            # 弱候选池：closed_enumerate (counting/color/location)
-            system_key = f'prompts.cot.{task}_system_weak'
-            user_key = f'prompts.cot.{task}_user_weak'
-            fallback_system_key = f'prompts.cot.{task}_system'
-            fallback_user_key = f'prompts.cot.{task}_user'
-            pool_type_log = "弱候选池（MAY consider list）"
+            # 枚举类闭合问题（counting/color/location）或未知类型
+            system_key = 'prompts.closed_enumerate.vqa_system'
+            user_key = 'prompts.closed_enumerate.vqa_user'
+            pool_type_log = f"枚举类闭合（参考答案可自由输出）"
 
         # 🔧 从配置读取 system 规则和 user 模板（分离存储）
         system_template = self.config.get(
             system_key,
-            self.config.get(fallback_system_key, "Analyze this image step by step.")
+            self.config.get('prompts.cot.vqa_system', "Analyze this image step by step.")
         )
         user_template = self.config.get(
             user_key,
-            self.config.get(fallback_user_key, "{question}")
+            self.config.get('prompts.cot.vqa_user', "{question}")
         )
 
-        self.logger.debug(f"Loading CoT prompt for task '{task}' from config ({pool_type_log})")
+        self.logger.debug(f"Loading unified prompt from config ({pool_type_log})")
+        self.logger.debug(f"  - system_key: {system_key}")
+        self.logger.debug(f"  - user_key: {user_key}")
 
         # 🔧 system 消息：通用硬性规则（无需变量替换）
         system_prompt = system_template.strip()
@@ -444,17 +450,26 @@ class TeacherModel:
         # 🔧 user 消息：单条样本专属参数（需要变量替换）
         user_prompt = user_template
         try:
+            # 替换问题
             if '{question}' in user_prompt:
                 user_prompt = user_prompt.replace('{question}', question)
+
+            # 替换候选答案（用于有候选集的闭合问题）
+            if '{candidate_answers}' in user_prompt:
+                if allowed_answers:
+                    candidates_str = ', '.join([str(a) for a in allowed_answers[:20]])
+                else:
+                    candidates_str = 'N/A'
+                user_prompt = user_prompt.replace('{candidate_answers}', candidates_str)
+
+            # 替换参考答案（用于开放问题）
             if '{primary_answer}' in user_prompt and primary_answer:
                 user_prompt = user_prompt.replace('{primary_answer}', primary_answer)
-            if '{allowed_answers}' in user_prompt and allowed_answers:
-                answers_str = ', '.join(allowed_answers[:10])
-                user_prompt = user_prompt.replace('{allowed_answers}', answers_str)
-            # 🔧 新增：替换 {answer_distribution} 占位符（防止 prompt 不完整）
+
+            # 替换答案分布（可选）
             if '{answer_distribution}' in user_prompt:
-                # 如果没有分布信息，使用默认提示
-                user_prompt = user_prompt.replace('{answer_distribution}', 'See primary answer probability')
+                user_prompt = user_prompt.replace('{answer_distribution}', 'See reasoning')
+
             self.logger.debug(f"Formatted user prompt for task '{task}'")
         except Exception as e:
             self.logger.warning(f"CoT user prompt error: {e}")
@@ -763,23 +778,6 @@ class TeacherModel:
             # Process logits for soft labels
             logits = self._process_logits(outputs.scores)
             result['logits'] = logits
-
-        return result
-
-    def _process_logits(self, scores):
-        """处理 logits 输出"""
-        # 简化实现：返回 logits 字典
-        if not scores:
-            return {}
-
-        # 转换为 tensor
-        logits = torch.stack(scores, dim=0) if isinstance(scores, (list, tuple)) else scores
-
-        return {
-            'scores': logits,
-            'top_k_indices': None,
-            'top_k_values': None,
-        }
 
         return result
 
@@ -1624,8 +1622,36 @@ class TeacherModel:
         Returns:
             Dictionary with raw logits (NOT probabilities)
         """
+        # 🔧 添加调试日志
+        self.logger.info(f"[Teacher Model DEBUG] scores类型: {type(scores)}")
+        if isinstance(scores, (list, tuple)):
+            self.logger.info(f"[Teacher Model DEBUG] scores长度: {len(scores)}")
+            if len(scores) > 0:
+                self.logger.info(f"[Teacher Model DEBUG] scores[0]形状: {scores[0].shape if hasattr(scores[0], 'shape') else 'N/A'}")
+                if len(scores) > 1:
+                    self.logger.info(f"[Teacher Model DEBUG] scores[1]形状: {scores[1].shape if hasattr(scores[1], 'shape') else 'N/A'}")
+                # 检查是否所有scores形状相同
+                if len(scores) > 2:
+                    first_shape = scores[0].shape if hasattr(scores[0], 'shape') else None
+                    all_same = all(
+                        (s.shape == first_shape if hasattr(s, 'shape') else False)
+                        for s in scores[1:]
+                    )
+                    self.logger.info(f"[Teacher Model DEBUG] 所有scores形状相同: {all_same}")
+
         # Stack scores - 这是原始logits
-        logits_stack = torch.stack(scores)
+        logits_stack = torch.stack(scores) if isinstance(scores, (list, tuple)) else scores
+
+        self.logger.info(f"[Teacher Model DEBUG] logits_stack形状: {logits_stack.shape}")
+        self.logger.info(f"[Teacher Model DEBUG] logits_stack维度: {logits_stack.dim()}")
+
+        # 详细分析维度含义
+        if logits_stack.dim() == 3:
+            self.logger.info(f"[Teacher Model DEBUG] raw_logits格式: [num_tokens={logits_stack.shape[0]}, batch={logits_stack.shape[1]}, vocab_size={logits_stack.shape[2]}]")
+        elif logits_stack.dim() == 2:
+            self.logger.info(f"[Teacher Model DEBUG] raw_logits格式: [num_tokens={logits_stack.shape[0]}, vocab_size={logits_stack.shape[1]}]")
+        else:
+            self.logger.info(f"[Teacher Model DEBUG] raw_logits格式: 未知维度 {logits_stack.dim()}")
 
         # ───────────────────────────────────────────────────────
         # ✅ 官方标准：返回原始logits，不应用温度缩放

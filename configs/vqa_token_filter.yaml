@@ -8,7 +8,50 @@ task_whitelists: {
   "binary": ["yes", "no"]
 }
 
+# 候选词书写变体规则（Candidate Variants）
+# 🔧 关键：候选词内部的书写变体合并（绝不跨候选合并）
+# 用于 closed_choice / closed_yesno 等固定候选池问题
+candidate_variants: {
+  # 选择题候选词变体（如 "A or B?" → ["A", "B"]）
+  # 格式：canonical -> [变体列表]
+  # 🔧 每个候选词独立合并，绝不跨候选合并
+
+  # 字母选项变体
+  "a": ["A", "A.", "(A)", "a.", "(a)", "a)", "A)"],
+  "b": ["B", "B.", "(B)", "b.", "(b)", "b)", "B)"],
+  "c": ["C", "C.", "(C)", "c.", "(c)", "c)", "C)"],
+  "d": ["D", "D.", "(D)", "d.", "(d)", "d)", "D)"],
+  "e": ["E", "E.", "(E)", "e.", "(e)", "e)", "E)"],
+
+  # Yes/No 变体（含大小写、标点）
+  "yes": ["Yes", "YES", "yes.", "Yes.", "yes,", "Yes,", "(yes)", "(Yes)", "yes)", "Yes)"],
+  "no": ["No", "NO", "no.", "No.", "no,", "No,", "(no)", "(No)", "no)", "No)"],
+
+  # 数字变体（阿拉伯数字 + 英文单词 + 序数词 + 特殊格式）
+  "0": ["zero", "Zero", "ZERO", "0", "_0", "'0", "zeroth"],
+  "1": ["one", "One", "ONE", "1", "_1", "'1", "first", "First", "1st"],
+  "2": ["two", "Two", "TWO", "2", "_2", "'2", "second", "Second", "2nd"],
+  "3": ["three", "Three", "THREE", "3", "_3", "'3", "third", "Third", "3rd"],
+  "4": ["four", "Four", "FOUR", "4", "_4", "'4", "fourth", "Fourth", "4th"],
+  "5": ["five", "Five", "FIVE", "5", "_5", "'5", "fifth", "Fifth", "5th"],
+  "6": ["six", "Six", "SIX", "6", "_6", "'6", "sixth", "Sixth", "6th"],
+  "7": ["seven", "Seven", "SEVEN", "7", "_7", "'7", "seventh", "Seventh", "7th"],
+  "8": ["eight", "Eight", "EIGHT", "8", "_8", "'8", "eighth", "Eighth", "8th"],
+  "9": ["nine", "Nine", "NINE", "9", "_9", "'9", "ninth", "Ninth", "9th"],
+  "10": ["ten", "Ten", "TEN", "10", "_10", "'10", "tenth", "Tenth", "10th"],
+
+  # 颜色变体（大小写）
+  "red": ["Red", "RED", "red.", "Red."],
+  "green": ["Green", "GREEN", "green.", "Green."],
+  "blue": ["Blue", "BLUE", "blue.", "Blue."],
+  "yellow": ["Yellow", "YELLOW", "yellow.", "Yellow."],
+  "white": ["White", "WHITE", "white.", "White."],
+  "black": ["Black", "BLACK", "black.", "Black."]
+}
+
 # 等价Token映射（Equivalent Token Mapping）- 含多语言
+# 🔧 注意：这是语义同义词映射，用于开放式问题的token合并
+# 与 candidate_variants 不同（candidate_variants 是书写变体，用于固定候选池）
 equivalent_tokens: {
   # 数字类
   "zero": ["0"],

@@ -418,14 +418,11 @@ class Distiller:
                                 }
                                 task_result['gt_consistency'] = ground_truth_info['gt_consistency']
                                 task_result['gt_dist'] = ground_truth_info['gt_dist']
-                                self.logger.info(
-                                    f"[Hard Label] 使用COCO标注答案: {ground_truth_info['answer']} "
-                                    f"(置信度: {ground_truth_info['gt_consistency']:.4f})"
-                                )
 
                             # Step 2: 软标签（教师模型推理）
                             if self.enable_soft_labels and self.closed_label_gen:
                                 # 使用闭合标签生成器，但传入None作为候选池（开放问题无约束）
+                                # 🔧 新方案：一次推理同时获取软标签和CoT
                                 labels_result = self.closed_label_gen.generate_labels(
                                     image_path=image_path,
                                     question=question,
@@ -439,24 +436,13 @@ class Distiller:
 
                                 if labels_result:
                                     task_result['soft_label'] = labels_result['soft_label']
+                                    # 🔧 新增：直接使用返回的CoT
+                                    task_result['cot_reasoning'] = labels_result.get('cot_reasoning', {})
                                     self.logger.info(
-                                        f"[Soft Label] 开放问题软标签生成完成: "
-                                        f"primary_answer={labels_result['soft_label'].get('primary_answer', 'N/A')}"
+                                        f"[Label Gen] 开放问题标签生成完成: "
+                                        f"primary_answer={labels_result['soft_label'].get('primary_answer', 'N/A')}, "
+                                        f"cot_length={len(labels_result.get('cot_reasoning', {}).get('reasoning_paragraph', ''))}"
                                     )
-
-                            # Step 3: CoT（统一两段式格式）
-                            if self.enable_cot:
-                                primary_answer = None
-                                if task_result.get('hard_label'):
-                                    primary_answer = task_result['hard_label']['answer']
-
-                                cot = self._generate_task_cot(
-                                    task, batch_data, image_id, image_path,
-                                    primary_answer=primary_answer,
-                                    allowed_answers=None,  # 开放问题无候选集
-                                    question_type='open_descriptive'  # 🔧 新增：标记为开放问题
-                                )
-                                task_result['cot_reasoning'] = cot
 
                             # 保留问题类型标记
                             task_result['question_type'] = 'open_descriptive'
@@ -487,8 +473,8 @@ class Distiller:
                             if self.closed_label_gen:
                                 # 官方标准流程：
                                 # - 硬标签：直接使用COCO标注（ground truth）
-                                # - 置信度：使用 gt_consistency（过滤no后最常见答案的频率）
-                                # - 软标签：教师模型推理得到概率分布
+                                # - 置信度：使用 gt_consistency
+                                # - 软标签 + CoT：一次推理同时获取（性能优化）
                                 # 🔧 新增：如果是 CHOICE 类型，传入候选答案池
                                 labels_result = self.closed_label_gen.generate_labels(
                                     image_path=image_path,
@@ -502,19 +488,22 @@ class Distiller:
                                 )
 
                                 if labels_result:
-                                    # ✅ 硬标签来自COCO标注，软标签来自教师模型推理
+                                    # ✅ 硬标签来自COCO标注，软标签和CoT来自一次推理
                                     task_result['hard_label'] = labels_result['hard_label']
                                     task_result['soft_label'] = labels_result['soft_label']
+                                    # 🔧 新增：直接使用返回的CoT（一次推理优化）
+                                    task_result['cot_reasoning'] = labels_result.get('cot_reasoning', {})
 
                                     # 🔧 新增：输出候选答案池
                                     if 'candidate_pool' in labels_result:
                                         task_result['candidate_pool'] = labels_result['candidate_pool']
 
                                     self.logger.info(
-                                        f"[Label Gen] ✓ 软硬标签生成完成: "
+                                        f"[Label Gen] ✓ 标签生成完成（一次推理）: "
                                         f"hard_label={labels_result['hard_label']['answer']} (from GT), "
                                         f"confidence={labels_result['hard_label']['confidence']:.4f}, "
-                                        f"primary_answer={labels_result['soft_label'].get('primary_answer', 'N/A')}"
+                                        f"primary_answer={labels_result['soft_label'].get('primary_answer', 'N/A')}, "
+                                        f"cot_length={len(labels_result.get('cot_reasoning', {}).get('reasoning_paragraph', ''))}"
                                     )
                                 else:
                                     self.logger.warning(f"[Label Gen] 标签生成失败")
@@ -539,26 +528,9 @@ class Distiller:
                                     )
                                     task_result['soft_label'] = soft_labels
 
-                            # Step 3: CoT（统一两段式格式）
-                            if self.enable_cot:
-                                primary_answer = None
-                                allowed_answers = None
-
-                                if task == 'vqa' and task_result.get('soft_label'):
-                                    soft_label_data = task_result['soft_label']
-                                    primary_answer = soft_label_data.get('primary_answer', '')
-                                    allowed_answers = soft_label_data.get('allowed_answers', [])
-                                elif task == 'vqa' and task_result.get('hard_label'):
-                                    primary_answer = task_result['hard_label']['answer']
-                                    allowed_answers = [primary_answer]
-
-                                cot = self._generate_task_cot(
-                                    task, batch_data, image_id, image_path,
-                                    primary_answer=primary_answer,
-                                    allowed_answers=allowed_answers,
-                                    question_type=question_type  # 🔧 新增：传递问题类型
-                                )
-                                task_result['cot_reasoning'] = cot
+                                # ⚠️ 注意：旧逻辑不支持CoT，需要单独生成
+                                if self.enable_cot:
+                                    self.logger.warning("[Label Gen] 旧逻辑不支持一次推理CoT，跳过CoT生成")
 
                 # 将task结果添加到tasks对象中
                 image_result['tasks'][task] = task_result

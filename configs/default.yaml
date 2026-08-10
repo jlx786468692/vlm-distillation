@@ -93,18 +93,7 @@ teacher:
       - "`"
       - "|"
 
-    # 非法数字（解码时拦截，强制输出单词而非阿拉伯数字）
-    illegal_numbers:
-      - "1"
-      - "2"
-      - "3"
-      - "4"
-      - "5"
-      - "6"
-      - "7"
-      - "8"
-      - "9"
-      - "0"
+    illegal_numbers: []
 
     # ==========================================================
     # 类别2：仅用于离线后处理过滤（不参与解码拦截）
@@ -144,9 +133,12 @@ student:
   device: "cuda"
 
 data:
-  coco_root: "./data/coco"
-  annotations_root: "./data/coco/annotations"
-  images_root: "./data/coco/val2014"
+  coco_root: "./data/filter_coco"
+  annotations_root: "./data/filter_coco/annotations"
+  images_root: "./data/filter_coco/images/val2014"
+  # coco_root: "./data/coco"
+  # annotations_root: "./data/coco/annotations"
+  # images_root: "./data/coco/val2014"
 
   # Dataset splits
   train_split: "train2014"
