@@ -1,0 +1,210 @@
+# ============================================================
+# 智能驾驶关键词库
+# ============================================================
+# 用途：用于筛选COCO数据集中与智能驾驶相关的图像
+# 使用：被 driving_filter 工具读取，用于文本语义匹配
+
+# ============================================================
+# 道路场景关键词（最高权重）⭐⭐⭐⭐⭐
+# ============================================================
+# 🔧 关键：这些词汇是道路场景的强信号
+# 必须匹配这些词汇才能证明是道路场景
+
+# 道路类型
+road
+street
+highway
+freeway
+lane
+intersection
+crosswalk
+roundabout
+
+# 道路周边
+sidewalk
+curb
+median
+guardrail
+overpass
+underpass
+bridge
+tunnel
+
+# 停车相关
+parking
+parking lot
+parked
+
+# ============================================================
+# 交通工具（高频词汇）⭐⭐⭐
+# ============================================================
+# 核心车辆（权重最高）
+car
+truck
+bus
+bicycle
+motorcycle
+vehicle
+
+# 车辆类型
+taxi
+ambulance
+police car
+van
+sedan
+suv
+pickup
+trailer
+minivan
+
+# ============================================================
+# 道路设施（高频词汇）⭐⭐⭐
+# ============================================================
+# 交通控制设施
+traffic light
+stop sign
+traffic signal
+
+# 道路标志
+sign
+signal
+
+# ============================================================
+# 驾驶行为（中频词汇）⭐⭐
+# ============================================================
+# 运动状态
+driving
+moving
+stopped
+waiting
+turning
+
+# 驾驶动作
+passing
+overtaking
+reversing
+accelerating
+braking
+yielding
+merging
+
+# ============================================================
+# 安全相关（中频词汇）⭐⭐
+# ============================================================
+# 交通参与者
+pedestrian
+crossing
+driver
+passenger
+rider
+
+# 安全设备
+safety
+helmet
+seatbelt
+
+# 事故相关
+accident
+collision
+crash
+hazard
+
+# ============================================================
+# 天气与时间（低频但重要）⭐
+# ============================================================
+# 天气条件
+rainy
+sunny
+foggy
+snowy
+
+# 时间段
+night
+dusk
+dawn
+daylight
+dark
+
+# ============================================================
+# 其他相关词汇（低频词汇）⭐
+# ============================================================
+# 交通概念
+traffic
+transportation
+commute
+route
+
+# 车辆部件
+signal
+indicator
+headlight
+taillight
+mirror
+windshield
+wheel
+tire
+
+# ============================================================
+# 负向关键词（排除这些场景）❌
+# ============================================================
+# 注意：这些词汇会在文本匹配时作为排除条件
+# 如果Caption或VQA问题中包含这些词汇，直接排除
+
+# 室内场景
+indoor
+bathroom
+bedroom
+kitchen
+living room
+inside
+interior
+room
+house
+home
+
+# 运动场景
+playing
+basketball
+tennis
+soccer
+football
+sports
+game
+match
+court
+field
+stadium
+gym
+
+# 水上场景
+swimming
+pool
+beach
+surfing
+lake
+river
+
+# 自然景观
+mountain
+forest
+garden
+park
+playground
+zoo
+
+# 公共场所
+museum
+restaurant
+store
+shop
+mall
+market
+cafe
+bar
+
+# 其他非道路场景
+exhibition
+showroom
+display
+garage
+parking garage
