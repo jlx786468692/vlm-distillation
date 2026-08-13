@@ -444,10 +444,14 @@ class RewardModelScorer:
         # 【开放问题专属一票否决】仅 open / open_descriptive 执行
         # ───────────────────────────────────────────────────────
         if inference_mode == 'open':
-            # 开放问题：answer 为空 / 仅空格、无有效文本
-            answer = vqa_data.get('answer', '')
-            if not answer or not answer.strip():
-                return True, "开放问题answer为空或仅包含空白字符"
+            # 🔧 修复：改为检测 reasoning_paragraph 字段（而不是 answer）
+            # 原因：结构变为 "cot_reasoning": {"reasoning_paragraph": "", "answer": ""}
+            # 开放问题必须有推理过程，否则一票否决
+            cot_reasoning = vqa_data.get('cot_reasoning', {})
+            reasoning_paragraph = cot_reasoning.get('reasoning_paragraph', '') if cot_reasoning else ''
+
+            if not reasoning_paragraph or not reasoning_paragraph.strip():
+                return True, "开放问题reasoning_paragraph为空或仅包含空白字符"
 
         # ───────────────────────────────────────────────────────
         # 【闭合问题专属一票否决】仅 counting/binary/color 等闭合类型执行
@@ -519,11 +523,20 @@ class RewardModelScorer:
             texts.append(hard_label['answer'])
 
         # CoT reasoning
+        # 🔧 修复：支持新的两段式格式（reasoning_paragraph + answer）
         cot_reasoning = vqa_data.get('cot_reasoning', {})
         if isinstance(cot_reasoning, dict):
-            for key in ['observation', 'analysis', 'conclusion']:
-                if cot_reasoning.get(key):
-                    texts.append(cot_reasoning[key])
+            # 新格式：两段式
+            if 'reasoning_paragraph' in cot_reasoning:
+                if cot_reasoning.get('reasoning_paragraph'):
+                    texts.append(cot_reasoning['reasoning_paragraph'])
+                if cot_reasoning.get('answer'):
+                    texts.append(cot_reasoning['answer'])
+            else:
+                # 旧格式：三段式（兼容）
+                for key in ['observation', 'analysis', 'conclusion']:
+                    if cot_reasoning.get(key):
+                        texts.append(cot_reasoning[key])
 
         return ' '.join(texts)
 
@@ -773,16 +786,23 @@ class RewardModelScorer:
                         'reason': f"CoT缺少段落: {missing_sections}"
                     }
             else:
-                # 直接子字段结构
+                # 旧格式：直接子字段结构（兼容）
                 required_sections = ['observation', 'analysis', 'conclusion']
                 missing_sections = [s for s in required_sections if s not in cot_reasoning or not cot_reasoning[s]]
+                if missing_sections:
+                    deductions['incomplete_cot'] = {
+                        'deduction': 10,
+                        'reason': f"CoT缺少段落: {missing_sections}"
+                    }
 
-            if missing_sections:
+            # 扣分（如果有缺失）
+            if 'incomplete_cot' in deductions:
                 deduction = 9
                 deduction_score -= deduction
-                issues.append(f"CoT结构错乱，缺失: {', '.join(missing_sections)}")
+                missing_info = deductions['incomplete_cot'].get('reason', '未知')
+                issues.append(f"CoT结构错乱: {missing_info}")
                 deductions['cot_structure'] = {
-                    'missing_sections': missing_sections,
+                    'reason': missing_info,
                     'deduction': deduction
                 }
 
@@ -955,68 +975,84 @@ class RewardModelScorer:
         bonuses = {}
 
         vqa_data = sample.get('tasks', {}).get('vqa', {})
-        answer = vqa_data.get('answer', '')
+
+        # ───────────────────────────────────────────────────────
+        # 🔧 修复：获取 reasoning_paragraph 和 answer
+        # ───────────────────────────────────────────────────────
+        # 样本结构：
+        # "cot_reasoning": {
+        #     "reasoning_paragraph": "...",  ← 推理过程（应该足够长）
+        #     "answer": "bench"              ← 最终答案（可以是单单词）
+        # }
+        # ───────────────────────────────────────────────────────
+        cot_reasoning = vqa_data.get('cot_reasoning', {})
+        reasoning_paragraph = cot_reasoning.get('reasoning_paragraph', '') if isinstance(cot_reasoning, dict) else ''
+        answer = cot_reasoning.get('answer', '') if isinstance(cot_reasoning, dict) else ''
 
         # ───────────────────────────────────────────────────────
         # 扣分规则
         # ───────────────────────────────────────────────────────
 
-        # 1. answer token 长度 < 60
-        token_count = self.count_tokens(answer)
-        if token_count < 60:
+        # 1. answer 为空
+        if not answer or not answer.strip():
+            deduction = 20
+            deduction_score -= deduction
+            issues.append(f"开放问题answer为空")
+            deductions['empty_answer'] = {
+                'deduction': deduction
+            }
+
+        # 2. reasoning_paragraph token 长度 < 60
+        reasoning_token_count = self.count_tokens(reasoning_paragraph)
+        if reasoning_token_count < 60:
             deduction = 15
             deduction_score -= deduction
-            issues.append(f"开放问题answer过短（{token_count} tokens < 60）")
-            deductions['short_answer'] = {
-                'tokens': token_count,
+            issues.append(f"开放问题reasoning_paragraph过短（{reasoning_token_count} tokens < 60）")
+            deductions['short_reasoning'] = {
+                'tokens': reasoning_token_count,
                 'threshold': 60,
                 'deduction': deduction
             }
 
-        # 2. answer token 长度 > 1800
-        if token_count > 1800:
+        # 3. reasoning_paragraph token 长度 > 1800
+        if reasoning_token_count > 1800:
             deduction = 12
             deduction_score -= deduction
-            issues.append(f"开放问题answer超长（{token_count} tokens > 1800）")
-            deductions['long_answer'] = {
-                'tokens': token_count,
+            issues.append(f"开放问题reasoning_paragraph超长（{reasoning_token_count} tokens > 1800）")
+            deductions['long_reasoning'] = {
+                'tokens': reasoning_token_count,
                 'threshold': 1800,
                 'deduction': deduction
             }
 
-        # 3. 输出仅单个单词，无完整描述段落
-        word_count = len(answer.split())
-        if word_count <= 1:
-            deduction = 16
-            deduction_score -= deduction
-            issues.append(f"开放问题输出仅单个单词（{word_count}个单词）")
-            deductions['single_word'] = {
-                'word_count': word_count,
-                'deduction': deduction
-            }
+        # ───────────────────────────────────────────────────────
+        # 🔧 删除：不再检查 answer 单词数
+        # ───────────────────────────────────────────────────────
+        # 原因：开放问题的 answer 可以是单个单词（如 "bench"）
+        # 这是正常情况，不应该扣分
+        # ───────────────────────────────────────────────────────
 
         # ───────────────────────────────────────────────────────
         # 加分规则（仅开放样本拥有）
         # ───────────────────────────────────────────────────────
 
-        # 1. Answer token 长度区间在 120～1200（适中，不长不短）→ +6
-        if 120 <= token_count <= 1200:
+        # 1. Reasoning token 长度区间在 120～1200（适中，不长不短）→ +6
+        if 120 <= reasoning_token_count <= 1200:
             bonus = 6
             bonus_score += bonus
-            issues.append(f"答案长度适中（{token_count} tokens 在 120～1200）")
+            issues.append(f"推理长度适中（{reasoning_token_count} tokens 在 120～1200）")
             bonuses['moderate_length'] = {
-                'tokens': token_count,
+                'tokens': reasoning_token_count,
                 'bonus': bonus
             }
 
-        # 2. 无幻觉、描述充分完整（初期仅长度判断）→ +5
-        # 如果长度在 200～1000 tokens，认为描述充分
-        if 200 <= token_count <= 1000:
+        # 2. 推理描述充分完整（长度在 200～1000 tokens）→ +5
+        if 200 <= reasoning_token_count <= 1000:
             bonus = 5
             bonus_score += bonus
-            issues.append(f"描述充分完整（{token_count} tokens）")
+            issues.append(f"推理描述充分完整（{reasoning_token_count} tokens）")
             bonuses['sufficient_description'] = {
-                'tokens': token_count,
+                'tokens': reasoning_token_count,
                 'bonus': bonus
             }
 
@@ -1025,11 +1061,11 @@ class RewardModelScorer:
         # 如果没有 Markdown 且没有碎片短句（平均句子长度 > 10 个词）
         import re
         markdown_patterns = [r'#{1,6}\s', r'\*\*.*?\*\*', r'^\s*-\s', r'^\s*\d+\.\s']
-        has_markdown = any(re.search(p, answer, re.MULTILINE) for p in markdown_patterns)
+        has_markdown = any(re.search(p, reasoning_paragraph, re.MULTILINE) for p in markdown_patterns)
 
         if not has_markdown:
             # 检查平均句子长度（简单判断：按句号、问号、感叹号分割）
-            sentences = re.split(r'[。！？.!?]', answer)
+            sentences = re.split(r'[。！？.!?]', reasoning_paragraph)
             sentences = [s.strip() for s in sentences if s.strip()]
 
             if sentences:

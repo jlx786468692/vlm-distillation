@@ -244,18 +244,20 @@ class ClosedSampleValidator:
         candidate_pool: List[str]
     ) -> Tuple[bool, str]:
         """
-        校验A：三元自洽校验（hard_label / soft_label.primary_answer / cot.conclusion）
+        校验A：三元自洽校验（以硬标签为基准）
 
-        校验目标：教师模型输出内部标签自洽，三者表达同一个候选答案
+        🔧 修改：以硬标签（GT）为基准，检查软标签和CoT是否与硬标签一致
+        - hard_label.answer vs soft_label.primary_answer（语义相同即可）
+        - hard_label.answer vs cot.answer（语义相同即可）
 
         流程：
-        ① 三者归一字符串完全一致 → 通过
-        ② 不一致，查询同义词词典全部等价 → 通过
-        ③ 词典不匹配，调用MNLI两两语义等价校验；三组两两全部等价才算通过
+        ① 归一化字符串完全一致 → 通过
+        ② 不一致，查询同义词词典等价 → 通过
+        ③ 词典不匹配，调用MNLI语义等价校验 → 通过
         ④ 额外强约束：cot_norm必须存在于归一后的candidate_pool
 
         Args:
-            hard_label_answer: 硬标签答案
+            hard_label_answer: 硬标签答案（GT，基准）
             soft_label_primary_answer: 软标签主答案
             cot_conclusion: CoT结论
             candidate_pool: 候选池
@@ -263,16 +265,16 @@ class ClosedSampleValidator:
         Returns:
             (是否一致, 不一致原因)
         """
-        self.logger.info("【校验A】开始三元自洽校验...")
+        self.logger.info("【校验A】开始以硬标签为基准的一致性校验...")
 
         # 归一化
         hard_norm = self.normalize(hard_label_answer)
         soft_norm = self.normalize(soft_label_primary_answer)
         cot_norm = self.normalize(cot_conclusion)
 
-        self.logger.info(f"  - hard_label: {hard_norm}")
-        self.logger.info(f"  - soft_label: {soft_norm}")
-        self.logger.info(f"  - cot_conclusion: {cot_norm}")
+        self.logger.info(f"  - 硬标签(GT): {hard_norm}")
+        self.logger.info(f"  - 软标签: {soft_norm}")
+        self.logger.info(f"  - CoT结论: {cot_norm}")
 
         # ───────────────────────────────────────────────────────
         # ④ 强约束：cot_norm 必须存在于归一后的 candidate_pool
@@ -286,54 +288,57 @@ class ClosedSampleValidator:
                 return False, reason
 
         # ───────────────────────────────────────────────────────
-        # ① 三者归一字符串完全一致 → 通过
+        # 🔧 修改：以硬标签为基准，检查两项一致性
         # ───────────────────────────────────────────────────────
-        if hard_norm == soft_norm == cot_norm:
-            self.logger.info("✓ 三元完全一致（字符串匹配），校验通过")
+        # 1. hard vs soft（必须通过）
+        # 2. hard vs cot（必须通过）
+        # ───────────────────────────────────────────────────────
+
+        # ① 字符串完全一致检查
+        hard_soft_match = (hard_norm == soft_norm)
+        hard_cot_match = (hard_norm == cot_norm)
+
+        if hard_soft_match and hard_cot_match:
+            self.logger.info("✓ 软标签和CoT均与硬标签完全一致（字符串匹配），校验通过")
             return True, ""
 
-        # ───────────────────────────────────────────────────────
-        # ② 查询同义词词典全部等价 → 通过
-        # ───────────────────────────────────────────────────────
-        hard_soft_synonym = self.check_synonym_equivalence(hard_norm, soft_norm)
-        hard_cot_synonym = self.check_synonym_equivalence(hard_norm, cot_norm)
-        soft_cot_synonym = self.check_synonym_equivalence(soft_norm, cot_norm)
+        # ② 查询同义词词典等价
+        if not hard_soft_match:
+            hard_soft_match = self.check_synonym_equivalence(hard_norm, soft_norm)
 
-        if hard_soft_synonym and hard_cot_synonym and soft_cot_synonym:
-            self.logger.info("✓ 三元同义（词典匹配），校验通过")
+        if not hard_cot_match:
+            hard_cot_match = self.check_synonym_equivalence(hard_norm, cot_norm)
+
+        if hard_soft_match and hard_cot_match:
+            self.logger.info("✓ 软标签和CoT均与硬标签同义（词典匹配），校验通过")
             return True, ""
 
-        # ───────────────────────────────────────────────────────
-        # ③ 调用MNLI两两语义等价校验
-        # ───────────────────────────────────────────────────────
-        self.logger.info("  三者不完全一致，调用MNLI语义等价校验...")
+        # ③ 调用MNLI语义等价校验
+        self.logger.info("  部分不一致，调用MNLI语义等价校验...")
 
         # hard vs soft
-        hard_soft_semantic = self.check_semantic_equivalence(hard_label_answer, soft_label_primary_answer)
+        if not hard_soft_match:
+            hard_soft_match = self.check_semantic_equivalence(hard_label_answer, soft_label_primary_answer)
 
         # hard vs cot
-        hard_cot_semantic = self.check_semantic_equivalence(hard_label_answer, cot_conclusion)
+        if not hard_cot_match:
+            hard_cot_match = self.check_semantic_equivalence(hard_label_answer, cot_conclusion)
 
-        # soft vs cot
-        soft_cot_semantic = self.check_semantic_equivalence(soft_label_primary_answer, cot_conclusion)
-
-        # 三组两两全部等价才算通过
-        if hard_soft_semantic and hard_cot_semantic and soft_cot_semantic:
-            self.logger.info("✓ 三元语义等价（MNLI），校验通过")
+        # 两项都通过才算校验通过
+        if hard_soft_match and hard_cot_match:
+            self.logger.info("✓ 软标签和CoT均与硬标签语义等价（MNLI），校验通过")
             return True, ""
 
         # ───────────────────────────────────────────────────────
         # 不一致
         # ───────────────────────────────────────────────────────
         reasons = []
-        if not hard_soft_synonym:
-            reasons.append(f"hard≠soft: '{hard_norm}' vs '{soft_norm}'")
-        if not hard_cot_synonym:
-            reasons.append(f"hard≠cot: '{hard_norm}' vs '{cot_norm}'")
-        if not soft_cot_synonym:
-            reasons.append(f"soft≠cot: '{soft_norm}' vs '{cot_norm}'")
+        if not hard_soft_match:
+            reasons.append(f"硬标签≠软标签: '{hard_norm}' vs '{soft_norm}'")
+        if not hard_cot_match:
+            reasons.append(f"硬标签≠CoT: '{hard_norm}' vs '{cot_norm}'")
 
-        reason = "三元不自洽: " + ", ".join(reasons)
+        reason = "与硬标签不一致: " + ", ".join(reasons)
         self.logger.warning(f"【校验A失败】{reason}")
 
         return False, reason
@@ -504,11 +509,12 @@ class ClosedSampleValidator:
         ground_truth: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        完整校验闭合样本
+        完整校验样本（区分闭合问题和开放问题）
 
         执行顺序：
-        1. 校验A：三元自洽校验
-        2. 校验B：GT真值与Hard标签校验
+        1. 判断问题类型（根据candidate_pool是否存在）
+        2. 闭合问题：三元校验（hard_label、soft_label、cot）
+        3. 开放问题：两元校验（hard_label、cot）
 
         Args:
             sample: 样本数据
@@ -519,7 +525,8 @@ class ClosedSampleValidator:
                 'validation_a': {'is_consistent': bool, 'reason': str},
                 'validation_b': {'is_consistent': bool, 'reason': str},
                 'overall_valid': bool,
-                'deductions': Dict
+                'deductions': Dict,
+                'question_type': str  # 'closed' or 'open'
             }
         """
         vqa_data = sample.get('tasks', {}).get('vqa', {})
@@ -528,45 +535,105 @@ class ClosedSampleValidator:
             'validation_a': {'is_consistent': True, 'reason': ''},
             'validation_b': {'is_consistent': True, 'reason': ''},
             'overall_valid': True,
-            'deductions': {}
+            'deductions': {},
+            'question_type': 'closed'  # 默认闭合问题
         }
 
         # ───────────────────────────────────────────────────────
-        # 校验A：三元自洽校验
+        # 判断问题类型（根据candidate_pool）
         # ───────────────────────────────────────────────────────
+        candidate_pool = vqa_data.get('candidate_pool', [])
+        is_closed_question = bool(candidate_pool)  # 有候选池 = 闭合问题
+
         hard_label_answer = vqa_data.get('hard_label', {}).get('answer', '')
         soft_label_primary_answer = vqa_data.get('soft_label', {}).get('primary_answer', '')
-        cot_conclusion = vqa_data.get('cot_reasoning', {}).get('answer', '')  # 🔧 修改：直接从cot_reasoning获取answer
-        candidate_pool = vqa_data.get('candidate_pool', [])
+        cot_conclusion = vqa_data.get('cot_reasoning', {}).get('answer', '')
 
-        is_consistent_a, reason_a = self.validate_triple_consistency(
-            hard_label_answer,
-            soft_label_primary_answer,
-            cot_conclusion,
-            candidate_pool
-        )
+        # ───────────────────────────────────────────────────────
+        # 校验A：根据问题类型执行不同校验
+        # ───────────────────────────────────────────────────────
+        if is_closed_question:
+            # 闭合问题：三元校验（hard_label、soft_label、cot）
+            result['question_type'] = 'closed'
+            self.logger.info("[校验A] 闭合问题：执行三元校验（hard_label、soft_label、cot）")
 
-        result['validation_a'] = {
-            'is_consistent': is_consistent_a,
-            'reason': reason_a
-        }
+            is_consistent_a, reason_a = self.validate_triple_consistency(
+                hard_label_answer,
+                soft_label_primary_answer,
+                cot_conclusion,
+                candidate_pool
+            )
 
-        # 处罚
-        if not is_consistent_a:
-            if self.strict_closed_mode:
-                # 一票否决
-                result['deductions']['validation_a'] = {
-                    'veto': True,
-                    'reason': reason_a
+            result['validation_a'] = {
+                'is_consistent': is_consistent_a,
+                'reason': reason_a
+            }
+
+            # 处罚
+            if not is_consistent_a:
+                if self.strict_closed_mode:
+                    # 一票否决
+                    result['deductions']['validation_a'] = {
+                        'veto': True,
+                        'reason': reason_a
+                    }
+                else:
+                    # 重度扣分
+                    result['deductions']['validation_a'] = {
+                        'deduction': 22,
+                        'reason': reason_a
+                    }
+
+                result['overall_valid'] = False
+
+        else:
+            # 开放问题：只校验hard_label和cot（不校验soft_label）
+            result['question_type'] = 'open'
+            self.logger.info("[校验A] 开放问题：只校验hard_label和cot（不校验soft_label）")
+
+            # 只校验hard_label和cot是否一致
+            hard_norm = self.normalize(hard_label_answer)
+            cot_norm = self.normalize(cot_conclusion)
+
+            self.logger.info(f"  - hard_label: {hard_norm}")
+            self.logger.info(f"  - cot: {cot_norm}")
+            self.logger.info(f"  - soft_label.primary_answer: {self.normalize(soft_label_primary_answer)}（不校验）")
+
+            # 检查hard_label和cot是否一致
+            is_consistent = self.check_synonym_equivalence(hard_label_answer, cot_conclusion)
+
+            if not is_consistent:
+                # 如果不一致，尝试MNLI语义等价校验
+                is_consistent = self.check_semantic_equivalence(hard_label_answer, cot_conclusion)
+
+            if is_consistent:
+                self.logger.info("✓ hard_label和cot一致，校验通过")
+                result['validation_a'] = {
+                    'is_consistent': True,
+                    'reason': ''
                 }
             else:
-                # 重度扣分
-                result['deductions']['validation_a'] = {
-                    'deduction': 22,
-                    'reason': reason_a
+                reason = f"hard_label与cot不一致: '{hard_norm}' vs '{cot_norm}'"
+                self.logger.warning(f"【校验A失败】{reason}")
+                result['validation_a'] = {
+                    'is_consistent': False,
+                    'reason': reason
                 }
 
-            result['overall_valid'] = False
+                # 处罚（比闭合问题轻）
+                if self.strict_closed_mode:
+                    result['deductions']['validation_a'] = {
+                        'veto': True,
+                        'reason': reason
+                    }
+                else:
+                    # 中度扣分（比闭合问题的22分轻）
+                    result['deductions']['validation_a'] = {
+                        'deduction': 15,
+                        'reason': reason
+                    }
+
+                result['overall_valid'] = False
 
         # ───────────────────────────────────────────────────────
         # 校验B：GT真值与Hard标签校验

@@ -13,8 +13,9 @@ candidate:
     indoor: ["book","books","clock","clocks","vase","vases","scissors","teddy bear","doll","dolls","lamp","lamps","picture","pictures","pillow","pillows","blanket","blankets"]
     outdoor: ["plant","plants","bench","benches","fire hydrant","hydrant","hydrants","sign","signs","parking meter","meter","meters","traffic light","stop sign","potted plant","tree","trees","flower","flowers","rock","rocks","grass","hill","mountain","river","lake","fence"]
   color: ["black","white","red","blue","green","orange","brown","gray","grey","purple","pink","gold","silver","tan","yellow"]
+  # 🔧 修复：只保留数字形式，删除英文数字单词
+  # 原因：候选池冗余，数据集答案为数字形式
   number: ["0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","48","49","50",
-          "51","52","53","54","55","56","57","58","59","60","61","62","63","64","65","66","67","68","69","70","71","72","73","74","75","76","77","78","79","80",
-          "zero","one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve","thirteen","fourteen","fifteen","sixteen","seventeen","eighteen","nineteen","twenty"]
+          "51","52","53","54","55","56","57","58","59","60","61","62","63","64","65","66","67","68","69","70","71","72","73","74","75","76","77","78","79","80"]
   location: ["left","right","middle","front","back","top","bottom","center","side", "corner", "above", "below", "behind", "near","outside", "inside", "foreground", "background"]
   yesno: ["yes","no"]

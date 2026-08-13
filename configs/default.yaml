@@ -93,6 +93,9 @@ teacher:
       - "`"
       - "|"
 
+    # 🔧 修改：数字形式是有效答案，不再拦截
+    # VQA答案可以是数字形式（"1", "2"）或文字形式（"one", "two"）
+    # 均为有效答案，不应拦截
     illegal_numbers: []
 
     # ==========================================================
@@ -133,12 +136,9 @@ student:
   device: "cuda"
 
 data:
-  coco_root: "./data/filter_coco"
-  annotations_root: "./data/filter_coco/annotations"
-  images_root: "./data/filter_coco/images/val2014"
-  # coco_root: "./data/coco"
-  # annotations_root: "./data/coco/annotations"
-  # images_root: "./data/coco/val2014"
+  coco_root: "./data/coco"
+  annotations_root: "./data/coco/annotations"
+  images_root: "./data/coco/val2014"
 
   # Dataset splits
   train_split: "train2014"
@@ -174,13 +174,29 @@ distillation:
   soft_labels:
     enabled: true  # VQA软标签生成
     temperature: 3  # 温度缩放参数，控制分布平滑度
-    top_k_logits: 50  # Top-K兜底策略
+    top_k_logits: 20  # Top-K logits提取（用于软标签生成）
+    top_k_decode: 1000  # Top-K token解码（用于候选词过滤）
     save_format: "json"
 
     # 🔧 新增：候选集封闭配置（降噪）
     enable_candidate_closure: true  # 启用候选集封闭
     enable_candidate_classifier: false  # 启用问题类型分类器（需要下载模型）
     max_candidates: 100  # 最大候选答案数
+
+    # 🔧 Teacher Forcing配置（已禁用）
+    # ───────────────────────────────────────────────────────
+    # 状态：已禁用 - 所有答案都使用标准单token方式处理
+    # 原因：Teacher Forcing过于复杂，且可能引入额外错误
+    # 保留：配置保留用于可能的未来重新启用
+    # ───────────────────────────────────────────────────────
+    # 解决问题：多token词碎片化（如"hot dog" → ["hot", "dog"]）
+    # 现在处理：多token答案通过logits提取处理，强制对齐到硬标签
+    # ───────────────────────────────────────────────────────
+    teacher_forcing:
+      enabled: false  # 已禁用 - 不再使用Teacher Forcing
+      top_k_per_position: 10  # （保留配置，不再使用）
+      max_sequences: 50  # （保留配置，不再使用）
+      min_prob_threshold: 0.001  # （保留配置，不再使用）
 
   # Chain-of-Thought configuration
   cot:

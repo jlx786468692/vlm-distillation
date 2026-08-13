@@ -3,7 +3,9 @@
 
 # 任务类型白名单（Task-aware Whitelists）
 task_whitelists: {
-  "count": ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"],
+  # 🔧 修复：只保留数字形式，删除英文数字单词（zero, one, two...）
+  # 原因：数据集答案为数字形式，英文数字单词造成候选池冗余
+  "count": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"],
   "color": ["red", "green", "blue", "yellow", "orange", "purple", "pink", "brown", "black", "white", "gray", "grey", "cyan", "magenta", "turquoise", "azure", "silver", "golden", "bronze", "maroon", "navy", "teal", "olive", "lime"],
   "binary": ["yes", "no"]
 }
@@ -52,19 +54,22 @@ candidate_variants: {
 # 等价Token映射（Equivalent Token Mapping）- 含多语言
 # 🔧 注意：这是语义同义词映射，用于开放式问题的token合并
 # 与 candidate_variants 不同（candidate_variants 是书写变体，用于固定候选池）
+#
+# 🔧 修复：数字作为标准形式，英文数字单词作为等价形式
+# 原因：候选池只保留数字形式，英文数字单词需要归一化为数字
 equivalent_tokens: {
-  # 数字类
-  "zero": ["0"],
-  "one": ["1", "a", "an", "single", "uno", "eins", "une", "un", "ones"],
-  "two": ["2", "double", "pair", "zwei", "dos", "deux", "due", "twos"],
-  "three": ["3", "triple", "drei", "tres", "trois", "tre", "threes"],
-  "four": ["4", "quadruple", "vier", "cuatro", "quatre", "quattro", "fours"],
-  "five": ["5", "quintuple", "fünf", "cinco", "cinq", "cinque", "fives"],
-  "six": ["6", "sechs", "seis"],
-  "seven": ["7", "sieben", "siete", "sept", "sette"],
-  "eight": ["8", "acht", "ocho", "huit", "otto"],
-  "nine": ["9", "neun", "nueve", "neuf", "nove"],
-  "ten": ["10", "zehn", "diez", "dix", "dieci"],
+  # 数字类（数字为标准形式）
+  "0": ["zero", "Zero", "ZERO", "zeroth"],
+  "1": ["one", "One", "ONE", "a", "an", "single", "uno", "eins", "une", "un", "ones", "first", "First", "1st"],
+  "2": ["two", "Two", "TWO", "double", "pair", "zwei", "dos", "deux", "due", "twos", "second", "Second", "2nd"],
+  "3": ["three", "Three", "THREE", "triple", "drei", "tres", "trois", "tre", "threes", "third", "Third", "3rd"],
+  "4": ["four", "Four", "FOUR", "quadruple", "vier", "cuatro", "quatre", "quattro", "fours", "fourth", "Fourth", "4th"],
+  "5": ["five", "Five", "FIVE", "quintuple", "fünf", "cinco", "cinq", "cinque", "fives", "fifth", "Fifth", "5th"],
+  "6": ["six", "Six", "SIX", "sechs", "seis", "sixth", "Sixth", "6th"],
+  "7": ["seven", "Seven", "SEVEN", "sieben", "siete", "sept", "sette", "seventh", "Seventh", "7th"],
+  "8": ["eight", "Eight", "EIGHT", "acht", "ocho", "huit", "otto", "eighth", "Eighth", "8th"],
+  "9": ["nine", "Nine", "NINE", "neun", "nueve", "neuf", "nove", "ninth", "Ninth", "9th"],
+  "10": ["ten", "Ten", "TEN", "zehn", "diez", "dix", "dieci", "tenth", "Tenth", "10th"],
   # 二元答案类
   "yes": ["yeah", "yep", "sure", "likely", "possibly", "probably", "absolutely", "definitely", "correct", "right"],
   "no": ["nos", "non", "nah", "nope", "never", "incorrect", "wrong"],
@@ -128,6 +133,31 @@ blacklists: {
     "suggest", "suggests", "suggested", "suggesting",
     "might", "could be", "may be", "would be",
     "unclear", "uncertain", "ambiguous"
+  ],
+
+  # 🔧 新增：智能驾驶负向关键词黑名单（用于智能驾驶数据蒸馏）
+  # 用途：过滤不适合智能驾驶场景的token，提升数据质量
+  # 来源：configs/driving_keywords.txt 中的负向关键词部分
+  "driving_negative_keywords": [
+    # 室内场景
+    "indoor", "bathroom", "bedroom", "kitchen", "living room", "inside", "interior",
+    "room", "house", "home",
+
+    # 运动场景
+    "playing", "basketball", "tennis", "soccer", "football", "sports", "game",
+    "match", "court", "field", "stadium", "gym",
+
+    # 水上场景
+    "swimming", "pool", "beach", "surfing", "lake", "river",
+
+    # 自然景观
+    "mountain", "forest", "garden", "park", "playground", "zoo",
+
+    # 公共场所
+    "museum", "restaurant", "store", "shop", "mall", "market", "cafe", "bar",
+
+    # 其他非道路场景
+    "exhibition", "showroom", "display", "garage", "parking garage"
   ]
 }
 
@@ -160,4 +190,10 @@ cot_length_filter: {
   "observation_min_tokens": 15,  # Observation token数 < 15 标记低质
   "cot_max_tokens": 350,          # CoT总token数 > 350 丢弃
   "use_token_count": true         # 使用token计数（而非字符）
+}
+
+# 🔧 新增：智能驾驶过滤配置
+# 用于智能驾驶数据蒸馏场景，过滤不适合道路场景的token
+driving_filter: {
+  "enabled": true  # 启用智能驾驶负向关键词过滤
 }

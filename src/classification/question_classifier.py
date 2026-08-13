@@ -90,6 +90,7 @@ class ClassificationResult:
     method: str  # "rule" 或 "model"
     model_scores: Optional[Dict[str, float]] = None
     candidate_pool: Optional[List[str]] = None  # 候选答案池（用于选择型问题）
+    reasoning: Optional[str] = None  # 分类原因（可选）
 
     def get_major_category(self) -> QuestionType:
         """
@@ -273,8 +274,9 @@ class QuestionClassifier:
         self.count_keywords = [
             "how many", "number of", "count",
             "how much", "quantity of", "total number",
-            # 🔧 新增："What number" 句式（如 "What number is on the train?"）
-            "what number",  # 匹配 "What number is on..."
+            # ❌ 移除"what number"，由NumberTaskClassifier细分处理
+            # "what number" 会匹配"What number is on the train?"（读数字）
+            # 而不是"How many trains?"（计数）
         ]
 
         # 颜色问句
@@ -596,6 +598,46 @@ class QuestionClassifier:
         Returns:
             ClassificationResult对象
         """
+        # ───────────────────────────────────────────────────────
+        # 🔧 新增：优先级-1：数字任务检测（在规则匹配前）
+        # ───────────────────────────────────────────────────────
+        # 原因：BART-MNLI 模型无法区分 counting 和 reading_number
+        # 例如："What number is on the train?" 模型会错误分类为 color
+        # 解决：先用 NumberTaskClassifier 细分数字任务
+        # ───────────────────────────────────────────────────────
+        try:
+            from .number_task_classifier import NumberTaskClassifier, NumberTaskType
+
+            number_classifier = NumberTaskClassifier()
+            number_result = number_classifier.classify(question, hard_label=None, method="rule")
+
+            if number_result.task_type == NumberTaskType.READING_NUMBER:
+                # 🔧 修复：精确读数任务归类为闭合枚举（而不是开放问题）
+                # 原因：
+                # 1. 答案通常是多token（如"413"、"2024"）
+                # 2. 需要使用 Teacher Forcing 提取完整序列
+                # 3. 不是开放描述，而是精确的数字识别
+                return ClassificationResult(
+                    question_type=QuestionType.COUNT,  # 使用COUNT类型（会映射到CLOSED_ENUMERATE）
+                    confidence=number_result.confidence,
+                    method="number_task_classifier",
+                    model_scores=None,
+                    candidate_pool=None,
+                    reasoning=f"精确读数任务: {number_result.reasoning}"
+                )
+            elif number_result.task_type == NumberTaskType.COUNTING:
+                # 计数任务：归类为计数问题
+                return ClassificationResult(
+                    question_type=QuestionType.COUNT,
+                    confidence=number_result.confidence,
+                    method="number_task_classifier",
+                    model_scores=None,
+                    candidate_pool=None
+                )
+        except Exception as e:
+            # NumberTaskClassifier 不可用或出错，继续走原有流程
+            pass
+
         # ───────────────────────────────────────────────────────
         # 🔧 优先级0：选择型闭合问题（A or B?）
         # ───────────────────────────────────────────────────────

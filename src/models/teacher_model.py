@@ -294,6 +294,254 @@ class TeacherModel:
             is_open_question=is_open_question  # 传递开放问题标志
         )
 
+    def inference_vqa_with_teacher_forcing(
+        self,
+        image: Union[Image.Image, str, Path],
+        question: str,
+        ground_truth: str,
+        top_k_per_position: int = 5,
+        max_sequences: int = 20,
+        min_prob_threshold: float = 0.01,
+        image_id: Optional[str] = None,
+        use_cached_visual: bool = False,
+        # 🔧 新增参数
+        question_type: str = "open",
+        candidate_pool: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        使用Teacher Forcing计算多token答案的序列级概率分布。
+
+        🔧 解决方案：方案3 - Teacher Forcing（推荐用于有GT的情况）
+
+        核心思想：
+        - 使用ground_truth作为提示
+        - 强制模型生成正确答案
+        - 计算序列级概率分布
+
+        适用场景：
+        - ✅ 有ground_truth的样本
+        - ✅ 需要计算多token联合概率（如"hot dog"、"elephant abuse"）
+        - ✅ 需要高质量软标签
+
+        Args:
+            image: PIL Image or image path
+            question: Question text
+            ground_truth: Ground truth answer (e.g., "hotdog", "elephant abuse")
+            top_k_per_position: Number of top tokens to keep per position (default: 5)
+            max_sequences: Maximum number of sequences to return (default: 20)
+            min_prob_threshold: Minimum probability threshold for pruning (default: 0.01)
+            image_id: Image ID for caching
+            use_cached_visual: Whether to use cached visual features
+
+        Returns:
+            {
+                'sequence_distribution': Dict[str, float],  # 序列级概率分布
+                'gt_joint_prob': float,  # GT的联合概率
+                'num_tokens': int,  # GT的token数量
+                'position_distributions': List[Dict],  # 每个位置的分布（可选）
+            }
+
+        Example:
+            >>> result = model.inference_vqa_with_teacher_forcing(
+            ...     image="image.jpg",
+            ...     question="What is the man eating?",
+            ...     ground_truth="hotdog"
+            ... )
+            >>> print(result['sequence_distribution'])
+            {
+                "hotdog": 0.72,
+                "hot cake": 0.04,
+                "warm dog": 0.09,
+                ...
+            }
+        """
+        import torch.nn.functional as F
+        from itertools import product
+
+        self.logger.info(f"[Teacher Forcing] 开始计算序列概率，GT: '{ground_truth}'")
+
+        # ───────────────────────────────────────────────────────
+        # Step 1: Tokenize ground_truth
+        # ───────────────────────────────────────────────────────
+        tokens_gt = self.tokenizer.encode(ground_truth, add_special_tokens=False)
+        seq_length = len(tokens_gt)
+
+        self.logger.info(f"[Teacher Forcing] GT token数: {seq_length}, tokens: {tokens_gt}")
+
+        # ───────────────────────────────────────────────────────
+        # Step 2: 构建Prompt（简化版，直接预测答案）
+        # ───────────────────────────────────────────────────────
+        # 🔧 关键：Teacher Forcing只预测答案部分，不需要[Reasoning]
+        # 原因：逐位置预测答案token，不需要生成推理过程
+        # ───────────────────────────────────────────────────────
+
+        # 根据问题类型构建不同的prompt（简化版）
+        if question_type in ["closed_choice", "closed_yesno"]:
+            # 闭合问题（有候选池）
+            if not candidate_pool:
+                self.logger.warning(f"[Teacher Forcing] ⚠️ {question_type} 需要候选池，但未提供")
+                candidate_pool = []
+
+            user_prompt = (
+                f"Question: {question}\n"
+                f"CANDIDATE LIST: {', '.join(candidate_pool)}\n"
+                f"Answer: "  # 🔧 修复：添加空格，明确告诉模型开始生成答案
+            )
+        else:
+            # 开放问题或枚举类闭合问题
+            user_prompt = (
+                f"Question: {question}\n"
+                f"Answer: "  # 🔧 修复：添加空格，明确告诉模型开始生成答案
+            )
+
+        system_prompt = None  # 不使用system prompt
+
+        # ───────────────────────────────────────────────────────
+        # Step 3: Teacher Forcing推理（逐位置）
+        # ───────────────────────────────────────────────────────
+        position_distributions = []
+        position_distributions_ids = []  # 🔧 修复：初始化变量
+
+        for pos in range(seq_length):
+            self.logger.debug(f"[Teacher Forcing] 处理位置 {pos}/{seq_length-1}")
+
+            # Teacher forcing: 使用GT的前pos个token作为prefix
+            # 🔧 注意：user_prompt已经包含空格，直接拼接prefix即可
+            if pos > 0:
+                prefix_tokens = tokens_gt[:pos]
+                prefix_text = self.tokenizer.decode(prefix_tokens)
+                # 🔧 修复：user_prompt已经有空格，直接拼接，不要再加空格
+                current_prompt = f"{user_prompt}{prefix_text}"
+            else:
+                # 位置0：直接使用user_prompt（已包含空格）
+                current_prompt = user_prompt
+
+            # 🔧 DEBUG: 打印实际使用的prompt
+            if pos == 0:
+                self.logger.info(f"[Teacher Forcing] 位置0的完整Prompt:\n{current_prompt}")
+                self.logger.info(f"[Teacher Forcing] Prompt长度: {len(self.tokenizer.encode(current_prompt))} tokens")
+
+            # 推理得到logits
+            # ⚠️ 注意：不使用缓存，每次都重新处理图像
+            # 原因：缓存的视觉特征需要图像占位符token，但文本输入中没有
+            # Teacher Forcing本身就是慢速高质量方案，这个性能损失可接受
+            inputs = self._prepare_inputs(
+                image, current_prompt, system_prompt=system_prompt,
+                use_cached_visual=False,  # ← 不使用缓存
+                image_id=image_id
+            )
+
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+
+            # 提取最后一个位置的logits
+            logits = outputs.logits[0, -1, :]  # [vocab_size]
+
+            # ───────────────────────────────────────────────────────
+            # Step 4: 提取top-k token
+            # ───────────────────────────────────────────────────────
+            # 🔧 修复：直接记录 token_id 分布，而不是 token_text
+            # ───────────────────────────────────────────────────────
+            probs = F.softmax(logits, dim=-1)
+            top_k_probs, top_k_indices = torch.topk(probs, k=top_k_per_position)
+
+            # ✅ 修复：构建 token_id 分布（而不是token文本）
+            position_dist_ids = {}
+            for prob, idx in zip(top_k_probs.tolist(), top_k_indices.tolist()):
+                token_id = int(idx)
+                position_dist_ids[token_id] = prob
+
+            position_distributions_ids.append(position_dist_ids)
+
+            # 保留文本版本用于日志
+            position_dist_text = {self.tokenizer.decode([tid]): prob for tid, prob in position_dist_ids.items()}
+            position_distributions.append(position_dist_text)
+
+            # 🔧 DEBUG: 打印每个位置的top-k token
+            self.logger.info(f"[Teacher Forcing] 位置{pos} top-{top_k_per_position} tokens:")
+            for i, (token_id, prob) in enumerate(list(position_dist_ids.items())[:5], 1):
+                token_text = self.tokenizer.decode([token_id])
+                self.logger.info(f"  {i}. ID:{token_id} → '{token_text}' (prob={prob:.4f})")
+
+            self.logger.debug(
+                f"[Teacher Forcing] 位置{pos} top-{top_k_per_position}: "
+                f"{list(position_dist_text.keys())[:3]}..."
+            )
+
+        # ───────────────────────────────────────────────────────
+        # Step 5: 组合所有位置，生成序列分布
+        # ───────────────────────────────────────────────────────
+        sequence_distribution = {}
+        combinations_tried = 0
+
+        for combination in product(*[dist.keys() for dist in position_distributions_ids]):
+            combinations_tried += 1
+
+            # 计算联合概率
+            joint_prob = 1.0
+            for pos, token_id in enumerate(combination):
+                joint_prob *= position_distributions_ids[pos].get(token_id, 0.0)
+
+            # 剪枝：跳过低概率组合
+            if joint_prob < min_prob_threshold:
+                continue
+
+            # ✅ 修复：使用tokenizer解码token ID序列
+            sequence_text = self.tokenizer.decode(list(combination), skip_special_tokens=True).strip()
+
+            # 合并同义序列
+            if sequence_text not in sequence_distribution:
+                sequence_distribution[sequence_text] = joint_prob
+            else:
+                sequence_distribution[sequence_text] += joint_prob
+
+        # ───────────────────────────────────────────────────────
+        # Step 6: 归一化 + Top-K截断
+        # ───────────────────────────────────────────────────────
+        total = sum(sequence_distribution.values())
+        if total > 0:
+            sequence_distribution = {
+                k: v / total for k, v in sequence_distribution.items()
+            }
+
+        # 按概率排序，保留top-k
+        sorted_sequences = sorted(
+            sequence_distribution.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:max_sequences]
+
+        sequence_distribution = dict(sorted_sequences)
+
+        # ───────────────────────────────────────────────────────
+        # Step 7: 计算GT的联合概率
+        # ───────────────────────────────────────────────────────
+        gt_joint_prob = 1.0
+        for pos in range(seq_length):
+            gt_token_id = tokens_gt[pos]  # GT的token ID
+            # 在位置分布中查找GT token的概率
+            gt_prob = position_distributions_ids[pos].get(gt_token_id, 0.0)
+            gt_joint_prob *= gt_prob
+
+            if gt_prob == 0.0:
+                self.logger.warning(
+                    f"[Teacher Forcing] GT token '{self.tokenizer.decode([gt_token_id])}' "
+                    f"(ID: {gt_token_id}) 不在位置 {pos} 的top-{top_k_per_position}中"
+                )
+
+        self.logger.info(
+            f"[Teacher Forcing] 完成: {len(sequence_distribution)}个序列, "
+            f"GT联合概率: {gt_joint_prob:.4f}, "
+            f"组合数: {combinations_tried}"
+        )
+
+        return {
+            'sequence_distribution': sequence_distribution,
+            'gt_joint_prob': gt_joint_prob,
+            'num_tokens': seq_length,
+            'position_distributions': position_distributions
+        }
+
     def _inference_vqa_transformers(
         self,
         image: Union[Image.Image, str, Path],

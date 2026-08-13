@@ -151,21 +151,6 @@ class VQATokenFilter:
                 self.canonical_to_variants[canonical] = []
             self.canonical_to_variants[canonical].append(variant)
 
-        # ───────────────────────────────────────────────────────
-        # 🔧 新增：候选词书写变体映射（用于固定候选池问题）
-        # ───────────────────────────────────────────────────────
-        # 关键：每个候选词独立合并，绝不跨候选合并
-        # 用途：closed_choice / closed_yesno 等固定候选池问题
-        # ───────────────────────────────────────────────────────
-        candidate_variants_config = self.config.get('candidate_variants', {})
-
-        self.candidate_variants = {}
-        for canonical, variants in candidate_variants_config.items():
-            # canonical 自身也算变体之一
-            self.candidate_variants[canonical] = [canonical] + (variants if isinstance(variants, list) else [])
-
-        self.logger.info(f"候选词变体映射: {len(self.candidate_variants)} 个canonical词")
-
     def _init_blacklists(self):
         """初始化黑名单"""
         blacklists_config = self.config.get('blacklists', {})
@@ -213,6 +198,16 @@ class VQATokenFilter:
             self.speculative_words = set(speculative_words)
         else:
             self.speculative_words = set()
+
+        # 🔧 新增：智能驾驶负向关键词黑名单
+        driving_negative = blacklists_config.get('driving_negative_keywords', [])
+        if isinstance(driving_negative, list):
+            self.driving_negative_keywords = set(driving_negative)
+        else:
+            self.driving_negative_keywords = set()
+
+        # 🔧 新增：智能驾驶模式开关（从配置文件读取）
+        self.enable_driving_filter = self.config.get('driving_filter', {}).get('enabled', False)
 
         # 特殊Unicode字符（保留硬编码，因为难以在YAML中表示）
         self.special_unicode_tokens = {
@@ -477,6 +472,11 @@ class VQATokenFilter:
             # 纯特殊符号组合（如 "**"）
             if has_special and not has_alpha:
                 return False
+
+        # 🔧 新增：14. 智能驾驶负向关键词过滤（如果启用）
+        if self.enable_driving_filter and token_lower in self.driving_negative_keywords:
+            self.logger.debug(f"[Driving Filter] 过滤智能驾驶负向关键词: '{token}'")
+            return False
 
         # 第二层：有效答案检查
 

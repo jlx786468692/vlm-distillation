@@ -408,18 +408,54 @@ def main():
     # 测试参数（可修改）
     image_path = "data/coco/val2014/COCO_val2014_000000051314.jpg"
     question = "What is the color of the water?"
+    ground_truth = "green"
 
-    # image_path = "data/coco/val2014/COCO_val2014_000000545000.jpg"
-    # question = "Is the fire hydrant red?"
+    if Path(image_path).exists():
+        visualize_logits_comparison(
+            image_path=image_path,
+            question=question
+        )
+    else:
+        print(f"⚠️  图像不存在: {image_path}")
 
-    # 检查文件
-    if not Path(image_path).exists():
-        print(f"❌ 错误: 图像文件不存在: {image_path}")
-        print("\n请修改脚本中的image_path为有效路径")
-        return
+    # ====================
+    # 测试用例2：是否问题
+    # ====================
+    print("\n" + "="*160)
+    print("测试用例2: 是否问题".center(160))
+    print("="*160)
 
-    # 运行可视化
-    visualize_logits_comparison(image_path, question)
+    image_path = "data/coco/val2014/COCO_val2014_000000545000.jpg"
+    question = "Is the fire hydrant red?"
+    ground_truth = "yes"
+
+    if Path(image_path).exists():
+        visualize_logits_comparison(
+            image_path=image_path,
+            question=question
+        )
+    else:
+        print(f"⚠️  图像不存在: {image_path}")
+
+    # ====================
+    # 测试用例3：选择问题
+    # ====================
+    print("\n" + "="*160)
+    print("测试用例3: 选择问题".center(160))
+    print("="*160)
+
+    image_path = "data/coco/val2014/COCO_val2014_000000051314.jpg"
+    question = "Is it day or night?"
+    ground_truth = "day"
+    candidate_pool = ["day", "night"]
+
+    if Path(image_path).exists():
+        visualize_logits_comparison(
+            image_path=image_path,
+            question=question
+        )
+    else:
+        print(f"⚠️  图像不存在: {image_path}")
 
 
 if __name__ == "__main__":

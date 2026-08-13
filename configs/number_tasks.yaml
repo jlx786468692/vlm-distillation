@@ -1,0 +1,102 @@
+# 数字任务配置文件
+# 用于区分计数任务和精确读数任务
+
+number_tasks:
+  # 任务分类器配置
+  classifier:
+    counting_range: [0, 20]  # 计数任务的答案范围
+    default_method: "hybrid"  # 分类方法：rule, range_based, hybrid
+
+  # 计数任务配置（COUNTING）
+  counting:
+    candidate_pool:
+      strategy: "fixed"
+      min_number: 0
+      max_number: 20
+      include_words: false  # 🔧 修复：不包含英文单词变体（one, two, ...）
+      include_chinese: false  # 包含中文数字（暂不支持）
+      quantifiers:
+        - "many"
+        - "several"
+        - "few"
+
+    extraction:
+      batch_size: 16
+      confidence_threshold: 0.5
+      min_hard_label_prob: 0.3
+
+  # 精确读数任务配置（READING_NUMBER）
+  reading_number:
+    candidate_pool:
+      strategy: "hard_label_neighbor"  # 基于真值生成邻域
+
+      neighbor_config:
+        # 精确邻域（±2）
+        precise_deltas: [-2, -1, 0, 1, 2]
+        # 十位邻域（±10）
+        decade_deltas: [-10, 10]
+        # 百位邻域（±100）
+        century_deltas: [-100, 100]
+        # 数字重排（模拟OCR错误）
+        include_permutations: true
+        max_permutations: 10
+
+      ocr_variants:
+        enable: true
+        # OCR字符混淆映射
+        char_confusion_map:
+          '0': ['O', 'o']
+          '1': ['l', 'I', 'i']
+          '2': ['Z', 'z']
+          '5': ['S', 's']
+          '8': ['B']
+        # 空格插入（模拟分割错误）
+        include_space_insertion: true
+
+      normalization:
+        remove_units: true  # 移除单位
+        word_to_number: false  # 不转换英文单词（精确读数通常是数字）
+        chinese_to_arabic: false
+
+      max_candidates: 50  # 最大候选数
+
+    extraction:
+      batch_size: 8  # 批次较小（候选数多）
+      confidence_threshold: 0.4  # 置信度要求稍低
+      min_hard_label_prob: 0.25
+
+  # 后处理配置
+  post_processing:
+    validate_task_type: true  # 验证任务分类是否正确
+    check_distribution_quality: true
+    fallback_to_hard_label: true
+
+    # 异常检测
+    anomaly_detection:
+      # 计数任务答案过大
+      counting_max_threshold: 30
+      # 精确读数任务答案过小
+      reading_number_min_threshold: 10
+
+  # 统计和日志
+  logging:
+    log_classification_result: true
+    log_candidate_pool_size: true
+    log_distribution: true
+
+# 任务类型映射（用于现有系统集成）
+task_type_mapping:
+  counting:
+    major_category: "closed_enumerate"
+    description: "计数任务（0-20）"
+    visual_ability: "目标检测+计数"
+
+  reading_number:
+    major_category: "closed_enumerate"
+    description: "精确读数任务（OCR）"
+    visual_ability: "OCR+文本识别"
+
+  unknown:
+    major_category: "closed_enumerate"
+    description: "未知数字任务"
+    visual_ability: "通用"
