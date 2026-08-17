@@ -77,6 +77,18 @@ except ImportError:
     ReadingNumberCandidateGenerator = None
     CandidatePoolConfig = None
 
+# 🔧 新增：导入类型过滤器和统计日志器
+try:
+    from .type_filter import TypeMatcher, FilterResult
+    from .type_filter_logger import TypeFilterLogger, SampleStats
+    TYPE_FILTER_AVAILABLE = True
+except ImportError:
+    TYPE_FILTER_AVAILABLE = False
+    TypeMatcher = None
+    FilterResult = None
+    TypeFilterLogger = None
+    SampleStats = None
+
 
 class VQAClosedLabelGenerator:
     """
@@ -184,6 +196,42 @@ class VQAClosedLabelGenerator:
         else:
             self.reading_generator = None
             self.logger.warning("⚠️ 精确读数候选生成器不可用")
+
+        # ───────────────────────────────────────────────────────
+        # 🔧 新增：类型过滤器（Type Filter）
+        # ───────────────────────────────────────────────────────
+        # 在 Top-K 提取后、归一化前进行类型过滤
+        # 用途：根据 GT 类型标签过滤噪声 token
+        # ───────────────────────────────────────────────────────
+        type_filter_config = self.config.get("distillation.type_filtering", {})
+        self.enable_type_filter = TYPE_FILTER_AVAILABLE and type_filter_config.get("enabled", False)
+
+        if self.enable_type_filter:
+            schema_path = type_filter_config.get("schema_file", "configs/vqa_type_schema.yaml")
+            try:
+                self.type_matcher = TypeMatcher(schema_path=schema_path)
+
+                # 初始化统计日志器
+                logger_config = type_filter_config.get("monitoring", {})
+                self.type_filter_logger = TypeFilterLogger(
+                    output_dir=logger_config.get("output_dir", "./logs/type_filter"),
+                    batch_size=logger_config.get("batch_size", 1000),
+                    enable_realtime_alert=logger_config.get("realtime_alert", True)
+                )
+
+                self.logger.info("✓ 类型过滤器初始化成功")
+                self.logger.info(f"  - Schema: {schema_path}")
+                self.logger.info(f"  - 批次大小: {logger_config.get('batch_size', 1000)}")
+            except Exception as e:
+                self.logger.warning(f"⚠️ 类型过滤器初始化失败: {e}")
+                self.enable_type_filter = False
+                self.type_matcher = None
+                self.type_filter_logger = None
+        else:
+            self.type_matcher = None
+            self.type_filter_logger = None
+            if not TYPE_FILTER_AVAILABLE:
+                self.logger.info("ℹ️ 类型过滤器未启用")
 
         self.logger.info("✓ VQA闭合问题标签生成器初始化完成")
         self.logger.info(f"  - 软标签温度缩放: T={self.soft_label_temperature}")
@@ -348,21 +396,30 @@ class VQAClosedLabelGenerator:
                 sequences = result.get('sequences')
                 logits_data['sequences'] = sequences
 
-                top_k_logits = self._extract_top_k_logits(
+                # 🔧 修改：调用 _extract_top_k_logits（添加 ground_truth 参数）
+                extract_result = self._extract_top_k_logits(
                     logits_data,
                     top_k=self.top_k_logits,
-                    question_type=question_type
+                    question_type=question_type,
+                    ground_truth=ground_truth  # 🔧 新增：传递 GT 用于类型过滤
                 )
 
+                # 🔧 提取结果
+                top_k_logits = extract_result['candidate_logits']
+                kl_weight = extract_result['kl_weight']
+                filter_result = extract_result['filter_result']
+
                 if top_k_logits:
-                    soft_label = self._compute_soft_label_from_logits(top_k_logits)
+                    # 🔧 传递 kl_weight 给软标签生成
+                    soft_label = self._compute_soft_label_from_logits(top_k_logits, kl_weight=kl_weight)
                 else:
                     # 回退：使用硬标签
                     self.logger.warning("[Label Gen] 无法提取logits，使用硬标签作为软标签")
                     soft_label = {
                         'answer_distribution': {ground_truth: gt_consistency},
                         'primary_answer': ground_truth,
-                        'allowed_answers': [ground_truth]
+                        'allowed_answers': [ground_truth],
+                        'kl_weight': 1.0  # 🔧 新增：默认 KL 权重
                     }
 
                 # ───────────────────────────────────────────────────────
@@ -430,20 +487,29 @@ class VQAClosedLabelGenerator:
             # 构建完整的logits数据
             logits_data['sequences'] = sequences
 
-            top_k_logits = self._extract_top_k_logits(
+            # 🔧 修改：调用 _extract_top_k_logits（添加 ground_truth 参数）
+            extract_result = self._extract_top_k_logits(
                 logits_data,
                 top_k=self.top_k_logits,  # 🔧 使用配置文件中的值
-                question_type=question_type  # 🔧 传入问题类型
+                question_type=question_type,  # 🔧 传入问题类型
+                ground_truth=answer  # 🔧 新增：传递 GT 用于类型过滤
             )
 
+            # 🔧 提取结果
+            top_k_logits = extract_result['candidate_logits']
+            kl_weight = extract_result['kl_weight']
+            filter_result = extract_result['filter_result']
+
             if top_k_logits:
-                soft_label = self._compute_soft_label_from_logits(top_k_logits)
+                # 🔧 传递 kl_weight 给软标签生成
+                soft_label = self._compute_soft_label_from_logits(top_k_logits, kl_weight=kl_weight)
                 self.logger.info(f"[Label Gen] 软标签分布（top-5）: {dict(list(soft_label['answer_distribution'].items())[:5])}")
             else:
                 soft_label = {
                     'answer_distribution': {answer: confidence},
                     'primary_answer': answer,
-                    'allowed_answers': [answer]
+                    'allowed_answers': [answer],
+                    'kl_weight': 1.0  # 🔧 新增：默认 KL 权重
                 }
                 self.logger.warning(f"[Label Gen] 无法提取logits，使用硬标签作为软标签")
 
@@ -800,8 +866,9 @@ class VQAClosedLabelGenerator:
         self,
         logits_data: Dict[str, Any],
         top_k: Optional[int] = None,
-        question_type: Optional[str] = None
-    ) -> Dict[str, float]:
+        question_type: Optional[str] = None,
+        ground_truth: Optional[str] = None  # 🔧 新增：GT 答案（用于类型过滤）
+    ) -> Dict[str, Any]:  # 🔧 修改：返回 dict（包含 logits + 统计信息）
         """
         从logits中提取候选词（优化版V2 - 无候选池）
 
@@ -812,15 +879,21 @@ class VQAClosedLabelGenerator:
            - 颜色：red/Red/RED → red
            - 实体：hot dog/hotdog → hot dog
         3. Top-P + max_k 动态截断（过滤长尾噪声）
-        4. 返回合并后的候选词logits（softmax在_compute_soft_label_from_logits中执行）
+        4. 【新增】类型过滤（根据 GT 类型标签）
+        5. 返回合并后的候选词logits（softmax在_compute_soft_label_from_logits中执行）
 
         Args:
             logits_data: logits数据（包含scores和sequences）
             top_k: 最大候选词数量（硬上限），None则使用配置文件值
             question_type: 问题类型（counting/color/location/open）
+            ground_truth: GT 答案（用于类型过滤）
 
         Returns:
-            {候选词: logit值}（温度缩放+合并后，未归一化）
+            {
+                'candidate_logits': {候选词: logit值}（温度缩放+合并后，未归一化）,
+                'kl_weight': float,  # KL 蒸馏权重（分层惩罚）
+                'filter_stats': FilterResult  # 过滤统计信息
+            }
         """
         # 使用配置文件中的值（如果未提供）
         if top_k is None:
@@ -838,7 +911,12 @@ class VQAClosedLabelGenerator:
 
         if sequences is None or scores is None:
             self.logger.warning("[Logits Extract V2] 缺少sequences或scores")
-            return {}
+            # 🔧 修复：返回正确格式的空结果
+            return {
+                'candidate_logits': {},
+                'kl_weight': 1.0,
+                'filter_result': None
+            }
 
         # 解码序列
         if isinstance(sequences, torch.Tensor):
@@ -883,13 +961,23 @@ class VQAClosedLabelGenerator:
         # 调整索引
         if answer_start_pos < input_token_count:
             self.logger.error(f"[Logits Extract V2] 答案位置{answer_start_pos}在输入prompt范围内")
-            return {}
+            # 🔧 修复：返回正确格式的空结果
+            return {
+                'candidate_logits': {},
+                'kl_weight': 1.0,
+                'filter_result': None
+            }
 
         logits_index = answer_start_pos - input_token_count
 
         if logits_index >= num_logits:
             self.logger.error(f"[Logits Extract V2] logits索引 {logits_index} 超出范围 {num_logits}")
-            return {}
+            # 🔧 修复：返回正确格式的空结果
+            return {
+                'candidate_logits': {},
+                'kl_weight': 1.0,
+                'filter_result': None
+            }
 
         # 提取答案位置的完整logits [vocab_size]
         if hasattr(scores, 'dim') and scores.dim() >= 2:
@@ -1158,6 +1246,63 @@ class VQAClosedLabelGenerator:
             self.logger.info(f"[Logits Extract V2] color类型过滤: {len(canonical_logits)} 个颜色token")
 
         # ───────────────────────────────────────────────────────
+        # 🔧 新增步骤5.5：类型过滤（前置过滤，归一化前）
+        # ───────────────────────────────────────────────────────
+        # 根据GT类型标签过滤噪声token
+        # 用途：确保token类型与GT语义严格对齐
+        # ───────────────────────────────────────────────────────
+        kl_weight = 1.0  # 默认 KL 权重
+        filter_result = None  # 过滤结果
+
+        if self.enable_type_filter and ground_truth and canonical_logits:
+            try:
+                # 调用类型过滤器
+                filter_result = self.type_matcher.filter_top_k_logits(
+                    top_k_logits=canonical_logits,
+                    gt_answer=ground_truth,
+                    gt_fallback_prob=0.01,  # GT 兜底概率
+                    enable_semantic_cluster=True
+                )
+
+                # 更新 canonical_logits
+                canonical_logits = filter_result.filtered_logits
+                kl_weight = filter_result.kl_weight
+
+                # 记录统计信息
+                self.logger.info(
+                    f"[Type Filter] GT类型过滤完成: "
+                    f"过滤前={len(top_k_logits if isinstance(top_k_logits, dict) else [])}个, "
+                    f"过滤后={len(canonical_logits)}个, "
+                    f"过滤率={1 - len(canonical_logits) / max(len(top_k_logits if isinstance(top_k_logits, dict) else []), 1):.1%}, "
+                    f"KL权重={kl_weight}"
+                )
+
+                # 记录到统计日志
+                if self.type_filter_logger:
+                    from datetime import datetime
+                    sample_stats = SampleStats(
+                        sample_id=f"sample_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                        gt_answer=ground_truth,
+                        gt_types=self.type_matcher.get_token_types(ground_truth),
+                        total_tokens=len(top_k_logits if isinstance(top_k_logits, dict) else []),
+                        filtered_tokens=len(top_k_logits if isinstance(top_k_logits, dict) else []) - len(canonical_logits),
+                        filter_rate=1 - len(canonical_logits) / max(len(top_k_logits if isinstance(top_k_logits, dict) else []), 1),
+                        level_1_mismatches=filter_result.level_1_mismatches,
+                        level_2_mismatches=filter_result.level_2_mismatches,
+                        level_3_mismatches=filter_result.level_3_mismatches,
+                        level_4_mismatches=filter_result.level_4_mismatches,
+                        gt_retained=filter_result.gt_retained,
+                        gt_fallback_applied=filter_result.gt_fallback_applied,
+                        kl_weight=kl_weight,
+                        timestamp=datetime.now().isoformat()
+                    )
+                    self.type_filter_logger.record_sample(sample_stats)
+
+            except Exception as e:
+                self.logger.warning(f"[Type Filter] 类型过滤失败: {e}，跳过过滤")
+                kl_weight = 1.0  # 失败时保留原权重
+
+        # ───────────────────────────────────────────────────────
         # 🔧 步骤6：Top-P + max_k 动态截断（开放集专用）
         # ───────────────────────────────────────────────────────
         # Top-P (0.90)：过滤海量长尾噪声
@@ -1167,7 +1312,12 @@ class VQAClosedLabelGenerator:
 
         if not canonical_logits:
             self.logger.warning("[Logits Extract V2] 合并后无候选词")
-            return {}
+            # 🔧 修复：返回正确格式的空结果
+            return {
+                'candidate_logits': {},
+                'kl_weight': 1.0,
+                'filter_result': None
+            }
 
         # 将logits转换为tensor
         tokens = list(canonical_logits.keys())
@@ -1202,11 +1352,19 @@ class VQAClosedLabelGenerator:
             f"(Top-P={top_p}, max_k={max_k})"
         )
 
-        return candidate_logits
+        # ───────────────────────────────────────────────────────
+        # 🔧 返回结果（包含 logits + KL 权重 + 统计信息）
+        # ───────────────────────────────────────────────────────
+        return {
+            'candidate_logits': candidate_logits,
+            'kl_weight': kl_weight,
+            'filter_result': filter_result
+        }
 
     def _compute_soft_label_from_logits(
         self,
-        candidate_logits: Dict[str, float]
+        candidate_logits: Dict[str, float],
+        kl_weight: float = 1.0  # 🔧 新增：KL 蒸馏权重（分层惩罚）
     ) -> Dict[str, Any]:
         """
         软标签生成（无候选池，唯一归一化步骤）
@@ -1217,12 +1375,14 @@ class VQAClosedLabelGenerator:
 
         Args:
             candidate_logits: {候选词: logit值}（已温度缩放+合并）
+            kl_weight: KL 蒸馏权重（分层惩罚，默认 1.0）
 
         Returns:
             {
                 'answer_distribution': {候选词: 概率},
                 'primary_answer': str,
-                'allowed_answers': List[str]
+                'allowed_answers': List[str],
+                'kl_weight': float  # 🔧 新增：KL 蒸馏权重
             }
         """
         if not candidate_logits:
@@ -1277,10 +1437,14 @@ class VQAClosedLabelGenerator:
             f"分布（top-5）: {dict(list(answer_distribution.items())[:5])}"
         )
 
+        # ───────────────────────────────────────────────────────
+        # 🔧 新增：返回 KL 权重（分层惩罚）
+        # ───────────────────────────────────────────────────────
         return {
             'answer_distribution': answer_distribution,
             'primary_answer': primary_answer,
-            'allowed_answers': candidates
+            'allowed_answers': candidates,
+            'kl_weight': kl_weight  # 🔧 新增：KL 蒸馏权重
         }
 
         # Softmax归一化
@@ -1475,14 +1639,21 @@ class VQAClosedLabelGenerator:
             sequences = result.get('sequences')
             logits_data['sequences'] = sequences
 
-            top_k_logits = self._extract_top_k_logits(
+            # 🔧 修改：调用 _extract_top_k_logits（添加 ground_truth 参数）
+            extract_result = self._extract_top_k_logits(
                 logits_data,
                 top_k=self.top_k_logits,  # 🔧 使用配置文件中的值
-                question_type=question_type
+                question_type=question_type,
+                ground_truth=ground_truth  # 🔧 新增：传递 GT 用于类型过滤
             )
 
+            # 🔧 提取结果
+            top_k_logits = extract_result['candidate_logits']
+            kl_weight = extract_result['kl_weight']
+
             if top_k_logits:
-                soft_label = self._compute_soft_label_from_logits(top_k_logits)
+                # 🔧 传递 kl_weight 给软标签生成
+                soft_label = self._compute_soft_label_from_logits(top_k_logits, kl_weight=kl_weight)
                 self.logger.info(
                     f"[Teacher Forcing Fallback] 使用无候选池推理，"
                     f"生成 {len(soft_label['answer_distribution'])} 个候选"
@@ -1884,34 +2055,39 @@ class VQAClosedLabelGenerator:
                 self.logger.debug(f"[Candidate Filter] 过滤非候选词: '{canonical}' (logit={logit:.4f})")
 
         # ───────────────────────────────────────────────────────
-        # 🔧 步骤5.2：补齐未命中的候选词（关键修复）
+        # 🔧 修复：不补齐未命中的候选词
         # ───────────────────────────────────────────────────────
-        # 原因：模型可能没有生成某个候选词的token
-        # 解决：给未命中的候选词赋一个极小的logit值
-        # 结果：经过softmax后，概率接近0但不为0，保证候选池完整
+        # 原因：候选集填充会导致概率相同，不符合模型真实输出
+        # 修改：只对 Top-K 中且在候选集中的 token 进行归一化
+        # 结果：软标签分布反映模型的真实概率分布
         # ───────────────────────────────────────────────────────
-        missing_candidates = candidate_set - set(candidate_logits.keys())
+        # ⚠️ 如果候选词未在 Top-K 中出现，说明模型认为其概率极低
+        # 不应该人为填充概率，否则会干扰知识蒸馏
+        # ───────────────────────────────────────────────────────
 
-        if missing_candidates:
-            # 计算默认logit：比现有最小logit还小10
-            if candidate_logits:
-                min_logit = min(candidate_logits.values())
-                default_logit = min_logit - 10.0
-            else:
-                # 如果所有候选词都缺失，使用一个固定的小值
-                default_logit = -20.0
+        # 统计命中情况
+        hit_count = len(candidate_logits)
+        total_count = len(candidate_set)
 
-            for candidate in missing_candidates:
-                candidate_logits[candidate] = default_logit
-                self.logger.info(
-                    f"[Candidate 补齐] 补齐缺失候选词: '{candidate}' "
-                    f"(logit={default_logit:.4f})"
-                )
+        if hit_count < total_count:
+            missing_count = total_count - hit_count
+            self.logger.info(
+                f"[Candidate Filter] 候选词命中情况: "
+                f"命中 {hit_count}/{total_count} 个，"
+                f"未命中 {missing_count} 个（不填充）"
+            )
+        else:
+            self.logger.info(
+                f"[Candidate Filter] 候选词命中情况: 全部命中 {hit_count}/{total_count} 个"
+            )
 
-        self.logger.info(
-            f"[Logits Extract V2] 候选锚定完成: {len(candidate_logits)} 个候选词 "
-            f"(原始候选池: {len(candidate_set)}, 命中: {len(candidate_set) - len(missing_candidates)}, 补齐: {len(missing_candidates)})"
-        )
+        # ⚠️ 如果没有任何候选词命中，记录警告
+        if not candidate_logits:
+            self.logger.warning(
+                f"[Candidate Filter] ⚠️ 没有任何候选词命中 Top-K，"
+                f"候选池: {candidate_set}"
+            )
+            # 返回空字典，后续会回退到硬标签
 
         return candidate_logits
 
@@ -1992,34 +2168,30 @@ class VQAClosedLabelGenerator:
                 candidate_logits[ground_truth] = 0.0
 
         # ───────────────────────────────────────────────────────
-        # 步骤2：对于没有概率的候选词，基于编辑距离调整
-        # ───────────────────────────────────────────────────────
-        missing_candidates = [c for c in candidates if c not in candidate_logits]
+            # 🔧 修复：不填充未命中的候选词
+            # ───────────────────────────────────────────────────────
+            # 原因：编辑距离填充会导致概率相同，不符合模型真实输出
+            # 修改：只对 Teacher Forcing 成功的候选词进行评估
+            # 结果：软标签分布反映模型的真实概率分布
+            # ───────────────────────────────────────────────────────
+            # 统计命中情况
+            hit_count = len(candidate_logits)
+            total_count = len(candidates)
 
-        if missing_candidates:
-            # 计算编辑距离衰减系数
-            for candidate in missing_candidates:
-                if ground_truth:
-                    # 计算与 GT 的编辑距离
-                    distance = self._levenshtein_distance(candidate, ground_truth)
+            if hit_count < total_count:
+                missing_count = total_count - hit_count
+                self.logger.info(
+                    f"[Multi-Token Eval] 候选词命中情况: "
+                    f"命中 {hit_count}/{total_count} 个，"
+                    f"未命中 {missing_count} 个（不填充）"
+                )
 
-                    # 距离越小，概率越高（对数域：距离增加，log_prob 减小）
-                    # 衰减公式：log_prob = gt_log_prob - distance * penalty
-                    penalty = 2.0  # 每个编辑距离的惩罚系数
-                    if ground_truth in candidate_logits:
-                        base_log_prob = candidate_logits[ground_truth]
-                    else:
-                        base_log_prob = 0.0
-
-                    candidate_logits[candidate] = base_log_prob - distance * penalty
-
-                    self.logger.debug(
-                        f"[Multi-Token Eval] 候选词 '{candidate}': "
-                        f"距离={distance}, log_prob={candidate_logits[candidate]:.4f}"
-                    )
-                else:
-                    # 没有 GT，使用均匀分布
-                    candidate_logits[candidate] = 0.0
+            # ⚠️ 如果没有任何候选词命中，记录警告
+            if not candidate_logits:
+                self.logger.warning(
+                    f"[Multi-Token Eval] ⚠️ Teacher Forcing 失败，"
+                    f"没有任何候选词获得概率"
+                )
 
         self.logger.info(
             f"[Multi-Token Eval] 完成: {len(candidate_logits)} 个候选词评估完成"

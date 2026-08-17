@@ -1,0 +1,381 @@
+# ============================================================
+# VQA 类型分类体系 Schema v1.0
+# ============================================================
+# 设计原则：
+# 1. 拆分 Driving/Non-Driving（驾驶场景优先）
+# 2. 重命名 Action→Motion（更准确的语义域）
+# 3. 中粒度 + 动态扩展（避免组合爆炸）
+# 4. 适配 4bit 噪声（支持拆解匹配）
+# ============================================================
+
+# ============================================================
+# 类型分类体系（7 大类）
+# ============================================================
+type_taxonomy:
+  # ========================================
+  # 1. 空间位置类型（spatial_domain）
+  # ========================================
+  spatial:
+    # 基础方向
+    spatial_left: ["left", "left side", "on the left", "left-hand"]
+    spatial_right: ["right", "right side", "on the right", "right-hand"]
+    spatial_front: ["front", "in front", "front side", "ahead"]
+    spatial_back: ["back", "behind", "back side", "rear"]
+    spatial_top: ["top", "above", "upper", "overhead"]
+    spatial_bottom: ["bottom", "below", "lower", "underneath"]
+    spatial_center: ["center", "middle", "central", "mid"]
+
+    # 组合方向（支持拆解：left + front）
+    spatial_left_front: ["left front", "front left", "left-front", "front-left"]
+    spatial_right_front: ["right front", "front right", "right-front", "front-right"]
+    spatial_left_back: ["left back", "back left", "left-back", "back-left"]
+    spatial_right_back: ["right back", "back right", "right-back", "back-right"]
+
+    # 相对位置
+    spatial_near: ["near", "close to", "next to", "beside"]
+    spatial_far: ["far", "far away", "distant", "away"]
+    spatial_inside: ["inside", "in", "within", "internal"]
+    spatial_outside: ["outside", "out", "external", "outdoor"]
+
+  # ========================================
+  # 2. 驾驶相关物体类型（driving_domain）
+  # ========================================
+  # ⚠️ Level 1 - Critical（安全核心）
+  driving:
+    # 🚦 交通设施
+    driving_traffic_light: ["traffic light", "traffic signal", "stoplight", "signal light", "light"]
+    driving_sign: ["sign", "traffic sign", "road sign", "stop sign", "street sign", "yield sign"]
+    driving_crosswalk: ["crosswalk", "zebra crossing", "pedestrian crossing", "cross walk"]
+
+    # 🚗 交通参与者
+    driving_pedestrian: ["pedestrian", "person", "people", "walking person", "human", "walker"]
+    driving_vehicle: ["car", "truck", "bus", "vehicle", "automobile", "motor vehicle"]
+    driving_bicycle: ["bicycle", "bike", "cyclist", "bicycle rider", "bike rider"]
+    driving_motorcycle: ["motorcycle", "motorbike", "motorcyclist", "motorbike rider"]
+
+    # 🛣️ 道路设施
+    driving_lane: ["lane", "road lane", "driving lane", "traffic lane"]
+    driving_intersection: ["intersection", "junction", "crossroad", "crossing"]
+    driving_road: ["road", "street", "highway", "freeway", "avenue"]
+
+    # 🚧 施工区域
+    driving_construction: ["construction", "construction zone", "work zone", "road work"]
+
+  # ========================================
+  # 3. 非驾驶物体类型（non_driving_domain）
+  # ========================================
+  # ⚠️ Level 4 - Minor（非驾驶核心，可丢弃）
+  non_driving:
+    # 🐾 动物
+    non_driving_animal: ["dog", "cat", "bird", "animal", "pet", "wildlife"]
+
+    # 🏠 建筑与设施
+    non_driving_building: ["building", "house", "structure", "construction"]
+    non_driving_furniture: ["chair", "table", "bench", "couch", "sofa", "desk"]
+    non_driving_nature: ["tree", "grass", "flower", "plant", "bush", "vegetation"]
+
+    # 🎒 个人物品
+    non_driving_accessory: ["umbrella", "handbag", "backpack", "bag", "suitcase", "purse"]
+    non_driving_clothing: ["tie", "hat", "scarf", "coat", "jacket"]
+
+    # ⚠️ 特殊标记：完全非驾驶相关
+    non_driving_other: ["toy", "book", "clock", "vase", "picture", "scissors"]
+
+  # ========================================
+  # 4. 颜色类型（color_domain）
+  # ========================================
+  color:
+    # 🚦 交通灯颜色（Level 1 - Critical）
+    color_traffic_red: ["red", "red light", "red signal", "red traffic light"]
+    color_traffic_green: ["green", "green light", "green signal", "green traffic light"]
+    color_traffic_yellow: ["yellow", "yellow light", "yellow signal", "yellow traffic light", "amber"]
+
+    # 🎨 一般颜色（Level 4 - Minor）
+    color_red: ["red", "reddish", "crimson", "scarlet"]
+    color_green: ["green", "greenish", "lime", "olive"]
+    color_blue: ["blue", "bluish", "cyan", "azure"]
+    color_yellow: ["yellow", "yellowish", "gold", "golden"]
+    color_white: ["white", "whitish", "pale", "bright"]
+    color_black: ["black", "blackish", "dark", "dim"]
+    color_gray: ["gray", "grey", "silver", "ash"]
+
+  # ========================================
+  # 5. 数量类型（number_domain）
+  # ========================================
+  number:
+    # 数字形式
+    number_digit: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"]
+
+    # 特殊数量词
+    number_many: ["many", "multiple", "numerous", "several"]
+    number_few: ["few", "a few", "couple", "handful"]
+    number_none: ["none", "no", "zero", "nothing"]
+
+  # ========================================
+  # 6. 否定词类型（negation_domain）
+  # ========================================
+  # ⚠️ Level 1 - Critical（安全核心）
+  negation:
+    negation_no: ["no", "none", "not", "nothing", "nope", "nah"]
+    negation_absent: ["absent", "missing", "not present", "not visible", "not there"]
+    negation_clear: ["no visible", "no clear", "nothing visible", "no sign"]
+
+  # ========================================
+  # 7. 运动类型（motion_domain）
+  # ========================================
+  # ⚠️ 重命名：Action → Motion（更准确的语义域）
+  motion:
+    # 基础运动
+    motion_standing: ["standing", "upright", "standing up", "erect"]
+    motion_sitting: ["sitting", "seated", "sitting down", "sat"]
+    motion_walking: ["walking", "strolling", "walking down", "on foot"]
+    motion_running: ["running", "jogging", "sprinting", "dashing"]
+
+    # 交通运动
+    motion_driving: ["driving", "riding", "moving", "traveling"]
+    motion_stopped: ["stopped", "parked", "stationary", "still"]
+    motion_turning: ["turning", "turning left", "turning right", "making a turn"]
+
+# ============================================================
+# 分层惩罚策略（safety_level）
+# ============================================================
+# Level 1: Critical（安全核心，类型不匹配直接丢弃）
+# Level 2: Important（重要类型，类型不匹配降权）
+# Level 3: Moderate（中等类型，类型不匹配轻降权）
+# Level 4: Minor（次要类型，类型不匹配丢弃）
+# ============================================================
+
+safety_levels:
+  # ───────────────────────────────────────────────────────
+  # Level 1: Critical（安全核心，KL=0.0，直接丢弃）
+  # ───────────────────────────────────────────────────────
+  level_1_critical:
+    description: "安全核心类型，类型不匹配直接丢弃样本"
+    types:
+      - "color_traffic_*"        # 交通灯颜色
+      - "negation_*"             # 否定词
+      - "driving_traffic_light"  # 交通灯
+      - "driving_pedestrian"     # 行人
+      - "driving_sign"           # 交通标志
+    penalty:
+      kl_weight: 0.0  # 直接丢弃
+      action: "discard"
+      log_level: "ERROR"
+
+  # ───────────────────────────────────────────────────────
+  # Level 2: Important（重要类型，KL=0.1，降权）
+  # ───────────────────────────────────────────────────────
+  level_2_important:
+    description: "重要类型，类型不匹配降权到 10%"
+    types:
+      - "spatial_*"              # 空间位置
+      - "driving_vehicle"        # 车辆
+      - "driving_bicycle"        # 自行车
+      - "driving_motorcycle"     # 摩托车
+      - "driving_crosswalk"      # 人行横道
+    penalty:
+      kl_weight: 0.1  # 降权到 10%
+      action: "penalize"
+      log_level: "WARNING"
+
+  # ───────────────────────────────────────────────────────
+  # Level 3: Moderate（中等类型，KL=0.3，轻降权）
+  # ───────────────────────────────────────────────────────
+  level_3_moderate:
+    description: "中等类型，类型不匹配轻降权到 30%"
+    types:
+      - "motion_*"               # 运动状态
+      - "number_*"               # 数量
+      - "driving_lane"           # 车道
+      - "driving_intersection"   # 路口
+      - "driving_road"           # 道路
+    penalty:
+      kl_weight: 0.3  # 轻降权到 30%
+      action: "light_penalize"
+      log_level: "INFO"
+
+  # ───────────────────────────────────────────────────────
+  # Level 4: Minor（次要类型，KL=0.0，丢弃）
+  # ───────────────────────────────────────────────────────
+  level_4_minor:
+    description: "次要类型，类型不匹配直接丢弃"
+    types:
+      - "color_*"                # 一般颜色（非交通灯）
+      - "non_driving_*"          # 非驾驶相关物体
+    penalty:
+      kl_weight: 0.0  # 直接丢弃
+      action: "discard"
+      log_level: "DEBUG"
+
+# ============================================================
+# 语义簇归并规则（semantic_clusters）
+# ============================================================
+# 用途：处理 BPE 分词变体、同义词变体
+# ============================================================
+
+semantic_clusters:
+  # ───────────────────────────────────────────────────────
+  # 否定词 + 交通设施
+  # ───────────────────────────────────────────────────────
+  negation_sign:
+    canonical: "no_sign"
+    variants:
+      - "no sign"
+      - "no visible sign"
+      - "no clear sign"
+      - "no sign visible"
+      - "none sign"
+      - "no traffic sign"
+      - "missing sign"
+    gt_types: ["negation_no", "driving_sign"]
+
+  negation_traffic_light:
+    canonical: "no_traffic_light"
+    variants:
+      - "no traffic light"
+      - "no light"
+      - "no signal"
+      - "missing traffic light"
+    gt_types: ["negation_no", "driving_traffic_light"]
+
+  # ───────────────────────────────────────────────────────
+  # 交通参与者（BPE 变体）
+  # ───────────────────────────────────────────────────────
+  pedestrian:
+    canonical: "pedestrian"
+    variants:
+      - "pedestrian"
+      - "person"
+      - "people"
+      - "walking person"
+      - "walker"
+      - "human"
+      - "pedestrians"
+    gt_types: ["driving_pedestrian"]
+
+  vehicle:
+    canonical: "vehicle"
+    variants:
+      - "vehicle"
+      - "car"
+      - "automobile"
+      - "motor vehicle"
+      - "vehicles"
+      - "cars"
+    gt_types: ["driving_vehicle"]
+
+  bicycle:
+    canonical: "bicycle"
+    variants:
+      - "bicycle"
+      - "bike"
+      - "cyclist"
+      - "bicycle rider"
+      - "bike rider"
+      - "bicycles"
+      - "bikes"
+    gt_types: ["driving_bicycle"]
+
+  # ───────────────────────────────────────────────────────
+  # 组合方向（拆解匹配）
+  # ───────────────────────────────────────────────────────
+  spatial_left_front:
+    canonical: "left_front"
+    variants:
+      - "left front"
+      - "front left"
+      - "left-front"
+      - "front-left"
+      - "left front side"
+    gt_types: ["spatial_left_front"]
+
+  spatial_right_front:
+    canonical: "right_front"
+    variants:
+      - "right front"
+      - "front right"
+      - "right-front"
+      - "front-right"
+      - "right front side"
+    gt_types: ["spatial_right_front"]
+
+  # ───────────────────────────────────────────────────────
+  # 交通灯颜色
+  # ───────────────────────────────────────────────────────
+  traffic_red:
+    canonical: "red_light"
+    variants:
+      - "red"
+      - "red light"
+      - "red signal"
+      - "red traffic light"
+    gt_types: ["color_traffic_red"]
+
+  traffic_green:
+    canonical: "green_light"
+    variants:
+      - "green"
+      - "green light"
+      - "green signal"
+      - "green traffic light"
+    gt_types: ["color_traffic_green"]
+
+  traffic_yellow:
+    canonical: "yellow_light"
+    variants:
+      - "yellow"
+      - "yellow light"
+      - "yellow signal"
+      - "yellow traffic light"
+      - "amber"
+    gt_types: ["color_traffic_yellow"]
+
+  # ───────────────────────────────────────────────────────
+  # 运动状态
+  # ───────────────────────────────────────────────────────
+  motion_standing:
+    canonical: "standing"
+    variants:
+      - "standing"
+      - "upright"
+      - "standing up"
+      - "erect"
+    gt_types: ["motion_standing"]
+
+  motion_walking:
+    canonical: "walking"
+    variants:
+      - "walking"
+      - "strolling"
+      - "walking down"
+      - "on foot"
+    gt_types: ["motion_walking"]
+
+# ============================================================
+# 统计监控配置
+# ============================================================
+
+monitoring:
+  # 核心指标
+  metrics:
+    - "type_filter_rate"               # 类型过滤率
+    - "safety_critical_mismatch_rate"  # Level 1 不匹配率
+    - "non_driving_data_ratio"         # 非驾驶数据占比
+    - "gt_retention_rate"              # GT 留存率
+    - "semantic_cluster_merge_rate"    # 语义簇归并率
+    - "level_distribution"             # Level 分布统计
+
+  # 阈值告警
+  alerts:
+    type_filter_rate_warning: 0.8          # 过滤率 > 80% 告警
+    safety_critical_mismatch_abort: 0.3    # Level 1 不匹配率 > 30% 终止
+    non_driving_data_max: 0.5              # 非驾驶数据占比上限 50%
+    gt_retention_min: 0.95                 # GT 留存率下限 95%
+    level_1_realtime_alert: true           # Level 1 实时告警
+
+  # 日志配置
+  logging:
+    format: "json_lines"         # JSON Lines 格式
+    batch_size: 1000             # 每 1000 样本汇总
+    output_dir: "./logs/type_filter"  # 日志目录
+    realtime_alert: true         # Level 1 实时告警

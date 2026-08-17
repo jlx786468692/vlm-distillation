@@ -91,6 +91,7 @@ try:
     from src.cleaning import (
         RewardModelScorer, DataPartitioner, ConfidenceController
     )
+    from src.export import JSONLExporter
     from src.utils.data_visualizer import DataVisualizer
     from src.utils.validation_comparator import ValidationComparator
     from src.utils.data_quality_validator import DataQualityValidator, compare_cleaning_effect
@@ -104,6 +105,7 @@ except ImportError:
     from src.cleaning import (
         RewardModelScorer, DataPartitioner, ConfidenceController
     )
+    from src.export import JSONLExporter
     from src.utils.data_visualizer import DataVisualizer
     from src.utils.validation_comparator import ValidationComparator
     from src.utils.data_quality_validator import DataQualityValidator, compare_cleaning_effect
@@ -693,9 +695,22 @@ class FullPipelineRunner:
             )
 
             # ============================================================
-            # [Phase 4] 置信度占比限流控制（可选，在quality_validation阶段执行）
+            # [Phase 4] 生成训练 JSONL（闭合→soft+hard+cot / 开放→hard+cot）
             # ============================================================
-            # 这里不执行，留给 quality_validation 阶段
+            self.logger.info("\n[4/4] Generating training JSONL...")
+
+            jsonl_exporter = JSONLExporter(self.config, logger=self.logger)
+            jsonl_stats = jsonl_exporter.generate()
+
+            train_jsonl_path = jsonl_stats.get('output_path')
+            if jsonl_stats.get('success'):
+                self.logger.info(
+                    f"  Train JSONL: {jsonl_stats.get('total', 0)} records "
+                    f"(closed={jsonl_stats.get('closed', 0)}, "
+                    f"open={jsonl_stats.get('open', 0)}) -> {train_jsonl_path}"
+                )
+            else:
+                self.logger.warning(f"  JSONL 生成失败: {jsonl_stats.get('error')}")
 
             step_end = datetime.now()
             duration = (step_end - step_start).total_seconds()
@@ -714,11 +729,15 @@ class FullPipelineRunner:
                 'cleaned_output': clean_valid_dir,
                 'need_fix_output': need_fix_dir,
                 'discard_output': discard_dir,
+                'train_jsonl': train_jsonl_path,
                 'stats': {
                     'clean_valid_count': summary.get('clean_valid_count', 0),
                     'need_fix_count': summary.get('need_fix_count', 0),
                     'discard_count': summary.get('discard_count', 0),
                     'total_input': summary.get('total_samples', len(data_list)),
+                    'jsonl_total': jsonl_stats.get('total', 0),
+                    'jsonl_closed': jsonl_stats.get('closed', 0),
+                    'jsonl_open': jsonl_stats.get('open', 0),
                 },
                 'scoring_stats': scoring_stats,
                 'duration_seconds': duration,
@@ -735,6 +754,11 @@ class FullPipelineRunner:
             self.logger.info(f"  ✓ Need Fix: {stats.get('need_fix_count', 0)} samples")
             self.logger.info(f"  ✓ Discard: {stats.get('discard_count', 0)} samples")
             self.logger.info(f"  ✓ Output: {result_report['cleaned_output']}")
+            self.logger.info(
+                f"  ✓ Train JSONL: {stats.get('jsonl_total', 0)} records "
+                f"(closed={stats.get('jsonl_closed', 0)}, "
+                f"open={stats.get('jsonl_open', 0)}) -> {train_jsonl_path}"
+            )
             self.logger.info(f"  ✓ Time: {duration:.1f}s")
 
             return result_report

@@ -20,8 +20,8 @@ pipeline:
   # 默认运行的步骤（可通过命令行 --steps 覆盖）
   # 🔧 改进：initial_validation 和 final_validation 已合并到 cleaning 中
   default_steps:
-    - "distillation"
-    # - "cleaning"
+    # - "distillation"
+    - "cleaning"
     # - "quality_validation"
     # - "visualization"  # 可视化默认不运行，需要显式指定
 
@@ -136,9 +136,9 @@ student:
   device: "cuda"
 
 data:
-  coco_root: "./data/coco"
-  annotations_root: "./data/coco/annotations"
-  images_root: "./data/coco/val2014"
+  coco_root: "./data/filter_coco"
+  annotations_root: "./data/filter_coco/annotations"
+  images_root: "./data/filter_coco/images/val2014"
 
   # Dataset splits
   train_split: "train2014"
@@ -147,7 +147,8 @@ data:
   # Processing parameters
   batch_size: 4
   num_workers: 4
-  max_samples: 20  # 【优化】先用10个样本测试参数调整效果，后续可增加到5000
+  max_samples: null  # 🔧 修改：运行所有数据（原来是20个样本测试）
+  # max_samples: 5000  # 备选：运行前5000个样本
 
   # Image preprocessing
   image_size: 224
@@ -182,6 +183,31 @@ distillation:
     enable_candidate_closure: true  # 启用候选集封闭
     enable_candidate_classifier: false  # 启用问题类型分类器（需要下载模型）
     max_candidates: 100  # 最大候选答案数
+
+    # ───────────────────────────────────────────────────────
+    # 🔧 类型过滤配置（已启用）
+    # ───────────────────────────────────────────────────────
+    # 状态：已启用 - 根据GT类型过滤不相关候选词
+    # 功能：
+    # - 过滤数字、颜色、空间位置等不相关类型
+    # - 对于无类型GT（如"letters"），应用默认过滤策略
+    # - GT兜底策略：确保GT始终在候选中
+    # ───────────────────────────────────────────────────────
+    type_filtering:
+      enabled: true  # ✅ 已启用类型过滤
+      schema_file: "configs/vqa_type_schema.yaml"  # 类型分类体系配置文件
+
+      # 监控配置
+      monitoring:
+        output_dir: "./logs/type_filter"  # 日志输出目录
+        batch_size: 1000  # 批次大小（每 1000 样本汇总一次）
+        realtime_alert: true  # Level 1 实时告警
+
+      # 告警阈值
+      alert_thresholds:
+        type_filter_rate_warning: 0.8  # 过滤率 > 80% 告警
+        safety_critical_mismatch_abort: 0.3  # Level 1 不匹配率 > 30% 终止
+        gt_retention_min: 0.95  # GT 留存率下限 95%
 
     # 🔧 Teacher Forcing配置（已禁用）
     # ───────────────────────────────────────────────────────
