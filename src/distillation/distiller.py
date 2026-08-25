@@ -398,7 +398,16 @@ class Distiller:
 
                         # 🔧 新增：根据问题类型选择推理路径
                         # 🔧 统一方案：开放和闭合问题都生成硬标签、软标签、CoT
-                        if question_type == 'open_descriptive' and self.open_inference_gen:
+                        # 🔧 修复：使用大类判断，location 现在归类为开放问题
+                        major_category = classification.question_type.to_major_category() if classification else QuestionType.OPEN_TYPE
+
+                        # 🔧 日志：显示大类和细分类型
+                        self.logger.info(
+                            f"[Classification] Image {image_id}: "
+                            f"type={question_type}, major_category={major_category.value}"
+                        )
+
+                        if major_category == QuestionType.OPEN_TYPE and self.open_inference_gen:
                             self.logger.info(f"[Routing] Image {image_id}: 使用开放推理路径")
 
                             # ───────────────────────────────────────────────────────
@@ -418,6 +427,7 @@ class Distiller:
                                 }
                                 task_result['gt_consistency'] = ground_truth_info['gt_consistency']
                                 task_result['gt_dist'] = ground_truth_info['gt_dist']
+                                # 注意：日志已在第368-370行输出，此处不再重复
 
                             # Step 2: 软标签（教师模型推理）
                             if self.enable_soft_labels and self.closed_label_gen:

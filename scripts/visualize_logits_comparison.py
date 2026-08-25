@@ -1,411 +1,229 @@
 #!/usr/bin/env python
 """
-Logits处理流程可视化（对比表格）
-===============================
+Logits处理流程可视化（更新版）
+============================
 
-将原始logits、温度缩放、softmax概率、过滤后结果放在同一表格中对比
+只做调用和展示，不做逻辑处理：
+- 调用 QuestionClassifier 获取问题类型
+- 调用 VQAClosedLabelGenerator 生成软硬标签和CoT
+- 展示过滤前后的token
 """
 
 import sys
 sys.path.insert(0, '.')
 
-import torch
-import torch.nn.functional as F
+import json
 from pathlib import Path
+from typing import Dict, Any
+
 from src.models.teacher_model import TeacherModel
 from src.utils.config import ConfigManager
-from src.utils.vqa_token_filter import VQATokenFilter
+from src.classification.question_classifier import QuestionClassifier
+from src.distillation.vqa_closed_label_generator import VQAClosedLabelGenerator
 
 
-def visualize_logits_comparison(image_path: str, question: str):
+def visualize_logits_comparison(
+    image_path: str,
+    question: str,
+    ground_truth: str = None,
+    candidate_pool: list = None
+):
     """
-    可视化logits处理流程（对比表格）
+    可视化logits处理流程（调用现有模块）
 
     Args:
         image_path: 图像路径
         question: 问题
+        ground_truth: 真实答案（可选）
+        candidate_pool: 候选池（可选，用于choice问题）
     """
-    print("\n" + "="*140)
-    print("LOGITS处理流程对比表格".center(140))
-    print("="*140)
+    print("\n" + "="*160)
+    print("LOGITS处理流程可视化（完整流程）".center(160))
+    print("="*160)
 
-    # 加载模型和过滤器
+    # ====================
+    # 1. 初始化模块
+    # ====================
+    print("\n【步骤1】初始化模块...")
+
     config = ConfigManager()
+
+    # 初始化Teacher模型
+    print("  - 初始化Teacher模型...")
     teacher = TeacherModel(config)
-    token_filter = VQATokenFilter()  # 添加token过滤器
 
-    temperature = config.get("distillation.soft_labels.temperature", 4)
-
-    print(f"\n配置: 图像={Path(image_path).name} | 问题='{question}' | 温度T={temperature}")
-
-    # 🔧 新增：显示白名单过滤策略说明
-    print("\n" + "="*140)
-    print("【处理策略说明】".center(140))
-    print("="*140)
-    print("\n优先级策略：")
-    print("  1️⃣  【白名单过滤】（优先）：根据问题类型过滤无效token")
-    print("      - 数字问题：只保留数字答案（one, two, 1, 2, ...）")
-    print("      - 颜色问题：只保留颜色答案（green, blue, ...）")
-    print("      - 二元问题：只保留 yes/no")
-    print("  2️⃣  【Topk兜底】（备选）：当白名单过滤后为空时，保留top-k个token")
-    print(f"      - top_k = {config.get('distillation.soft_labels.top_k_logits', 50)} (来自配置)")
-
-    print("\n正在运行模型推理...")
-
-    # 获取模型输出
-    result = teacher.inference_vqa(
-        image=image_path,
-        question=question,
-        return_logits=True,
-        generate_cot=False
+    # 初始化问题分类器
+    print("  - 初始化问题分类器...")
+    classifier = QuestionClassifier(
+        model_path=config.get("classification.model_path", "models/bart-large-mnli"),
+        confidence_threshold=config.get("classification.confidence_threshold", 0.7)
     )
 
-    answer = result.get('answer', '')
-    confidence = result.get('confidence', 0.0)
+    # 初始化标签生成器
+    print("  - 初始化标签生成器...")
+    label_generator = VQAClosedLabelGenerator(
+        teacher_model=teacher,
+        config=config
+    )
 
-    print(f"模型输出: 答案='{answer}' | 置信度={confidence:.4f}")
+    # ====================
+    # 2. 问题分类
+    # ====================
+    print("\n【步骤2】问题分类...")
 
-    if 'logits' not in result:
-        print("\n❌ 错误: 模型没有返回logits")
-        return
+    classification_result = classifier.classify(question)
 
-    logits_data = result['logits']
+    question_type = classification_result.question_type.value
+    confidence = classification_result.confidence
+    method = classification_result.method
 
-    # 提取logits
-    if 'top_k_indices' in logits_data and 'top_k_values' in logits_data:
-        token_indices = logits_data['top_k_indices']
-        token_logits = logits_data['top_k_values']
+    print(f"\n  问题: '{question}'")
+    print(f"  问题类型: {question_type} (置信度: {confidence:.2f}, 方法: {method})")
 
-        # 取第一个token位置
-        if token_indices.dim() == 1:
-            first_indices = token_indices
-            first_logits = token_logits
-        elif token_indices.dim() == 2:
-            first_indices = token_indices[0]
-            first_logits = token_logits[0]
-        else:
-            first_indices = token_indices[0, 0]
-            first_logits = token_logits[0, 0]
+    # ====================
+    # 3. 生成标签和CoT
+    # ====================
+    print("\n【步骤3】生成软硬标签和CoT...")
 
-        # 解码token
-        def decode_token(idx):
-            try:
-                token = teacher.tokenizer.decode([idx.item()])
-                return token.strip().lower()
-            except:
-                return f"[ID:{idx}]"
+    # 调用标签生成器
+    result = label_generator.generate_labels(
+        image_path=image_path,
+        question=question,
+        question_type=question_type,
+        candidate_pool=candidate_pool,
+        ground_truth=ground_truth
+    )
 
-        # 温度缩放
-        scaled_logits = first_logits / temperature
+    # ====================
+    # 4. 展示结果
+    # ====================
+    print("\n" + "="*160)
+    print("【结果展示】".center(160))
+    print("="*160)
 
-        # ===== 🔧 修复：与soft_label_gen.py保持一致 =====
-        # 原有问题：先对所有token计算softmax，然后过滤，导致概率分布错误
-        # 正确逻辑：先判断token有效性，将无效token的logits设为-1e9，然后计算softmax
-        # 这样无效token的概率接近0，有效token能获得更高的概率
-        # ==============================================================
-        print("\n正在进行白名单过滤...")
-        valid_token_mask = torch.zeros_like(scaled_logits, dtype=torch.bool)
+    # 4.1 问题信息
+    print("\n┌" + "─"*158 + "┐")
+    print("│ 【问题信息】".ljust(159) + "│")
+    print("├" + "─"*158 + "┤")
+    print(f"│ 图像路径: {Path(image_path).name}".ljust(159) + "│")
+    print(f"│ 问题: {question}".ljust(159) + "│")
+    print(f"│ 问题类型: {question_type} (置信度: {confidence:.2f})".ljust(159) + "│")
+    print(f"│ 分类方法: {method}".ljust(159) + "│")
+    if ground_truth:
+        print(f"│ 真实答案: {ground_truth}".ljust(159) + "│")
+    if candidate_pool:
+        print(f"│ 候选池: {candidate_pool}".ljust(159) + "│")
+    print("└" + "─"*158 + "┘")
 
-        for i, idx in enumerate(first_indices):
-            token = decode_token(idx)
-            is_valid = token_filter.is_valid_token(token, question)
-            is_primary = token == answer.lower()
+    # 4.2 硬标签
+    hard_label = result.get('hard_label', {})
+    print("\n┌" + "─"*158 + "┐")
+    print("│ 【硬标签】".ljust(159) + "│")
+    print("├" + "─"*158 + "┤")
+    print(f"│ 答案: {hard_label.get('answer', 'N/A')}".ljust(159) + "│")
+    print(f"│ 置信度: {hard_label.get('confidence', 0.0):.4f}".ljust(159) + "│")
+    print("└" + "─"*158 + "┘")
 
-            if is_valid or is_primary:
-                valid_token_mask[i] = True
+    # 4.3 软标签
+    soft_label = result.get('soft_label', {})
+    answer_distribution = soft_label.get('answer_distribution', {})
 
-        num_valid = valid_token_mask.sum().item()
-        print(f"白名单过滤结果: {num_valid}/{len(first_indices)} tokens有效")
+    print("\n┌" + "─"*158 + "┐")
+    print("│ 【软标签】".ljust(159) + "│")
+    print("├" + "─"*158 + "┤")
+    print(f"│ 主答案: {soft_label.get('primary_answer', 'N/A')}".ljust(159) + "│")
 
-        # ===== 🔧 Step 2: 应用mask到logits =====
-        if num_valid > 0:
-            scaled_logits_filtered = scaled_logits.clone()
-            scaled_logits_filtered[~valid_token_mask] = -1e9
-            # 对过滤后的logits计算softmax
-            probs = F.softmax(scaled_logits_filtered, dim=-1)
-        else:
-            # Topk兜底（当白名单过滤后为空时）
-            print("⚠️  白名单过滤后为空，使用top-k兜底策略")
-            probs = F.softmax(scaled_logits, dim=-1)
-            config_top_k = config.get("distillation.soft_labels.top_k_logits", 50)
-            top_k = min(config_top_k, len(first_indices))
-            top_k_indices = torch.topk(probs, top_k).indices
-            valid_token_mask = torch.zeros_like(probs, dtype=torch.bool)
-            valid_token_mask[top_k_indices] = True
-            scaled_logits_filtered = scaled_logits.clone()
-            scaled_logits_filtered[~valid_token_mask] = -1e9
-            probs = F.softmax(scaled_logits_filtered, dim=-1)
+    # 按概率排序显示答案分布
+    if answer_distribution:
+        print("│ 答案分布:".ljust(159) + "│")
+        sorted_answers = sorted(answer_distribution.items(), key=lambda x: x[1], reverse=True)
 
-        # 取top-50用于对比
-        # 🔧 修复：使用配置文件中的top_k_logits值（作为兜底策略）
-        config_top_k = config.get("distillation.soft_labels.top_k_logits", 50)
-        top_k = min(config_top_k, len(first_indices))  # 不超过实际长度
+        # 显示前10个答案
+        for i, (answer, prob) in enumerate(sorted_answers[:10], 1):
+            bar = "█" * int(prob * 50)  # 可视化概率条
+            print(f"│   {i:>2}. {answer:<20} {prob:>6.4f}  {bar}".ljust(159) + "│")
 
-        print(f"\n提取 top-{top_k} logits用于分析")
-        print(f"  （配置: distillation.soft_labels.top_k_logits = {config_top_k}）")
-        print(f"  （说明：白名单过滤优先，top-k仅作兜底）")
+        if len(sorted_answers) > 10:
+            print(f"│   ... 还有 {len(sorted_answers)-10} 个答案".ljust(159) + "│")
 
-        top_indices = first_indices[:top_k]
-        top_logits = first_logits[:top_k]
-        top_scaled = scaled_logits[:top_k]
-        top_probs = probs[:top_k]
+    print("└" + "─"*158 + "┘")
 
-        # 构建数据（过滤前）
-        data_all = []
-        for idx, raw_logit, scaled_logit, prob in zip(top_indices, top_logits, top_scaled, top_probs):
-            token = decode_token(idx)
-            # 🔧 注意：有效性已经在前面白名单过滤时判断过了
-            # 这里再次判断是为了显示状态，但实际概率已经在softmax时考虑了过滤
-            is_valid = token_filter.is_valid_token(token, question)
-            is_primary = token == answer.lower()
+    # 4.4 CoT推理
+    cot_reasoning = result.get('cot_reasoning', {})
+    reasoning_paragraph = cot_reasoning.get('reasoning_paragraph', '')
 
-            data_all.append({
-                'token': token,
-                'raw_logit': raw_logit.item(),
-                'scaled_logit': scaled_logit.item(),
-                'prob': prob.item(),
-                'prob_pct': prob.item() * 100,
-                'token_id': idx.item(),
-                'is_valid': is_valid,
-                'is_primary': is_primary
-            })
+    print("\n┌" + "─"*158 + "┐")
+    print("│ 【CoT推理】".ljust(159) + "│")
+    print("├" + "─"*158 + "┤")
 
-        # ===== 🔧 新增：合并等价token（如 '1' 和 'one'） =====
-        print("\n正在合并等价token...")
-        merged_data = {}
-        for d in data_all:
-            # 获取标准形式
-            canonical = token_filter.get_canonical_token(d['token'])
-
-            if canonical not in merged_data:
-                # 第一次遇到这个标准形式
-                merged_data[canonical] = {
-                    'token': canonical,
-                    'raw_logit': d['raw_logit'],  # 保留最大的logit
-                    'scaled_logit': d['scaled_logit'],
-                    'prob': d['prob'],
-                    'prob_pct': d['prob_pct'],
-                    'token_id': d['token_id'],
-                    'is_valid': d['is_valid'],
-                    'is_primary': d['is_primary'],
-                    'variants': [d['token']],  # 记录所有变体
-                    'count': 1
-                }
+    if reasoning_paragraph:
+        # 分段显示CoT（每行不超过158字符）
+        words = reasoning_paragraph.split()
+        line = ""
+        for word in words:
+            if len(line) + len(word) + 1 <= 155:
+                line += " " + word if line else word
             else:
-                # 合并概率
-                merged_data[canonical]['prob'] += d['prob']
-                merged_data[canonical]['prob_pct'] += d['prob_pct']
-                merged_data[canonical]['variants'].append(d['token'])
-                merged_data[canonical]['count'] += 1
-
-                # 如果是主答案，标记
-                if d['is_primary']:
-                    merged_data[canonical]['is_primary'] = True
-
-        # 转换为列表
-        data_merged = list(merged_data.values())
-
-        # 按概率排序
-        data_merged.sort(key=lambda x: x['prob'], reverse=True)
-
-        # 统计合并信息
-        merge_stats = {}
-        for d in data_merged:
-            if d['count'] > 1:
-                merge_stats[d['token']] = d['variants']
-
-        if merge_stats:
-            print(f"合并了 {len(merge_stats)} 组等价token:")
-            for canonical, variants in merge_stats.items():
-                print(f"  '{canonical}' <- {variants}")
-        else:
-            print("没有需要合并的等价token")
-
-        # 使用合并后的数据替换原始数据
-        data_all = data_merged
-
-        # 🔧 说明：由于我们在softmax前已经对无效token设为了-1e9
-        # 所以无效token的概率已经接近0，softmax后的概率总和应该接近1.0
-        # 这里的归一化是为了进一步确保概率和为1.0（消除数值误差）
-
-        # 计算有效token的归一化概率
-        valid_data = [d for d in data_all if d['is_valid'] or d['is_primary']]
-        total_valid_prob = sum(d['prob'] for d in valid_data)
-
-        # 为所有数据计算归一化概率
-        for d in data_all:
-            if d in valid_data and total_valid_prob > 0:
-                # 🔧 重新归一化：确保有效token的概率总和为1.0
-                d['prob_normalized'] = d['prob'] / total_valid_prob
-                d['prob_pct_normalized'] = d['prob_normalized'] * 100
-            else:
-                # 无效token的概率已经在softmax时设为接近0了
-                d['prob_normalized'] = 0.0
-                d['prob_pct_normalized'] = 0.0
-
-        # 打印表格1：过滤前（Top-50所有token）
-        print("\n" + "="*160)
-        print(f"表格1: 过滤前 {len(data_all)} Tokens (已合并等价token，含噪音)")
-        print("="*160)
-
-        # 表头
-        header1 = (
-            f"{'#':<3} │ "
-            f"{'Token':<10} │ "
-            f"{'原始Logits':>12} │ "
-            f"{'缩放后÷T':>12} │ "
-            f"{'概率':>10} │ "
-            f"{'百分比':>7} │ "
-            f"{'合并来源':<20} │ "
-            f"{'状态':<8}"
-        )
-        print(header1)
-        print("─" * 160)
-
-        # 数据行
-        for i, item in enumerate(data_all, 1):
-            # 标记状态
-            if item['is_primary']:
-                status = "★答案"
-                marker = "★"
-            elif item['is_valid']:
-                status = "✓有效"
-                marker = " "
-            else:
-                status = "✗噪音"
-                marker = "✗"
-
-            # 显示合并来源
-            if item['count'] > 1:
-                merge_info = f"+{item['count']-1}项"
-                variants_str = f"{merge_info} ({', '.join(item['variants'][:3])})"
-            else:
-                variants_str = "-"
-
-            row = (
-                f"{i:>3} │ "
-                f"{item['token']:<9} │ "
-                f"{item['raw_logit']:>12.4f} │ "
-                f"{item['scaled_logit']:>12.4f} │ "
-                f"{item['prob']:>10.6f} │ "
-                f"{item['prob_pct']:>6.2f}% │ "
-                f"{variants_str:<20} │ "
-                f"{status:<8}"
-            )
-            print(row)
-
-        print("="*160)
-
-        # 打印表格2：过滤后（只有有效token）
-        print("\n" + "="*160)
-        print(f"表格2: 过滤后 {len(valid_data)} 个有效Tokens (已归一化)")
-        print("="*160)
-
-        # 表头
-        header2 = (
-            f"{'#':<3} │ "
-            f"{'Token':<10} │ "
-            f"{'原始Logits':>12} │ "
-            f"{'缩放后÷T':>12} │ "
-            f"{'原概率':>10} │ "
-            f"{'归一化概率':>12} │ "
-            f"{'百分比':>7} │ "
-            f"{'合并来源':<15}"
-        )
-        print(header2)
-        print("─" * 160)
-
-        # 数据行
-        cumulative = 0.0
-        for i, item in enumerate(valid_data, 1):
-            cumulative += item['prob_normalized']
-
-            # 标记答案
-            marker = "★" if item['is_primary'] else " "
-
-            # 显示合并来源
-            if item['count'] > 1:
-                merge_info = f"+{item['count']-1}项"
-            else:
-                merge_info = "-"
-
-            row = (
-                f"{i:>3} │ "
-                f"{item['token']:<9} │ "
-                f"{item['raw_logit']:>12.4f} │ "
-                f"{item['scaled_logit']:>12.4f} │ "
-                f"{item['prob']:>10.6f} │ "
-                f"{item['prob_normalized']:>12.6f} │ "
-                f"{item['prob_pct_normalized']:>6.2f}% │ "
-                f"{merge_info:<15}"
-            )
-            print(row)
-
-        print("="*160)
-
-        # 统计信息
-        print("\n过滤统计:")
-        print("-" * 160)
-
-        noise_count = len([d for d in data_all if not d['is_valid'] and not d['is_primary']])
-        print(f"总Token数: {len(data_all)}")
-        print(f"有效Token: {len(valid_data)} (答案 + {len(valid_data)-1}个有效答案)")
-        print(f"噪音Token: {noise_count} (被过滤)")
-        print(f"过滤率:   {noise_count/len(data_all)*100:.1f}%")
-
-        # 概率对比
-        probs_all = torch.tensor([d['prob'] for d in data_all])
-        probs_valid = torch.tensor([d['prob'] for d in valid_data])
-        probs_normalized = torch.tensor([d['prob_normalized'] for d in valid_data])
-
-        print(f"\n概率分布对比:")
-        print(f"  所有Top-{top_k}概率和: {probs_all.sum():.4f} ({probs_all.sum()*100:.2f}%)")
-        print(f"  有效Token概率和:     {probs_valid.sum():.4f} ({probs_valid.sum()*100:.2f}%)")
-        print(f"  归一化后概率和:      {probs_normalized.sum():.4f} ({probs_normalized.sum()*100:.2f}%)")
-
-        # 主答案概率对比
-        primary_data = next((d for d in data_all if d['is_primary']), None)
-        if primary_data:
-            print(f"\n主答案 '{answer}' 概率变化:")
-            print(f"  原始概率:  {primary_data['prob']:.6f} ({primary_data['prob_pct']:.2f}%)")
-            print(f"  归一化后:  {primary_data['prob_normalized']:.6f} ({primary_data['prob_pct_normalized']:.2f}%)")
-            increase = primary_data['prob_normalized'] - primary_data['prob']
-            print(f"  提升:      {increase:.6f} ({increase*100:.2f}%)")
-
-        # 熵对比（修复警告：使用clone().detach()）
-        entropy_before = -sum(p.clone().detach() * torch.log(p.clone().detach() + 1e-10) for p in probs_all if p > 0)
-        entropy_after = -sum(p.clone().detach() * torch.log(p.clone().detach() + 1e-10) for p in probs_normalized if p > 0)
-
-        print(f"\n信息熵对比:")
-        print(f"  过滤前: {entropy_before:.4f} (分布更分散)")
-        print(f"  过滤后: {entropy_after:.4f} (分布更集中)")
-        print(f"  变化:   {entropy_after - entropy_before:.4f} (减少{abs(entropy_after - entropy_before):.2f})")
-
-        # 噪音token列表
-        noise_tokens = [d['token'] for d in data_all if not d['is_valid'] and not d['is_primary']]
-        print(f"\n被过滤的噪音Token ({len(noise_tokens)}个):")
-
-        # 按类型分组显示
-        color_tokens = [t for t in noise_tokens if t in token_filter.color_answers]
-        binary_tokens = [t for t in noise_tokens if t in token_filter.binary_answers]
-        other_noise = [t for t in noise_tokens if t not in color_tokens and t not in binary_tokens]
-
-        if color_tokens:
-            print(f"  颜色答案: {', '.join(color_tokens)}")
-        if binary_tokens:
-            print(f"  二元答案: {', '.join(binary_tokens)}")
-        if other_noise:
-            print(f"  其他噪音: {', '.join(other_noise[:15])}")
-            if len(other_noise) > 15:
-                print(f"           ... 还有 {len(other_noise)-15} 个")
-
+                print(f"│ {line}".ljust(159) + "│")
+                line = word
+        if line:
+            print(f"│ {line}".ljust(159) + "│")
     else:
-        print("\n❌ 错误: logits格式不正确")
+        print("│ 无CoT生成".ljust(159) + "│")
+
+    print("└" + "─"*158 + "┘")
+
+    # 4.5 Token过滤信息（如果有的话）
+    # 注意：这部分信息需要从label_generator内部获取
+    # 由于我们只做调用，这里展示结果中已有的信息
+
+    print("\n┌" + "─"*158 + "┐")
+    print("│ 【配置信息】".ljust(159) + "│")
+    print("├" + "─"*158 + "┤")
+
+    temperature = config.get("distillation.soft_labels.temperature", 4)
+    top_k_logits = config.get("distillation.soft_labels.top_k_logits", 50)
+
+    print(f"│ 软标签温度: T={temperature}".ljust(159) + "│")
+    print(f"│ Top-K logits: {top_k_logits}".ljust(159) + "│")
+    print(f"│ 候选池类型: {question_type}".ljust(159) + "│")
+
+    print("└" + "─"*158 + "┘")
+
+    # 4.6 完整结果（JSON格式）
+    print("\n┌" + "─"*158 + "┐")
+    print("│ 【完整结果（JSON）】".ljust(159) + "│")
+    print("├" + "─"*158 + "┤")
+
+    # 格式化JSON输出
+    json_str = json.dumps(result, indent=2, ensure_ascii=False)
+
+    # 分行显示
+    for line in json_str.split('\n'):
+        if len(line) > 155:
+            # 超长行截断
+            line = line[:152] + "..."
+        print(f"│ {line}".ljust(159) + "│")
+
+    print("└" + "─"*158 + "┘")
+
+    # 关闭分类器
+    classifier.close()
+
+    print("\n" + "="*160)
+    print("✅ 可视化完成".center(160))
+    print("="*160)
 
 
 def main():
     """主函数"""
-    # 测试参数（可修改）
+    # ====================
+    # 测试用例1：颜色问题
+    # ====================
+    print("\n" + "="*160)
+    print("测试用例1: 颜色问题".center(160))
+    print("="*160)
+
     image_path = "data/coco/val2014/COCO_val2014_000000051314.jpg"
     question = "What is the color of the water?"
     ground_truth = "green"
@@ -413,7 +231,8 @@ def main():
     if Path(image_path).exists():
         visualize_logits_comparison(
             image_path=image_path,
-            question=question
+            question=question,
+            ground_truth=ground_truth
         )
     else:
         print(f"⚠️  图像不存在: {image_path}")
@@ -432,7 +251,8 @@ def main():
     if Path(image_path).exists():
         visualize_logits_comparison(
             image_path=image_path,
-            question=question
+            question=question,
+            ground_truth=ground_truth
         )
     else:
         print(f"⚠️  图像不存在: {image_path}")
@@ -452,7 +272,9 @@ def main():
     if Path(image_path).exists():
         visualize_logits_comparison(
             image_path=image_path,
-            question=question
+            question=question,
+            ground_truth=ground_truth,
+            candidate_pool=candidate_pool
         )
     else:
         print(f"⚠️  图像不存在: {image_path}")

@@ -168,6 +168,10 @@ class CoTGenerator:
 
             # 清洗内容
             if TEXT_CLEANER_AVAILABLE:
+                # 先去掉读图词周围的多余引号（"718-721-4711" -> 718-721-4711 等），
+                # 再做 Markdown/空白清洗
+                reasoning_content = text_cleaner.clean_cot_quotes(reasoning_content)
+                answer_content = text_cleaner.clean_cot_quotes(answer_content)
                 reasoning_content = clean_text(reasoning_content)
                 answer_content = clean_text(answer_content)
 

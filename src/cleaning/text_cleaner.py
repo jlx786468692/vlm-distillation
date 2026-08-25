@@ -94,11 +94,14 @@ class TextCleaner:
         """
         清洗 CoT 文本中多余的引号
 
-        针对闭合问题 CoT 中的特定模式：
-        - "yes" -> yes
-        - "no" -> no
-        - "yes," -> yes,
-        - "no." -> no.
+        教师模型常把从图像中读到的词/数字/短语用引号包围，如：
+          - "718-721-4711"  -> 718-721-4711   （含连字符，旧 \w+ 正则无法匹配）
+          - "SKYLINER"      -> SKYLINER
+          - "New York"      -> New York        （多词短语）
+          - "yes" / "no"    -> yes / no
+
+        旧实现仅匹配 "yes"/"no"/数字/颜色等固定词，遗漏含连字符、标点、
+        多词的引号。此处改为剥离任意成对引号（含中英文/直角引号）。
 
         Args:
             text: 原始文本
@@ -109,23 +112,19 @@ class TextCleaner:
         if not text:
             return text
 
-        # 清洗模式：引号包围的答案选项（闭合问题常见）
-        # 模式1: "yes" 或 "yes," 或 "yes." 等
-        # 模式2: "no" 或 "no," 或 "no." 等
+        # 通用模式：剥离成对引号，保留内部内容（支持连字符、数字、标点、多词）
+        # 仅匹配成对引号，单只引号（如撇号 don't）不受影响
         patterns = [
-            # "yes" 相关
-            (r'"yes([,\.])?"', r'yes\1'),
-            (r'"yes"', 'yes'),
-            # "no" 相关
-            (r'"no([,\.])?"', r'no\1'),
-            (r'"no"', 'no'),
-            # 其他常见答案选项（数字、颜色等）
-            (r'"(\d+)"', r'\1'),  # "1" -> 1
-            (r'"(red|blue|green|yellow|orange|purple|pink|black|white|brown|gray)"', r'\1'),  # 颜色
+            (r'"([^"\n]+)"', r'\1'),          # "..." -> ...（英文双引号）
+            (r"'([^'\n]+)'", r'\1'),          # '...' -> ...（英文单引号，撇号不成对不受影响）
+            (r'“([^”\n]+)”', r'\1'),  # "..." -> ...（中文弯引号）
+            (r'‘([^’\n]+)’', r'\1'),  # '...' -> ...（中文弯引号）
+            (r'「([^」\n]+)」', r'\1'),  # 「...」 -> ...
+            (r'『([^』\n]+)』', r'\1'),  # 『...』 -> ...
         ]
 
         for pattern, replacement in patterns:
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+            text = re.sub(pattern, replacement, text)
 
         return text
 

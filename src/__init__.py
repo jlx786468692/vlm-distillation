@@ -32,13 +32,20 @@ from .data import COCODataLoader, ImageProcessor
 from .models import TeacherModel
 from .distillation import Distiller
 from .utils import ConfigManager, setup_logger
-from .export import JSONExporter
+from .export import JSONExporter, TrainingDataExporter
 from .cleaning import (
     RewardModelScorer,
     RewardModelJudge,
+    ClosedSampleValidator,
     DataPartitioner,
     ConfidenceController
 )
+
+# PipelineRunner 依赖 torch/transformers 等，按需导入（失败时不阻断顶层导入）
+try:
+    from .pipeline import PipelineRunner
+except Exception:  # pragma: no cover - 仅在缺少重型依赖时发生
+    PipelineRunner = None  # type: ignore
 
 __all__ = [
     "COCODataLoader",
@@ -48,8 +55,11 @@ __all__ = [
     "ConfigManager",
     "setup_logger",
     "JSONExporter",
+    "TrainingDataExporter",
     "RewardModelScorer",
     "RewardModelJudge",
+    "ClosedSampleValidator",
     "DataPartitioner",
     "ConfidenceController",
+    "PipelineRunner",
 ]

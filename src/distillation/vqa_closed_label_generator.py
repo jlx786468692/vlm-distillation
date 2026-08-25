@@ -2537,16 +2537,16 @@ class VQAClosedLabelGenerator:
         if cot_reasoning.get('reasoning_paragraph'):
             original_text = cot_reasoning['reasoning_paragraph']
 
-            # 去掉候选词周围的引号（支持多种引号类型）
-            # "yes" -> yes, "no" -> no, 'yes' -> yes, 'no' -> no
-            # 「yes」 -> yes, 『no』 -> no
+            # 去掉候选词/读图词周围的引号（支持多种引号类型 + 连字符/数字/多词）
+            # "718-721-4711" -> 718-721-4711, "SKYLINER" -> SKYLINER, "New York" -> New York
+            # 仅匹配成对引号，单只引号（撇号 don't）不受影响
             patterns = [
-                (r'"(\w+)"', r'\1'),      # "yes" -> yes
-                (r"'(\w+)'", r'\1'),      # 'yes' -> yes
-                (r'"(\w+)"', r'\1'),      # "yes" -> yes（中文引号）
-                (r'"(\w+)"', r'\1'),      # "yes" -> yes（中文引号）
-                (r'「(\w+)」', r'\1'),     # 「yes」 -> yes
-                (r'『(\w+)』', r'\1'),     # 『yes』 -> yes
+                (r'"([^"\n]+)"', r'\1'),      # "yes" -> yes（含连字符/数字/多词）
+                (r"'([^'\n]+)'", r'\1'),      # 'yes' -> yes
+                (r'“([^”\n]+)”', r'\1'),      # “yes” -> yes（中文引号）
+                (r'‘([^’\n]+)’', r'\1'),      # ‘yes’ -> yes（中文引号）
+                (r'「([^」\n]+)」', r'\1'),     # 「yes」 -> yes
+                (r'『([^』\n]+)』', r'\1'),     # 『yes』 -> yes
             ]
 
             cleaned_text = original_text

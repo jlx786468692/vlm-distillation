@@ -1,0 +1,110 @@
+# ============================================================
+# 学生模型训练配置 (Student Training Configuration)
+# ============================================================
+# 学生模型: Qwen2.5-VL-3B-Instruct
+# 数据: 流水线第3步生成的训练 JSONL (硬标签 + 软标签 + 统一两段式 CoT)
+# 目标: SFT 蒸馏 —— 让学生模仿教师(32B)的推理与答案
+# ============================================================
+
+student:
+  # 学生模型名称/路径 (与 default.yaml 一致)
+  model_name: "models/Qwen2.5-VL-3B-Instruct"
+  device: "cuda"
+  # 推理时使用的 dtype，训练时由 train.bf16 控制
+  torch_dtype: "bfloat16"
+
+train:
+  # ───────────────────────────────────────────────────────
+  # 数据
+  # ───────────────────────────────────────────────────────
+  # 训练 JSONL 路径 (流水线 prepare_training_data 步骤输出)
+  # 每行一条扁平记录: {image_path, question, question_type, question_category,
+  #   hard_label, soft_label, cot_reasoning{reasoning_paragraph, answer}}
+  train_data_path: "./outputs/training/train.jsonl"
+  # 真实图像根目录 (标签里 image_path 可能指向 data/coco/val2014，
+  # 但实际图像在此目录，加载时按 basename 回退解析)
+  images_root: "./data/filter_coco/images/val2014"
+  # 仅用前 N 个样本调试 (null = 全量)
+  max_samples: null
+
+  # ───────────────────────────────────────────────────────
+  # 目标构建 (assistant 回复)
+  # ───────────────────────────────────────────────────────
+  # cot   : 闭集 -> [Reasoning]观测/分析 + [Answer]结论；开集 -> 教师完整 answer
+  # answer : 闭集 -> 仅简短答案；开集 -> 教师完整 answer
+  target_mode: "cot"
+  # 可选系统提示 (null = 不加，更贴近教师推理分布)
+  system_prompt: "You are a helpful vision-language assistant. Answer the question about the image."
+
+  # ───────────────────────────────────────────────────────
+  # 训练策略
+  # ───────────────────────────────────────────────────────
+  use_lora: true                # true=LoRA 微调(省显存); false=全量微调
+  # LoRA 参数
+  lora_r: 64
+  lora_alpha: 128
+  lora_dropout: 0.05
+  # 目标模块 (Qwen2.5-VL 语言部分)
+  lora_target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+  # ───────────────────────────────────────────────────────
+  # 优化器 / 超参
+  # ───────────────────────────────────────────────────────
+  num_train_epochs: 3
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 1.0e-4        # LoRA 建议 1e-4 ~ 2e-4；全量微调建议 1e-5 ~ 2e-5
+  warmup_ratio: 0.03
+  lr_scheduler_type: "cosine"
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  bf16: true
+  gradient_checkpointing: true
+
+  # ───────────────────────────────────────────────────────
+  # 序列 / 图像
+  # ───────────────────────────────────────────────────────
+  # 注意 token 预算：Qwen2.5-VL 视觉 token 数 ≈ max_pixels / (28*28)
+  #   max_pixels=802816 ≈ 1024 视觉 token；max_length 须 > 视觉token+响应
+  #   若响应被截断 (labels 全 -100) 说明 max_length 太小或 max_pixels 太大
+  max_length: 2048              # 单样本最大 token (含图像token)，超出右截断
+  max_pixels: 802816            # Qwen-VL 单图最大像素 (≈1024 视觉token，省显存)
+  min_pixels: 3136              # 最小像素，避免极小图
+  # 注意力实现: sdpa(默认,快) | eager(最兼容) | flash_attention_2(需flash-attn)
+  attn_implementation: "sdpa"
+  # 🔧 GPU 选择（指定用哪张卡训练）
+  #   "0"  -> 用 0 号卡
+  #   "1"  -> 用 1 号卡
+  #   ""   -> 不覆盖，沿用 shell 的 CUDA_VISIBLE_DEVICES
+  # 说明：Qwen2.5-VL 视觉塔为变长 grid_thw，不支持 nn.DataParallel
+  #   (按 batch 切分会与 rotary_pos_emb 错位、reshape 报错)，故训练恒为单卡；
+  #   此值仅决定用哪一张，代码层另会兜底拆除 DataParallel。
+  cuda_devices: "0"
+
+  # ───────────────────────────────────────────────────────
+  # 软标签 KL 蒸馏 (仅闭集样本, 使用 soft_label.answer_distribution)
+  # loss = SFT_CE + kl_weight * mean(KL(teacher || student))
+  # 设 kl_weight=0 可关闭，退化为纯 SFT
+  kl_weight: 0.5
+  kl_temperature: 2.0          # 学生侧 logits 温度 (放大候选分布平滑度)
+
+  # ───────────────────────────────────────────────────────
+  # 输出 / 日志
+  # ───────────────────────────────────────────────────────
+  output_dir: "./outputs/student_ckpt"
+  logging_steps: 10
+  save_steps: 500
+  save_total_limit: 3
+  dataloader_num_workers: 4
+  seed: 42
+  report_to: "none"      # none | tensorboard | wandb
+
+  # 训练完成后保存合并后的全权重目录 (LoRA 合并)
+  merged_output_dir: "./outputs/student_merged"

@@ -18,12 +18,17 @@ prompts_config: "configs/prompts_en.yaml"  # 英文版本（数据集为英文�
 # Pipeline 运行控制
 pipeline:
   # 默认运行的步骤（可通过命令行 --steps 覆盖）
-  # 🔧 改进：initial_validation 和 final_validation 已合并到 cleaning 中
+  # 六步流水线：蒸馏 → 清洗 → 准备训练数据(jsonl) → 训练 → 评估 → 可视化
   default_steps:
     # - "distillation"
-    - "cleaning"
-    # - "quality_validation"
-    # - "visualization"  # 可视化默认不运行，需要显式指定
+    # - "cleaning"
+    # - "prepare_training_data"
+    # - "training"
+    - "evaluation"
+    # - "visualization"
+
+  # 学生模型训练配置文件（training 步骤加载）
+  train_config: "configs/train.yaml"
 
   # 断点续运行
   checkpoint_path: null  # 设置为具体路径可恢复运行，如 "./outputs/checkpoint_latest.json"
@@ -249,7 +254,10 @@ output:
   # 各步骤输出目录（单步运行时自动使用作为默认输入）
   # ============================================================
   merged_dir: "./outputs/merged"        # Distillation 输出
-  cleaned_dir: "./outputs/cleaned"      # Cleaning 输出
+  cleaned_dir: "./outputs/cleaned"      # Cleaning 输出（clean_valid/need_fix/discard）
+  training_data_dir: "./outputs/training"  # Prepare Training Data 输出 (train.jsonl)
+  training_dir: "./outputs/student_ckpt"   # Training 输出（学生模型 ckpt）
+  evaluation_dir: "./outputs/evaluation"  # Evaluation 输出（report.json）
   valided_dir: "./outputs/valided"      # Quality Validation 输出（有效样本验证报告）
   visualization_dir: "./outputs/visualizations"  # Visualization 输出
 
@@ -417,6 +425,36 @@ visualization:
     enabled: true
     filename: "visualization_report.html"
     include_summary: true
+
+# ============================================================
+# 学生模型评估配置 (Evaluation Configuration)
+# ============================================================
+# 评估蒸馏后学生模型三维度：蒸馏质量 / 驾驶场景适配 / 部署效率
+# 入口：src/evaluation/evaluator.py run_evaluation
+evaluation:
+  # 训练 JSONL（教师标签，由 prepare_training_data 步骤产出）
+  train_data_path: "./outputs/training/train.jsonl"
+  # 真实图像根目录
+  images_root: "./data/filter_coco/images/val2014"
+  # 学生模型路径（默认指向训练合并输出；LoRA 时建议用 student_merged 全权重）
+  student_model_path: "./outputs/student_merged"
+  device: "cuda"
+  max_new_tokens: 256
+  max_samples: null           # null=全量评估；调试可设小数
+  output_dir: "./outputs/evaluation"
+
+  dimensions:
+    distillation_quality:
+      enabled: true
+      detail_samples: 5
+    driving_scenario:
+      enabled: true
+      eval_split: "val2014"
+      annotations_root: "./data/filter_coco/annotations"
+      detail_samples: 5
+    deployment_efficiency:
+      enabled: true
+      benchmark_samples: 10
 
 # ============================================================
 # VQA Token 过滤器配置
