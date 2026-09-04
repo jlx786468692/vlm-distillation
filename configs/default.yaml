@@ -20,11 +20,11 @@ pipeline:
   # 默认运行的步骤（可通过命令行 --steps 覆盖）
   # 六步流水线：蒸馏 → 清洗 → 准备训练数据(jsonl) → 训练 → 评估 → 可视化
   default_steps:
-    # - "distillation"
-    # - "cleaning"
-    # - "prepare_training_data"
-    # - "training"
-    - "evaluation"
+    - "distillation"
+    - "cleaning"
+    - "prepare_training_data"
+    - "training"
+    # - "evaluation"
     # - "visualization"
 
   # 学生模型训练配置文件（training 步骤加载）
@@ -434,6 +434,10 @@ visualization:
 evaluation:
   # 训练 JSONL（教师标签，由 prepare_training_data 步骤产出）
   train_data_path: "./outputs/training/train.jsonl"
+  # 测试集 JSONL（独立测试集，模型未见过）
+  # 设为你自己的测试集路径即可；存在则评估在测试集上进行（held-out），
+  # 不存在则回退 train_data_path 并告警（在训练集上评估，会高估泛化）
+  eval_data_path: null
   # 真实图像根目录
   images_root: "./data/filter_coco/images/val2014"
   # 学生模型路径（默认指向训练合并输出；LoRA 时建议用 student_merged 全权重）
@@ -454,7 +458,7 @@ evaluation:
       detail_samples: 5
     deployment_efficiency:
       enabled: true
-      benchmark_samples: 10
+      benchmark_samples: 50
 
 # ============================================================
 # VQA Token 过滤器配置

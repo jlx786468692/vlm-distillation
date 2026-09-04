@@ -15,7 +15,7 @@ import os
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
-from ._common import extract_student_answer, normalize_for_match
+from ._common import extract_student_answer, score_match
 
 
 # question_type -> 场景桶
@@ -101,8 +101,11 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any],
         out = inferencer.infer(img, q)
         s_ans = extract_student_answer(out)
 
+        # 开放描述桶：统一两段式目标后学生应吐 [Answer] 短答案；
+        # score_match 内部优先精确匹配 [Answer]，抽不到再退回 token 子集。
+        is_open = (bucket == "open")
         buckets[bucket][1] += 1
-        if normalize_for_match(s_ans) == normalize_for_match(gt):
+        if score_match(out, gt, is_open=is_open):
             buckets[bucket][0] += 1
 
         if len(detail) < cfg.get("detail_samples", 5):
@@ -111,7 +114,7 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any],
                 "bucket": bucket,
                 "question": q,
                 "gt": gt,
-                "student_answer": s_ans,
+                "student_answer": s_ans if s_ans else (out[:60] + "..." if len(out) > 60 else out),
             })
 
     bucket_stats = {

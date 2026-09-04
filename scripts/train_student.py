@@ -48,6 +48,8 @@ def parse_args():
     p.add_argument("--logging_steps", type=int, default=None)
     p.add_argument("--kl_weight", type=float, default=None, help="软标签 KL 权重 (0=关闭)")
     p.add_argument("--kl_temperature", type=float, default=None)
+    p.add_argument("--resume", type=str, default=None,
+                   help="断点续训：'true' 自动从最新 checkpoint 续，或直接给 checkpoint 路径")
     return p.parse_args()
 
 
@@ -83,6 +85,10 @@ def main():
     set_if("train.logging_steps", args.logging_steps)
     set_if("train.kl_weight", args.kl_weight)
     set_if("train.kl_temperature", args.kl_temperature)
+    # 断点续训：'true' -> True (自动找最新 checkpoint)；否则当作路径
+    if args.resume is not None:
+        resume_val = True if args.resume.lower() in ("1", "true", "yes", "y") else args.resume
+        cm.set("train.resume_from_checkpoint", resume_val)
 
     print("=" * 60)
     print(f"[train_student] config: {args.config}")

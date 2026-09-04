@@ -36,8 +36,8 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict
     params = inferencer.count_parameters()
     disk_mb = _dir_size_mb(inferencer.model_path)
 
-    # 计时样本数
-    n_bench = min(int(cfg.get("benchmark_samples", 10)), len(records))
+    # 计时样本数（默认 50：10 样本方差过大，延迟/吞吐不可靠）
+    n_bench = min(int(cfg.get("benchmark_samples", 50)), len(records))
 
     latencies = []
     use_cuda = torch.cuda.is_available() and inferencer.device.startswith("cuda")
@@ -60,6 +60,9 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict
 
     avg_latency = sum(latencies) / max(len(latencies), 1)
     throughput = len(latencies) / max(sum(latencies), 1e-9)
+    # 中位数延迟：比均值更抗离群点
+    sorted_lat = sorted(latencies)
+    median_latency = sorted_lat[len(sorted_lat) // 2] if sorted_lat else 0.0
 
     peak_vram_gb = None
     if use_cuda:
@@ -75,6 +78,7 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict
         "model_dir_size_mb": disk_mb,
         "peak_vram_gb": peak_vram_gb,
         "avg_latency_seconds": round(avg_latency, 4),
+        "median_latency_seconds": round(median_latency, 4),
         "throughput_samples_per_second": round(throughput, 4),
         "benchmark_samples": len(latencies),
     }

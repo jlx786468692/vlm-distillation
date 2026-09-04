@@ -21,16 +21,15 @@ train:
   # 每行一条扁平记录: {image_path, question, question_type, question_category,
   #   hard_label, soft_label, cot_reasoning{reasoning_paragraph, answer}}
   train_data_path: "./outputs/training/train.jsonl"
-  # 真实图像根目录 (标签里 image_path 可能指向 data/coco/val2014，
-  # 但实际图像在此目录，加载时按 basename 回退解析)
-  images_root: "./data/filter_coco/images/val2014"
+  # 真实图像根目录 (train2014 教师标注数据；image_path 已可直接解析，此处为回退兜底)
+  images_root: "./data/filter_coco/images/train2014"
   # 仅用前 N 个样本调试 (null = 全量)
   max_samples: null
 
   # ───────────────────────────────────────────────────────
   # 目标构建 (assistant 回复)
   # ───────────────────────────────────────────────────────
-  # cot   : 闭集 -> [Reasoning]观测/分析 + [Answer]结论；开集 -> 教师完整 answer
+  # cot   : 闭集/开集统一两段式 -> [Reasoning]观测/分析 + [Answer]结论
   # answer : 闭集 -> 仅简短答案；开集 -> 教师完整 answer
   target_mode: "cot"
   # 可选系统提示 (null = 不加，更贴近教师推理分布)
@@ -40,6 +39,7 @@ train:
   # 训练策略
   # ───────────────────────────────────────────────────────
   use_lora: true                # true=LoRA 微调(省显存); false=全量微调
+  use_4bit: false                # true=QLoRA(base 4-bit)；此环境下 4-bit forward 挂死，禁用
   # LoRA 参数
   lora_r: 64
   lora_alpha: 128
@@ -74,8 +74,8 @@ train:
   # 注意 token 预算：Qwen2.5-VL 视觉 token 数 ≈ max_pixels / (28*28)
   #   max_pixels=802816 ≈ 1024 视觉 token；max_length 须 > 视觉token+响应
   #   若响应被截断 (labels 全 -100) 说明 max_length 太小或 max_pixels 太大
-  max_length: 2048              # 单样本最大 token (含图像token)，超出右截断
-  max_pixels: 802816            # Qwen-VL 单图最大像素 (≈1024 视觉token，省显存)
+  max_length: 768               # 单样本最大 token (含图像token)；RTX5070 12GB(被占908MB)激活预算紧
+  max_pixels: 100352            # Qwen-VL 单图最大像素 (≈128 视觉token)；保守省显存，硬保不 OOM
   min_pixels: 3136              # 最小像素，避免极小图
   # 注意力实现: sdpa(默认,快) | eager(最兼容) | flash_attention_2(需flash-attn)
   attn_implementation: "sdpa"
@@ -94,6 +94,11 @@ train:
   # 设 kl_weight=0 可关闭，退化为纯 SFT
   kl_weight: 0.5
   kl_temperature: 2.0          # 学生侧 logits 温度 (放大候选分布平滑度)
+
+  # ───────────────────────────────────────────────────────
+  # 开集样本 CE 权重 (补偿开集样本少数 108:228 的信号稀释)
+  # 1.0=关闭(闭/开等权)；2.0=开集样本 2 倍 CE 权重。仅影响训练 loss，不影响数据量。
+  open_loss_weight: 2.0
 
   # ───────────────────────────────────────────────────────
   # 输出 / 日志

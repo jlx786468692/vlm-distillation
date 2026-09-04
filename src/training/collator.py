@@ -81,4 +81,8 @@ class QwenVLDistillCollator:
             out["kl_teacher_probs"] = prob_pad
             out["kl_candidate_mask"] = mask
 
+        # per-sample CE 权重（开集上权重用）
+        if "loss_weight" in batch[0]:
+            out["loss_weight"] = torch.stack([b["loss_weight"] for b in batch])
+
         return out

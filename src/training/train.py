@@ -77,9 +77,29 @@ class DistillTrainer(Trainer):
         for k in _KL_KEYS:
             if k in inputs:
                 kl_inputs[k] = inputs.pop(k)
+        # per-sample CE 权重 (开集上权重用；1.0/缺失时走原 mean-CE 路径)
+        loss_weight = inputs.pop("loss_weight", None)
 
-        outputs = model(**inputs)          # inputs 含 labels -> outputs.loss 为 SFT CE
-        ce_loss = outputs.loss
+        uniform = (loss_weight is None) or bool((loss_weight == 1.0).all().item())
+        if uniform:
+            outputs = model(**inputs)          # inputs 含 labels -> outputs.loss 为 SFT CE
+            ce_loss = outputs.loss
+        else:
+            # 手算加权 per-sample CE：pop labels 避免 forward 内部重复算 loss
+            labels = inputs.pop("labels", None)
+            outputs = model(**inputs)
+            logits = outputs.logits                  # (B, L, V)
+            B, L, V = logits.shape
+            shift_logits = logits[..., :-1, :].contiguous().view(-1, V)
+            shift_labels = labels[..., 1:].contiguous().view(-1)
+            token_loss = F.cross_entropy(
+                shift_logits, shift_labels,
+                ignore_index=-100, reduction="none",
+            ).view(B, -1)
+            valid = (shift_labels.view(B, -1) != -100).float().sum(dim=-1).clamp(min=1.0)
+            per_sample = token_loss.sum(dim=-1) / valid     # (B,) 每 sample 平均 NLL
+            weight = loss_weight.to(per_sample.device).to(per_sample.dtype)
+            ce_loss = (per_sample * weight).sum() / weight.sum()
 
         loss = ce_loss
         kl_loss = torch.zeros((), device=ce_loss.device)
@@ -154,13 +174,28 @@ def build_student_model(cfg: Dict[str, Any]):
 
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
 
-    model = AutoModelForVision2Seq.from_pretrained(
-        model_name,
+    # 4-bit 量化加载 (QLoRA)：12GB 级小卡显存约束下，base 权重 6GB→1.5GB，
+    # 腾出余量给更高分辨率视觉 token。与 LoRA 配合（QLoRA）。
+    use_4bit = train_cfg.get("use_4bit", False)
+    load_kwargs = dict(
         torch_dtype=dtype,
         trust_remote_code=True,
         attn_implementation=attn_impl,
-        # 训练阶段关闭 KV cache (与 gradient checkpointing 配合)
     )
+    if use_4bit:
+        try:
+            from transformers import BitsAndBytesConfig
+        except ImportError as e:
+            raise ImportError("use_4bit=True 需安装 bitsandbytes：pip install bitsandbytes") from e
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=dtype,      # 计算时反量化到 bf16
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+        print("[train] 4-bit (QLoRA) loading enabled")
+
+    model = AutoModelForVision2Seq.from_pretrained(model_name, **load_kwargs)
 
     # ---- LoRA ----
     use_lora = train_cfg.get("use_lora", True)
@@ -243,6 +278,7 @@ def run_training(cfg: Dict[str, Any]) -> str:
         target_mode=train_cfg.get("target_mode", "cot"),
         system_prompt=train_cfg.get("system_prompt"),
         max_samples=train_cfg.get("max_samples"),
+        open_loss_weight=train_cfg.get("open_loss_weight", 1.0),
     )
 
     if len(dataset) == 0:
@@ -289,9 +325,15 @@ def run_training(cfg: Dict[str, Any]) -> str:
         kl_temperature=train_cfg.get("kl_temperature", 2.0),
     )
 
-    # 5) 训练
-    print("[train] start training ...")
-    trainer.train()
+    # 5) 训练（支持断点续训：train.resume_from_checkpoint = True / 路径 / None）
+    resume = train_cfg.get("resume_from_checkpoint")
+    if resume:
+        # True -> 自动从 output_dir 内最新 checkpoint 续；否则当作具体路径
+        print(f"[train] start training (resume_from_checkpoint={resume}) ...")
+        trainer.train(resume_from_checkpoint=resume)
+    else:
+        print("[train] start training ...")
+        trainer.train()
 
     # 6) 保存
     print(f"[train] saving to {output_dir}")

@@ -16,8 +16,13 @@ Qwen2.5-VL 对话样本，生成 prompt-mask 标签 (仅在 assistant 回复 tok
       cot_reasoning.{reasoning_paragraph, answer}          <- 两段式 CoT
 
 assistant 目标文本由 build_target_text() 构造，模式：
-  - cot    : 闭集 -> [Reasoning]reasoning_paragraph + [Answer]answer；开集 -> reasoning_paragraph
+  - cot    : 闭集/开集统一两段式 -> [Reasoning]reasoning_paragraph + [Answer]answer
+             （开集无 answer 时退回裸 reasoning_paragraph，兼容旧记录）
   - answer : 闭集 -> 仅短答案；开集 -> reasoning_paragraph(完整)
+
+开集与闭集统一两段式是为了消除「闭集带标签、开集无标签」的不对称——
+学生否则会把 [Reasoning] 字面泄漏到开集输出，且评估无法从开集输出
+抽取短答案。
 
 软标签 KL (可选):
   对每个闭集样本，把 candidate 答案映射到 student 词表 token，
@@ -101,16 +106,20 @@ def build_target_text(rec: Dict[str, Any], mode: str = "cot") -> Optional[str]:
     is_open = (qcat == "open") or (qtype == "open_descriptive") \
         or ("answer" in rec and "hard_label" not in rec and "soft_label" not in rec)
 
-    # ---------- 开集：直接用教师完整推理 ----------
+    # ---------- 开集：与闭集统一两段式（消除标签泄漏） ----------
     if is_open:
         cot = _cot_reasoning_of(rec)
-        rp = cot.get("reasoning_paragraph")
-        if rp and str(rp).strip():
-            return str(rp).strip()
+        rp = (cot.get("reasoning_paragraph") or "").strip()
+        ans = (cot.get("answer") or "").strip()
+        if rp:
+            if mode == "cot" and ans:
+                # 统一两段式：学生学到一致格式，评估可从 [Answer] 抽取短答案
+                return f"[Reasoning] {rp}\n[Answer] {ans}"
+            return rp
         # 旧版 merged 记录（tasks.vqa.answer）兜底
-        ans = rec.get("answer")
-        if isinstance(ans, str) and ans.strip():
-            return ans.strip()
+        legacy_ans = rec.get("answer")
+        if isinstance(legacy_ans, str) and legacy_ans.strip():
+            return legacy_ans.strip()
         return None
 
     # ---------- 闭集 ----------
@@ -183,6 +192,8 @@ class DistillDataset(Dataset):
         target_mode: str = "cot",
         system_prompt: Optional[str] = None,
         max_samples: Optional[int] = None,
+        # 开集样本 CE 权重倍数（补偿开集样本少数导致的信号稀释；1.0=关闭）
+        open_loss_weight: float = 1.0,
         # 向后兼容：旧代码可能传 merged_dir=
         merged_dir: Optional[str] = None,
     ):
@@ -196,6 +207,7 @@ class DistillDataset(Dataset):
         self.min_pixels = min_pixels
         self.target_mode = target_mode
         self.system_prompt = system_prompt
+        self.open_loss_weight = float(open_loss_weight)
 
         # 在 image_processor 上设置像素上限/下限 (最稳健)
         try:
@@ -256,6 +268,7 @@ class DistillDataset(Dataset):
                     skipped += 1
                     continue
                 meta = get_closed_meta(rec)
+                is_open = (rec.get("question_category") == "open")
                 self.samples.append({
                     "image_path": img_path,
                     "question": rec["question"],
@@ -263,6 +276,7 @@ class DistillDataset(Dataset):
                     "answer_distribution": meta["answer_distribution"],
                     "short_answer": meta["short_answer"],
                     "is_closed": meta["answer_distribution"] is not None,
+                    "is_open": is_open,
                 })
         return skipped
 
@@ -291,6 +305,7 @@ class DistillDataset(Dataset):
                 skipped += 1
                 continue
             meta = get_closed_meta(vqa)
+            is_open = (vqa.get("question_category") == "open")
             self.samples.append({
                 "image_path": img_path,
                 "question": vqa["question"],
@@ -298,6 +313,7 @@ class DistillDataset(Dataset):
                 "answer_distribution": meta["answer_distribution"],
                 "short_answer": meta["short_answer"],
                 "is_closed": meta["answer_distribution"] is not None,
+                "is_open": is_open,
             })
         return skipped
 
@@ -458,5 +474,9 @@ class DistillDataset(Dataset):
         item["kl_answer_pos"] = kl["kl_answer_pos"]
         item["kl_candidate_ids"] = kl["kl_candidate_ids"]
         item["kl_teacher_probs"] = kl["kl_teacher_probs"]
+
+        # per-sample CE 权重（开集上权重以补偿样本数稀释；1.0 时不改变 loss）
+        w = self.open_loss_weight if s.get("is_open") else 1.0
+        item["loss_weight"] = torch.tensor(w, dtype=torch.float)
 
         return item

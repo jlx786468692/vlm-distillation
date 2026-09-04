@@ -32,28 +32,39 @@ def extract_student_answer(text: str) -> str:
     从学生输出抽取简短答案。
 
     训练目标为两段式时形如 "[Reasoning] ...\\n[Answer] X"；
-    否则取首个 token。
+    闭集学生被训练成会吐 [Answer] 标记，取标记后整行（含多词答案）。
+    无 [Answer] 标记时返回空串——开集输出是自由文本，没有可靠短答案，
+    首词法（"The image..." -> "The"）是噪声，不再回退。
     """
     if not text:
         return ""
     if "[Answer]" in text:
         tail = text.rsplit("[Answer]", 1)[-1].strip()
         if tail:
-            # 取第一行/第一个词作为短答案
-            first_line = tail.splitlines()[0].strip()
-            return first_line.split()[0] if first_line else first_line
-    # 无格式标记：取第一个 token
-    tokens = text.strip().split()
-    return tokens[0] if tokens else ""
+            # 取 [Answer] 后第一行作为短答案（保留多词，如 "around fire hydrant"）
+            return tail.splitlines()[0].strip()
+        return ""
+    return ""
 
 
 def extract_student_reasoning(text: str) -> str:
-    """从学生输出抽取 [Reasoning] 段（若有）。"""
+    """
+    从学生输出抽取 [Reasoning] 段。
+
+    - 同时有 [Reasoning]/[Answer]：取两标签之间内容。
+    - 仅有 [Reasoning]（开集格式泄漏，无 [Answer]）：取标签之后内容。
+    - 仅有 [Answer]：无推理段，返回空。
+    - 无任何标签：返回原文（开集裸推理段落）。
+    """
     if not text:
         return ""
-    if "[Reasoning]" in text and "[Answer]" in text:
-        seg = text.split("[Answer]")[0].split("[Reasoning]", 1)[-1].strip()
-        return seg
+    if "[Reasoning]" in text:
+        seg = text.split("[Reasoning]", 1)[-1]
+        if "[Answer]" in seg:
+            seg = seg.split("[Answer]")[0]
+        return seg.strip()
+    if "[Answer]" in text:
+        return ""
     return text.strip()
 
 
@@ -88,3 +99,28 @@ def token_overlap(a: str, b: str) -> float:
     if not sa or not sb:
         return 0.0
     return len(sa & sb) / len(sa | sb)
+
+
+def score_match(output: str, gt: str, is_open: bool) -> bool:
+    """
+    学生输出 vs GT 答案的匹配判定。
+
+    - 闭集：抽取 [Answer] 标记后整行，归一化后精确匹配 GT（VQA 风格归一
+      已统一大小写/冠词/标点/数字↔英文词）。
+    - 开集：优先用 [Answer] 抽取的短答案做精确比对（统一两段式目标后
+      学生会吐 [Answer]）；抽不到（旧模型/格式泄漏）时退回 token 子集
+      匹配——GT 的所有词是否作为词出现在学生输出里。这取代了原先取
+      首词再精确比对的错误做法（首词几乎必为 "The/a/an" → 误判）。
+    """
+    g = normalize_for_match(gt)
+    g_tokens = g.split()
+    if not g_tokens:
+        return False
+    short = extract_student_answer(output)
+    s = normalize_for_match(short)
+    if is_open:
+        if s:
+            return s == g
+        out_tokens = set(normalize_for_match(output).split())
+        return all(t in out_tokens for t in g_tokens)
+    return bool(s) and s == g
