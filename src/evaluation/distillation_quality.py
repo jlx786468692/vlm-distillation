@@ -19,6 +19,7 @@
 """
 
 import os
+from collections import defaultdict
 from typing import Any, Dict
 
 from ._common import (
@@ -30,6 +31,34 @@ from ._common import (
     teacher_short_answer,
     token_overlap,
 )
+
+
+def _classify_scenario(question_type: str, question: str = "") -> str:
+    """
+    按 question_type(回退 question 文本)近似分桶到驾驶场景维度。
+
+    覆盖本数据集出现的模板型 question_type：is/are*、how many、what color、
+    none of the above、what/where/who…。返回: yes_no/counting/color/choice/open/other。
+    """
+    qt = (question_type or "").strip().lower()
+    q = (question or "").strip().lower()
+    text = qt or q
+    if not text:
+        return "other"
+    if "how many" in text:
+        return "counting"
+    if "color" in text or "colour" in text:
+        return "color"
+    if "none of the above" in text or "multiple choice" in text:
+        return "choice"
+    if text.startswith("is") or text.startswith("are"):
+        return "yes_no"
+    if text.startswith("what") or text.startswith("where") \
+            or text.startswith("who") or text.startswith("which") \
+            or text.startswith("why"):
+        return "open"
+    return "other"
+
 
 
 def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -59,18 +88,44 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict
     dist_n = 0          # 可计算分布的闭集样本数
     dist_skipped = 0    # 多 token/冲突/定位失败 跳过数
 
+    # 场景分桶绝对准确率（学生 vs 人工 ground_truth，复用同一轮生成，无额外开销）
+    # 原 driving_scenario 维度独立生成会翻倍耗时，且依赖 COCO (image_id,question) 查表
+    # ——本数据 question_type 为模板型、且自带 ground_truth 字段，故并入此处。
+    scen_buckets: Dict[str, list] = defaultdict(lambda: [0, 0])  # bucket -> [correct, total]
+    scen_total = 0
+    scen_correct = 0
+
     detail = []
-    for rec in records:
+    n_recs = len(records)
+    for idx, rec in enumerate(records):
+        if idx % 100 == 0:
+            print(f"[distill_quality] {idx}/{n_recs}", flush=True)
         img = _resolve_image(rec, images_root)
         if not img:
             continue
         q = rec.get("question", "")
         out = inferencer.infer(img, q)
 
-        is_closed = (rec.get("question_category") == "closed")
+        # 闭集判定：与训练侧 DistillDataset 对齐——以 answer_distribution 存在为准，
+        # 而非 question_category=="closed"（教师标注 jsonl 的 question_category 常为 None，
+        # 否则全部误判为 open，closed_* 与 closed_distribution 悉数归零）
+        soft_rec = rec.get("soft_label") or {}
+        is_closed = bool(soft_rec.get("answer_distribution"))
         bucket = "closed" if is_closed else "open"
         t_short = teacher_short_answer(rec)
         s_short = extract_student_answer(out)
+
+        # 场景分桶绝对准确率：学生答案 vs 记录自带的 ground_truth（人工 GT）
+        gt = rec.get("ground_truth")
+        if gt is not None and str(gt).strip() != "":
+            scen_bucket = _classify_scenario(rec.get("question_type", ""), q)
+            is_open_bucket = (scen_bucket == "open")
+            scen_buckets[scen_bucket][1] += 1
+            scen_total += 1
+            if score_match(out, str(gt), is_open=is_open_bucket):
+                scen_buckets[scen_bucket][0] += 1
+                scen_correct += 1
+
 
         if is_closed:
             closed_total += 1
@@ -159,6 +214,18 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict
             "note": "学生在答案 token 位置对候选集的分布 vs 教师 answer_distribution；"
                     "KL(teacher||student) 越低越好；cosine 越高越好；"
                     "top1 为候选集内 argmax 一致率；skipped=多token/冲突/定位失败",
+        },
+        "scenario_buckets": {
+            "overall_accuracy": round(scen_correct / max(scen_total, 1), 4),
+            "overall_total": scen_total,
+            "overall_correct": scen_correct,
+            "buckets": {
+                b: {"correct": c, "total": t, "accuracy": round(c / max(t, 1), 4)}
+                for b, (c, t) in sorted(scen_buckets.items(), key=lambda x: -x[1][1])
+            },
+            "note": "学生 vs 记录自带 ground_truth(人工GT)的绝对准确率，按 question_type 模板分桶；"
+                    "复用 distillation_quality 同一轮生成，无额外开销；"
+                    "原 driving_scenario 维度(独立生成+COCO查表)已并入此处",
         },
         "detail": detail,
     }

@@ -61,13 +61,28 @@ class StudentInferencer:
     """
 
     def __init__(self, model_path: str, device: str = "cuda",
-                 dtype: str = "bfloat16", max_new_tokens: int = 256):
+                 dtype: str = "bfloat16", max_new_tokens: int = 256,
+                 max_pixels: Optional[int] = None, min_pixels: Optional[int] = None):
         self.model_path = model_path
         self.device = device
         self.max_new_tokens = max_new_tokens
         dt = getattr(torch, dtype, torch.bfloat16)
 
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+
+        # 像素上限/下限：与训练侧对齐（默认 Qwen 802816≈1024 视觉token，
+        # 单条 forward 偏重且脱离训练分辨率；显式收紧到训练用的 max_pixels）
+        if max_pixels is not None or min_pixels is not None:
+            try:
+                if max_pixels is not None:
+                    self.processor.image_processor.max_pixels = int(max_pixels)
+                if min_pixels is not None:
+                    self.processor.image_processor.min_pixels = int(min_pixels)
+                print(f"[eval] image_processor pixels -> "
+                      f"max={self.processor.image_processor.max_pixels}, "
+                      f"min={self.processor.image_processor.min_pixels}")
+            except Exception as e:
+                print(f"[eval] set image_processor pixels failed (忽略): {e}")
 
         try:
             self.model = AutoModelForVision2Seq.from_pretrained(
@@ -323,6 +338,8 @@ def run_evaluation(cfg: Any) -> Dict[str, Any]:
     )
     max_samples = eval_cfg.get("max_samples")
     max_new_tokens = int(eval_cfg.get("max_new_tokens", 256))
+    max_pixels = eval_cfg.get("max_pixels")  # 与训练对齐的视觉 token 上限
+    min_pixels = eval_cfg.get("min_pixels")
     device = eval_cfg.get("device", cfg.get("student.device", "cuda"))
 
     output_dir = Path(eval_cfg.get("output_dir", cfg.get("output.evaluation_dir", "./outputs/evaluation")))
@@ -364,6 +381,7 @@ def run_evaluation(cfg: Any) -> Dict[str, Any]:
     inferencer = StudentInferencer(
         model_path=student_model_path, device=device,
         max_new_tokens=max_new_tokens,
+        max_pixels=max_pixels, min_pixels=min_pixels,
     )
     report["model_load_seconds"] = round(time.time() - t0, 2)
     report["parameter_count"] = inferencer.count_parameters()
