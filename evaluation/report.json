@@ -1,0 +1,257 @@
+{
+  "train_data_path": "outputs/training/train.jsonl",
+  "eval_data_path": "./training/agent_teacher/val_soft_sampling.jsonl",
+  "is_heldout": true,
+  "student_model_path": "./outputs/student_merged",
+  "max_samples": null,
+  "dimensions": {
+    "distillation_quality": {
+      "dimension": "distillation_quality",
+      "samples_evaluated": 2431,
+      "closed_answer_match_rate": 0.8198,
+      "closed_primary_match_rate": 0.8198,
+      "open_text_similarity": 0.0,
+      "open_text_semantic_similarity": null,
+      "cot_similarity": 0.3237,
+      "cot_semantic_similarity": 0.8077,
+      "answer_sequence_ce": {
+        "closed": {
+          "mean": 1.0695,
+          "samples": 2431
+        },
+        "open": {
+          "mean": null,
+          "samples": 0
+        },
+        "temperature": 1.0,
+        "note": "学生对教师目标文本的自回归 NLL（越低越好）；推理 T=1，无温度缩放；分闭集/开集"
+      },
+      "closed_distribution": {
+        "samples": 2221,
+        "skipped": 210,
+        "kl_mean": 0.018826,
+        "cosine_mean": 0.9964,
+        "top1_distribution_match_rate": 0.9986,
+        "temperature": 1.0,
+        "note": "学生在答案 token 位置对候选集的分布 vs 教师 answer_distribution；KL(teacher||student) 越低越好；cosine 越高越好；top1 为候选集内 argmax 一致率；skipped=多token/冲突/定位失败"
+      },
+      "scenario_buckets": {
+        "overall_accuracy": 0.8198,
+        "overall_total": 2431,
+        "overall_correct": 1993,
+        "buckets": {
+          "yes_no": {
+            "correct": 1150,
+            "total": 1320,
+            "accuracy": 0.8712
+          },
+          "color": {
+            "correct": 299,
+            "total": 323,
+            "accuracy": 0.9257
+          },
+          "open": {
+            "correct": 139,
+            "total": 259,
+            "accuracy": 0.5367
+          },
+          "counting": {
+            "correct": 181,
+            "total": 250,
+            "accuracy": 0.724
+          },
+          "other": {
+            "correct": 160,
+            "total": 198,
+            "accuracy": 0.8081
+          },
+          "choice": {
+            "correct": 64,
+            "total": 81,
+            "accuracy": 0.7901
+          }
+        },
+        "note": "学生 vs 记录自带 ground_truth(人工GT)的绝对准确率，按 question_type 模板分桶；复用 distillation_quality 同一轮生成，无额外开销；原 driving_scenario 维度(独立生成+COCO查表)已并入此处"
+      },
+      "detail": [
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000061181.jpg",
+          "question_type": "what color is the",
+          "bucket": "color",
+          "question": "What color is the traffic light?",
+          "teacher_answer": "green",
+          "student_answer": "green",
+          "teacher_output": "[Reasoning] The traffic lights suspended above the road on both the left and right sides display an illuminated green signal. This visual feature indicates the current state of the traffic control device is green.\n[Answer] green",
+          "student_output": "[Reasoning] The traffic lights suspended over the roadway display illuminated signals at the bottom of the vertical housing. These active lights emit a distinct green hue, indicating the go signal for vehicles.\n[Answer] green",
+          "teacher_soft_label": {
+            "green": 1.0
+          },
+          "student_soft_label": {
+            "green": 1.0
+          }
+        },
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000580041.jpg",
+          "question_type": "what color are the",
+          "bucket": "color",
+          "question": "What color are the brake lights?",
+          "teacher_answer": "red",
+          "student_answer": "red",
+          "teacher_output": "[Reasoning] The image displays the rear view of a vehicle in traffic during twilight. Two distinct illuminated circular lights are visible on the back of the central car, glowing with a bright red hue against the darker silhouette of the vehicle body. These illuminated features correspond to the brake lights, confirming their color is red.\n[Answer] red",
+          "student_output": "[Reasoning] The image displays a street scene at dusk where vehicles are stopped at an intersection. Specifically, the rear of a silver car in the center lane and the rear of a white car on the right side show illuminated red lights. These glowing signals indicate that the brakes are applied, confirming their color is red.\n[Answer] red",
+          "teacher_soft_label": {
+            "red": 1.0
+          },
+          "student_soft_label": {
+            "red": 1.0
+          }
+        },
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000372938.jpg",
+          "question_type": "how many",
+          "bucket": "counting",
+          "question": "How many trucks are on the road?",
+          "teacher_answer": "1",
+          "student_answer": "1",
+          "teacher_output": "[Reasoning] The image displays a single red pickup truck traveling on a dirt road, heavily loaded with cargo and passengers. No other vehicles are visible in the background or foreground. Visual evidence confirms the presence of exactly one truck.\n[Answer] 1",
+          "student_output": "[Reasoning] The image displays a single red pickup truck traveling on a dirt road, loaded with people and goods in the bed. No other trucks are visible in the background or foreground, confirming the presence of only one vehicle of this type.\n[Answer] 1",
+          "teacher_soft_label": {
+            "1": 1.0
+          },
+          "student_soft_label": {
+            "1": 1.0
+          }
+        },
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000174482.jpg",
+          "question_type": "how many",
+          "bucket": "counting",
+          "question": "How many bikes are pictured?",
+          "teacher_answer": "1",
+          "student_answer": "1",
+          "teacher_output": "[Reasoning] The image prominently features a single blue bicycle parked on the sidewalk in the foreground, secured to a metal rack. While there are several cars and a van visible on the street in the background, no other bicycles are present in the scene. Therefore, the visual count is limited to the one bike in the immediate view.\n[Answer] 1",
+          "student_output": "[Reasoning] The image displays a single blue bicycle parked on the sidewalk in the foreground. While there are several cars visible in the background traffic, no other bicycles are present in the scene. Visual evidence confirms the count is limited to this one specific object.\n[Answer] 1",
+          "teacher_soft_label": {
+            "1": 1.0
+          },
+          "student_soft_label": {
+            "1": 1.0
+          }
+        },
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000319345.jpg",
+          "question_type": "none of the above",
+          "bucket": "choice",
+          "question": "Does it seem to be a busy day?",
+          "teacher_answer": "yes",
+          "student_answer": "yes",
+          "teacher_output": "[Reasoning] The street contains multiple vehicles in the travel lanes, including a white sedan, a silver van, and other cars further down the road, alongside a row of parked motorcycles in the foreground. Pedestrians are visible on the distant sidewalks, and the presence of active traffic flow combined with parked vehicles demonstrates a high level of urban activity. This visual evidence of congestion and usage supports the conclusion that it is a busy day, whereas a no answer would require an empty street or lack of activity which is not present.\n[Answer] yes",
+          "student_output": "[Reasoning] The street contains multiple vehicles, including several motorcycles and cars, occupying the roadway and waiting in a line at an intersection. Pedestrians are visible walking on the sidewalk and crossing the street, and traffic signals show active red lights. This density of moving and stationary traffic confirms high activity levels.\n[Answer] yes",
+          "teacher_soft_label": {
+            "yes": 1.0
+          },
+          "student_soft_label": {
+            "yes": 1.0
+          }
+        },
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000539808.jpg",
+          "question_type": "none of the above",
+          "bucket": "choice",
+          "question": "Can this plane go to Germany?",
+          "teacher_answer": "yes",
+          "student_answer": "yes",
+          "teacher_output": "[Reasoning] The aircraft displays \"Lufthansa\" text on the fuselage and the Lufthansa crane logo on the tail fin, identifying it as an airliner for the German flag carrier. Lufthansa is a long-haul airline that operates international flights to Germany, and the visible four-engine wide-body configuration confirms it is a large commercial jet capable of such distances.\n[Answer] yes",
+          "student_output": "[Reasoning] The aircraft displays the text \"Lufthansa\" on its fuselage and features the airline's distinctive yellow circle logo with a blue bird on the tail fin. Lufthansa is a German airline headquartered in Frankfurt, Germany. Since the plane is operated by a carrier based in Germany and bears branding specific to that country, it is capable of flying to Germany.\n[Answer] yes",
+          "teacher_soft_label": {
+            "yes": 1.0
+          },
+          "student_soft_label": {
+            "yes": 1.0
+          }
+        },
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000459912.jpg",
+          "question_type": "what brand",
+          "bucket": "open",
+          "question": "What brand of bike can you see?",
+          "teacher_answer": "suzuki",
+          "student_answer": "honda",
+          "teacher_output": "[Reasoning] The image displays a crowded street scene filled with numerous parked motorcycles and scooters. In the immediate foreground, there is a black motorcycle with a visible fuel tank and side panel. On the side of the fuel tank, the word \"Suzuki\" is clearly printed in white capital letters. Additionally, further back in the row of bikes, another blue motorcycle also displays the \"Suzuki\" branding on its side cover. These visible logos identify the brand of the bikes.\n[Answer] suzuki",
+          "student_output": "[Reasoning] The image displays a row of parked motorcycles in the foreground, with one helmet resting on the handlebars of the closest bike. On the side panel of this specific motorcycle, the word \"HONDA\" is clearly printed in white capital letters next to a graphic logo featuring a red circle and a blue star. This text serves as the brand identifier for the vehicle.\n[Answer] honda",
+          "teacher_soft_label": {
+            "suzuki": 0.875,
+            "splendor and suzuki": 0.125
+          },
+          "student_soft_label": null
+        },
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000322654.jpg",
+          "question_type": "what",
+          "bucket": "open",
+          "question": "What 2 words that start with the letter \"L\" appear on the sign?",
+          "teacher_answer": "left lane",
+          "student_answer": "left lane",
+          "teacher_output": "[Reasoning] The image displays a metal pole supporting two traffic signs against a backdrop of trees and a road. The upper sign reads \"Harlem River Drive,\" while the lower rectangular white sign contains black text arranged in two lines. The first line reads \"LEFT\" and the second line reads \"LANE.\" Both of these words begin with the letter \"L,\" satisfying the specific condition in the question.\n[Answer] left lane",
+          "student_output": "[Reasoning] The image displays two prominent signs mounted on a metal pole near a roadside. The top sign is a black and white rectangular plaque identifying the location as \"Harlem River Drive\". Directly beneath it, there is a smaller square white sign with black text that reads \"LEFT LANE\". Both of these visible words begin with the letter \"L\".\n[Answer] left lane",
+          "teacher_soft_label": {
+            "left lane": 1.0
+          },
+          "student_soft_label": null
+        },
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000321107.jpg",
+          "question_type": "is the",
+          "bucket": "yes_no",
+          "question": "Is the bicyclist wearing a helmet?",
+          "teacher_answer": "no",
+          "student_answer": "no",
+          "teacher_output": "[Reasoning] The bicyclist in the foreground has visible dark hair and no protective headgear covering the top or sides of the head. A helmet would present as a distinct, solid shell shape around the cranium, which is absent here. Therefore, the visual evidence confirms the absence of a helmet.\n[Answer] no",
+          "student_output": "[Reasoning] The bicyclist in the foreground has dark hair that is fully visible and uncovered, with no protective headgear present on the head. In contrast, another cyclist in the background is clearly wearing a black helmet. Since the main subject's head is bare, the answer is no.\n[Answer] no",
+          "teacher_soft_label": {
+            "no": 1.0
+          },
+          "student_soft_label": {
+            "no": 1.0
+          }
+        },
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000087038.jpg",
+          "question_type": "is this a",
+          "bucket": "yes_no",
+          "question": "Is this a skate park?",
+          "teacher_answer": "yes",
+          "student_answer": "yes",
+          "teacher_output": "[Reasoning] The image displays a paved outdoor area containing specific structures such as concrete ledges, stairs, and a ramp in the foreground left. A person is performing a trick with a skateboard while another rides a BMX bike, and the surrounding walls are covered in graffiti art. These physical features and activities define the location as a skate park, ruling out the option no.\n[Answer] yes",
+          "student_output": "[Reasoning] The image displays concrete ramps, rails, and a half-pipe structure in the foreground, which are specific architectural elements of a skate park. A person is performing a trick on a skateboard near these features, confirming the location is designed for skateboarding activities. The background contains graffiti-covered walls and buildings typical of an urban skate spot, supporting the classification as a skate park rather than a standard street or public area.\n[Answer] yes",
+          "teacher_soft_label": {
+            "yes": 1.0
+          },
+          "student_soft_label": {
+            "yes": 1.0
+          }
+        }
+      ]
+    },
+    "deployment_efficiency": {
+      "dimension": "deployment_efficiency",
+      "parameter_count": {
+        "total": 3754622976,
+        "trainable": 3754622976
+      },
+      "total_parameters": 3754622976,
+      "trainable_parameters": 3754622976,
+      "model_dir_size_mb": 11942.9,
+      "peak_vram_gb": 7.258,
+      "avg_latency_seconds": 2.8283,
+      "median_latency_seconds": 2.7663,
+      "throughput_samples_per_second": 0.3536,
+      "benchmark_samples": 50
+    }
+  },
+  "model_load_seconds": 78.27,
+  "parameter_count": {
+    "total": 3754622976,
+    "trainable": 3754622976
+  }
+}

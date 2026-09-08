@@ -9,7 +9,10 @@ import re
 import string
 from typing import Optional
 
-from ..utils.answer_normalizer import normalize_answer
+try:  # 包模式 (pipeline: src.evaluation._common)
+    from ..utils.answer_normalizer import normalize_answer
+except ImportError:  # 脚本模式
+    from utils.answer_normalizer import normalize_answer
 
 
 def normalize_for_match(answer: str) -> str:
@@ -124,3 +127,55 @@ def score_match(output: str, gt: str, is_open: bool) -> bool:
         out_tokens = set(normalize_for_match(output).split())
         return all(t in out_tokens for t in g_tokens)
     return bool(s) and s == g
+
+
+# ==============================
+# 语义相似度 (Sentence-BERT 余弦)
+# ==============================
+# 用 all-MiniLM-L6-v2 (经 hf-mirror 下载) 做句向量余弦，补 token Jaccard
+# 对同义不同词的盲区。模型懒加载一次缓存；加载失败则降级跳过(不阻断评估)。
+_SBERT = None
+
+
+def get_sbert():
+    """懒加载 Sentence-BERT (all-MiniLM-L6-v2)。返回模型或 None(不可用)。"""
+    global _SBERT
+    if _SBERT is not None:
+        return _SBERT if _SBERT is not False else None
+    try:
+        import os
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        from sentence_transformers import SentenceTransformer
+        _SBERT = SentenceTransformer("all-MiniLM-L6-v2")
+        print("[eval] SBERT(all-MiniLM-L6-v2) 加载成功")
+    except Exception as e:
+        print(f"[eval] SBERT 加载失败，语义相似度指标跳过: {e}")
+        _SBERT = False
+    return _SBERT if _SBERT is not False else None
+
+
+def semantic_similarity_batch(pairs):
+    """批量语义余弦相似度。
+
+    Args:
+        pairs: List[(text_a, text_b)]
+    Returns:
+        List[Optional[float]]：每对的余弦(0~1)；任一文本空或 SBERT 不可用 → None。
+    """
+    model = get_sbert()
+    if model is None:
+        return [None] * len(pairs)
+    import numpy as np
+    valid = [(i, a, b) for i, (a, b) in enumerate(pairs) if (a and b)]
+    out = [None] * len(pairs)
+    if not valid:
+        return out
+    texts_a = [a for _, a, _ in valid]
+    texts_b = [b for _, _, b in valid]
+    emb_a = model.encode(texts_a, normalize_embeddings=True,
+                         show_progress_bar=False, convert_to_numpy=True)
+    emb_b = model.encode(texts_b, normalize_embeddings=True,
+                         show_progress_bar=False, convert_to_numpy=True)
+    for k, (i, _, _) in enumerate(valid):
+        out[i] = float(np.dot(emb_a[k], emb_b[k]))
+    return out

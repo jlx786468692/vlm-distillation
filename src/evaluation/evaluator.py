@@ -10,6 +10,8 @@ run_evaluation(cfg)：
 """
 
 import json
+import re
+import string
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,9 +20,27 @@ import torch
 from PIL import Image
 from transformers import AutoModelForVision2Seq, AutoProcessor
 
+try:  # 包模式 (pipeline: src.evaluation.evaluator)
+    from ..utils.answer_normalizer import normalize_answer
+except ImportError:  # 脚本模式 (evaluation 为顶层包, .. 越界)
+    from utils.answer_normalizer import normalize_answer
 from .distillation_quality import evaluate as eval_distillation_quality
 from .driving_scenario_eval import evaluate as eval_driving_scenario
 from .deployment_efficiency import evaluate as eval_deployment_efficiency
+
+
+def _norm_ans(s: Any) -> str:
+    """答案归一化（镜像训练侧 distill_dataset._norm_ans，用于 KL 矛盾判定）。
+
+    小写、去冠词/标点、数字↔英文词统一(word 形)。保证训练/评估跳过口径一致。
+    """
+    if not s:
+        return ""
+    a = str(s).strip().lower()
+    a = re.sub(r"\b(a|an|the)\b", " ", a)
+    a = a.translate(str.maketrans("", "", string.punctuation))
+    a = " ".join(a.split())
+    return normalize_answer(a, "word")
 
 
 def _load_records(train_data_path: str, max_samples: Optional[int]) -> List[Dict[str, Any]]:
@@ -251,7 +271,7 @@ class StudentInferencer:
         # ---- 软标签分布匹配（镜像训练 _build_kl_meta）----
         dist_res = None
         if short_answer and dist:
-            cand = self._candidate_token_ids(dist)
+            cand = self._candidate_token_ids(dist, short_answer=short_answer)
             if cand is not None:
                 cand_ids, tprobs = cand
                 # 定位答案 token：short_answer 首 token 在 response 内最后一次出现
@@ -277,17 +297,31 @@ class StudentInferencer:
                             top1_match = bool(
                                 s_probs.argmax().item() == t.argmax().item()
                             )
+                            cands = list(dist.keys())
                             dist_res = {
                                 "kl": kl, "cos": cos, "top1_match": top1_match,
                                 "n_cand": len(cand_ids),
+                                # 师生软标签分布（detail 诊断用，候选答案→概率）
+                                "student_distribution": {
+                                    cands[i]: round(float(s_probs[i]), 4)
+                                    for i in range(len(cand_ids))
+                                },
+                                "teacher_distribution": {
+                                    cands[i]: round(float(tprobs[i]), 4)
+                                    for i in range(len(cand_ids))
+                                },
                             }
         return ce_val, n_tok, dist_res
 
-    def _candidate_token_ids(self, dist: Dict[str, float]):
+    def _candidate_token_ids(self, dist: Dict[str, float],
+                             short_answer: Optional[str] = None):
         """候选答案 -> 首 token id（单 token 才接受）。
 
         镜像 DistillDataset._build_kl_meta 的候选映射 + 跳过规则：
         多 token 候选 / token 冲突 / 概率和<=0 均返回 None（与训练一致）。
+        新增：short_answer 提供时，教师 soft argmax ≠ hard 答案视为软标签
+        不可信，返回 None 跳过（与训练侧矛盾跳过同口径，避免 color 题
+        "学生正确 vs 教师错"的高 KL 误导评估）。
         Returns: (cand_ids, probs) 已归一化，或 None。
         """
         tok = self.processor.tokenizer
@@ -307,6 +341,11 @@ class StudentInferencer:
         if s <= 0:
             return None
         probs = [p / s for p in probs]
+        # 🔧 矛盾跳过（镜像训练 _build_kl_meta）：soft argmax ≠ hard 答案 → None
+        if short_answer:
+            primary = cands[max(range(len(probs)), key=lambda i: probs[i])]
+            if _norm_ans(primary) != _norm_ans(short_answer):
+                return None
         return cand_ids, probs
 
     def count_parameters(self) -> Dict[str, int]:

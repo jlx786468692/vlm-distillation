@@ -20,7 +20,10 @@ train:
   # 训练 JSONL 路径 (流水线 prepare_training_data 步骤输出)
   # 每行一条扁平记录: {image_path, question, question_type, question_category,
   #   hard_label, soft_label, cot_reasoning{reasoning_paragraph, answer}}
-  train_data_path: "./outputs/training/train.jsonl"
+  # 🔧 治本: 改用 sampling 法软标签(color primary==hard 100% 干净, 无 logit 法 color 塌缩)
+  #   logit(logprob) 法 color 软标签 65% primary="other" 与 hard 答案矛盾, 经 KL 泄漏致硬标签坍塌;
+  #   sampling 法多次推理采样, 软标签 100% 与 hard 一致, KL 全量可信.
+  train_data_path: "./training/agent_teacher/train_soft_sampling.jsonl"
   # 真实图像根目录 (train2014 教师标注数据；image_path 已可直接解析，此处为回退兜底)
   images_root: "./data/filter_coco/images/train2014"
   # 仅用前 N 个样本调试 (null = 全量)

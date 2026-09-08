@@ -32,6 +32,8 @@ assistant 目标文本由 build_target_text() 构造，模式：
 
 import json
 import os
+import re
+import string
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -39,7 +41,27 @@ import torch
 from PIL import Image, ImageFile
 from torch.utils.data import Dataset
 
+try:  # 包模式 (pipeline: src.training.distill_dataset)
+    from ..utils.answer_normalizer import normalize_answer
+except ImportError:  # 脚本模式 (train_student.py: training 为顶层包, .. 越界)
+    from utils.answer_normalizer import normalize_answer
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+def _norm_ans(s: Any) -> str:
+    """答案归一化（镜像评估侧 normalize_for_match，用于 KL 矛盾判定）。
+
+    小写、去冠词/标点、数字↔英文词统一(word 形)。candidate 答案串多为
+    单词（red/yes/two），此归一化保证 hard 答案与 soft argmax 可比。
+    """
+    if not s:
+        return ""
+    a = str(s).strip().lower()
+    a = re.sub(r"\b(a|an|the)\b", " ", a)
+    a = a.translate(str.maketrans("", "", string.punctuation))
+    a = " ".join(a.split())
+    return normalize_answer(a, "word")
 
 
 # ============================================================
@@ -371,6 +393,15 @@ class DistillDataset(Dataset):
         if s <= 0:
             return empty
         probs_t = torch.tensor([p / s for p in probs], dtype=torch.float)
+
+        # 🔧 矛盾样本跳过 KL：教师 soft argmax 与 hard 答案不一致时软标签
+        # 不可信（logprob 法对 color 题把通用词 "other" 虚高为 argmax，但
+        # hard_label 是真颜色）。跳过该样本 KL 项，只保留 CE 学真答案，
+        # 阻断错误分布经 KL 通道泄漏到答案 token。与评估侧 _build_kl_meta
+        # 同款镜像，保证训练/评估跳过口径一致。
+        primary = cands[max(range(len(probs)), key=lambda i: probs[i])]
+        if _norm_ans(primary) != _norm_ans(short):
+            return empty  # soft argmax ≠ hard 答案 → 软标签矛盾，跳过 KL
 
         # 定位答案 token: 在 response 区间找 short 的首 token (最后一次出现)
         gold_tid = self._first_token_id(short, leading_space=True)

@@ -27,6 +27,7 @@ from ._common import (
     extract_student_reasoning,
     normalize_for_match,
     score_match,
+    semantic_similarity_batch,
     teacher_reasoning,
     teacher_short_answer,
     token_overlap,
@@ -75,6 +76,9 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict
     cot_sim_n = 0
     open_sim_sum = 0.0
     open_sim_n = 0
+    # 语义相似度(批量编码，循环后一次性算)：收集 (student, teacher) 推理段对
+    cot_sem_pairs: list = []      # CoT 语义对
+    open_sem_pairs: list = []     # 开集语义对
 
     # 序列 CE 分桶累计（按 closed / open 分开统计）
     ce_sum = {"closed": 0.0, "open": 0.0}
@@ -96,6 +100,11 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict
     scen_correct = 0
 
     detail = []
+    # detail 按题型分层抽样：覆盖 color/counting/choice/open/yes_no，各取等量达 10 条
+    detail_target = int(cfg.get("detail_samples", 10))
+    detail_priority = ("color", "counting", "choice", "open", "yes_no")
+    detail_per_bucket = max(1, detail_target // len(detail_priority))
+    detail_by_bucket: Dict[str, list] = defaultdict(list)
     n_recs = len(records)
     for idx, rec in enumerate(records):
         if idx % 100 == 0:
@@ -144,6 +153,7 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict
                 s_rp = extract_student_reasoning(out)
                 open_sim_sum += token_overlap(s_rp, t_rp)
                 open_sim_n += 1
+                open_sem_pairs.append((s_rp, t_rp))
 
         # CoT 相似度（学生推理段 vs 教师推理段）
         s_reason = extract_student_reasoning(out)
@@ -151,6 +161,7 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict
         if t_reason and s_reason:
             cot_sim_sum += token_overlap(s_reason, t_reason)
             cot_sim_n += 1
+            cot_sem_pairs.append((s_reason, t_reason))
 
         # 序列 Cross-Entropy + 软标签分布匹配（一次前向）
         target_text = build_target_text(rec, target_mode)
@@ -177,19 +188,39 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict
             else:
                 dist_skipped += 1
 
-        if len(detail) < cfg.get("detail_samples", 5):
-            detail.append({
-                "image_id": rec.get("image_id"),
+        # detail 分层抽样：按题型分桶各取 detail_per_bucket 条，覆盖 5 类
+        det_bucket = _classify_scenario(rec.get("question_type", ""), q)
+        if (det_bucket in detail_priority
+                and len(detail_by_bucket[det_bucket]) < detail_per_bucket):
+            detail_by_bucket[det_bucket].append({
+                "image_path": rec.get("image_path"),
+                "question_type": rec.get("question_type"),
+                "bucket": det_bucket,
                 "question": q,
                 "teacher_answer": t_short,
-                "student_answer": s_short if s_short else (out[:60] + "..." if len(out) > 60 else out),
-                "student_output": out[:200],
+                "student_answer": s_short,
+                "teacher_output": target_text,          # 教师目标文本([Reasoning]...[Answer]...)完整
+                "student_output": out,                  # 学生生成完整文本
+                "teacher_soft_label": dist,             # 教师 answer_distribution {答案:概率}
+                "student_soft_label": (dist_res.get("student_distribution")
+                                       if dist_res else None),  # 学生候选分布
             })
+
+    # detail 按优先桶顺序展平（color/counting/choice/open/yes_no 各 per_bucket 条）
+    detail = [item for b in detail_priority for item in detail_by_bucket[b]]
 
     def _ce_mean(bucket_key):
         if ce_tok[bucket_key] == 0:
             return None
         return round(ce_sum[bucket_key] / ce_tok[bucket_key], 4)
+
+    # 语义相似度（批量编码，循环后一次性算，避免逐条 encode 的开销）
+    cot_sem_sims = semantic_similarity_batch(cot_sem_pairs)
+    cot_sem_sum = sum(x for x in cot_sem_sims if x is not None)
+    cot_sem_n = sum(1 for x in cot_sem_sims if x is not None)
+    open_sem_sims = semantic_similarity_batch(open_sem_pairs)
+    open_sem_sum = sum(x for x in open_sem_sims if x is not None)
+    open_sem_n = sum(1 for x in open_sem_sims if x is not None)
 
     return {
         "dimension": "distillation_quality",
@@ -197,7 +228,13 @@ def evaluate(inferencer, records, images_root: str, cfg: Dict[str, Any]) -> Dict
         "closed_answer_match_rate": round(closed_match / max(closed_total, 1), 4),
         "closed_primary_match_rate": round(primary_match / max(primary_total, 1), 4),
         "open_text_similarity": round(open_sim_sum / max(open_sim_n, 1), 4),
+        "open_text_semantic_similarity": (
+            round(open_sem_sum / max(open_sem_n, 1), 4) if open_sem_n else None
+        ),
         "cot_similarity": round(cot_sim_sum / max(cot_sim_n, 1), 4),
+        "cot_semantic_similarity": (
+            round(cot_sem_sum / max(cot_sem_n, 1), 4) if cot_sem_n else None
+        ),
         "answer_sequence_ce": {
             "closed": {"mean": _ce_mean("closed"), "samples": ce_n["closed"]},
             "open": {"mean": _ce_mean("open"), "samples": ce_n["open"]},
