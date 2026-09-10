@@ -31,7 +31,7 @@ pipeline:
   train_config: "configs/train.yaml"
 
   # 断点续运行
-  checkpoint_path: "./outputs/checkpoint_train2014.json"  # 🔧 train2014 专属续训点; 每隔 20 图自动存盘, SIGINT 自动存, 重跑跳过已处理图
+  checkpoint_path: "./outputs/checkpoint_latest.json"
 
   # 测试运行（只验证配置，不实际运行）
   dry_run: false
