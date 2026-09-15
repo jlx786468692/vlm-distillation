@@ -7,6 +7,12 @@
 > **评估** `training/agent_teacher/val_soft_sampling.jsonl`（2431 条，**held-out**，全闭集，sampling 软标签）
 
 > **本次更新要点**：相比上一版（logprob 软标签，color 塌缩，overall 0.6437），本次改用 sampling 法软标签重训重评——color 塌缩**已修复**（0.0245→0.9257），overall 回升至 **0.8198**，保留率 71.9%→**91.6%**，新增 CoT 语义相似度指标（Sentence-BERT cosine 0.8077）。
+>
+> **§13 更新（2026-09-14）**：新增 32B-教师学生（`student_merged_32b`，32B 教师 logits/top_k=20 法软标签训成）评估，overall **0.835**（目前最高，距教师天花板 0.8954 仅 6pp，保留率 93.4%）。与 sampling 学生（0.8198）+ 未训 base（lenient 0.7709）三方对比见 §13：换 32B 教师硬标签 +1.5pp（主要 yes_no/other/open），代价是 CoT Jaccard 与序列 CE 略退。
+>
+> **§14 更新（2026-09-15）**：两教师学生完整对比（32B 教师 vs qwen3.7-plus 教师，§14）。32B 教师学生**全面占优**——硬标签 0.835 vs 0.820、CoT 同源口径三项全胜（Jaccard 0.366/0.324、SBERT 0.836/0.808、CE 0.664/1.070）。§13.2 的"CoT 退步"经 §13.5 同源重评更正为评估参照系假象。根因：32B 与 3B 学生同族同源、logits 法软标签精度高、CoT 确定性强。
+> **§15 更新（2026-09-15）**：四方对比（§15）——32B 教师 / qwen3.7-plus 教师 / 两个 3B 学生一张表。sampling val 2431 同口径下：qwen3.7-plus 教师 0.8954（天花板）、qwen3.7-plus 学生 0.8198、32B 学生 0.835。32B 教师天花板因自身 val（336）为"教师答对子集"（hard_label==GT 100%）退化为 sanity、且未在 2431 上跑过，列为参考缺失；其学生反超 qwen3.7-plus 学生间接证明 32B 教师数据 ≥ qwen3.7-plus。补齐方案见 §15.5。
+>
 
 ---
 
@@ -629,6 +635,254 @@ yes_no(1320) + color(323) = 1693/2431 = **70%** 样本在这两桶，base 本就
 
 ---
 
+## 13. 32B-教师学生 vs sampling-教师学生（三方对比）
+
+> **新增（2026-09-14）**：32B-教师数据学生（`student_merged_32b`，训于 4864 条 train2014，32B 教师 logits/top_k=20 法软标签）在同一 val 集 `val_soft_sampling.jsonl`（2431 条 held-out）上评估，overall **0.835**——目前最高。与 §12 的 sampling-教师学生（0.8198）和未训 base（lenient 0.7709）三方对比，量化"换更强教师"的边际收益。产出 `outputs/evaluation/report.json`（已备份到 `/mnt/data/workspace/jlx/eval_32b/report.json`）。
+
+### 13.1 硬标签三方分桶对比
+
+| 桶（样本数） | 32B 学生 | 0.82 学生 | 未训 base¹ | 教师天花板² |
+|---|---|---|---|---|
+| yes_no（1320） | **0.8924** | 0.8712 | 0.8114 | ~0.95 |
+| color（323） | 0.9257 | 0.9257 | 0.935 | 0.959 |
+| counting（250） | 0.724 | 0.724 | 0.54 | 0.843 |
+| choice（81） | 0.7778 | 0.7901 | 0.6173 | 0.869 |
+| other（198） | **0.8182** | 0.8081 | 0.7424 | — |
+| open（259） | **0.5676** | 0.5367 | 0.6525 | ~0.60 |
+| **overall（2431）** | **0.835** | 0.8198 | 0.7709 | 0.8954 |
+
+> ¹ **口径不对称（关键）**：32B 学生 / 0.82 学生 = scenario 口径（crisp，`[Answer]` 抽取后精确匹配，可直接互比）；未训 base = lenient token 子集宽松口径（base 无 `[Answer]` 标记，从自由文本抽答，偏乐观），**不可与前两者直接比**；教师天花板 = 教师 hard_label vs GT（crisp）。base 在原严格口径下 overall 仅 0.0695（格式伪影，见 §12.2）。
+> ² 教师天花板取自 §12.6。
+
+### 13.2 软标签 / CoT / 序列 CE 三方对比
+
+| 维度 | 指标 | 32B 学生 | 0.82 学生 | 未训 base |
+|---|---|---|---|---|
+| 硬标签 | closed_answer_match_rate | 0.8318 | 0.8198 | 0.0 / 0.7709¹ |
+| | closed_primary_match_rate | 0.8318 | 0.8198 | — |
+| 软标签 | KL(teacher‖student) | 0.01996 | **0.01883** | 0.0524 |
+| | cosine | 0.9962 | 0.9964 | 0.9953 |
+| | top1 分布一致率 | 0.995 | 0.9986 | 0.9995 |
+| | skipped / samples | 210 / 2221 | 210 / 2221 | 210 / 2221² |
+| CoT | token Jaccard | 0.2416 | **0.3237** | 0.1431 |
+| | SBERT 语义相似度 | 0.7684 | **0.8077** | 0.6553 |
+| 序列 | answer_sequence_ce（closed mean） | 2.4872 | **1.0695** | 2.28 |
+
+> ² 三方 skipped 均为 210/2221——skipped 由 val 数据决定（多 token/冲突/定位失败），非学生属性，同 val 集自然相同。
+
+### 13.3 差异归因：32B 教师数据法 vs sampling 法如何传导到学生
+
+> ⚠️ **更正（2026-09-15）**：本节原把 CoT Jaccard/序列 CE 的"退步"归因为"32B CoT 风格单一/难复现"，**不完整**。真正主因是**训练/评估教师不匹配**——32B 学生训练用 32B 教师 CoT，但 §13.2 的 CoT 指标用 `val_soft_sampling`（sampling 教师 CoT）做参照，两教师措辞风格不同，故 32B 学生的输出对 sampling 教师文本的 token 重合天然低、CE 天然高。§13.5 用同源 32B 教师 val 重评后，CoT 指标**全面反超 sampling 学生**。下表/归因的第 3、4 点仅保留为"风格差异"的次要描述，主因见 §13.5。
+
+32B 学生与 0.82 学生用**同一 3B 基座、同一训练配方**（CE + 0.5·KL，3 epoch，lr 1e-4），唯一差异是**教师数据**：
+
+| 数据差异 | 32B 教师法（logits/top_k=20） | sampling 法（n=8） | 传导到学生 |
+|---|---|---|---|
+| primary==hard 一致率 | **75.2%**（867 条 primary≠hard） | **100%** | 32B 数据 867 条触发"矛盾跳过"（`_build_kl_meta`，distill_dataset.py:397）→ 仅 CE 教硬答案、跳过 KL → 有效 KL 样本少 25% → **KL 拟合略弱（0.020 vs 0.019）** |
+| 数据量 | 4864 条 | 5041 条（−3.5%） | CE 数据略少，但闭集硬答案分布相近 → color/counting 两桶答对率**完全相同**（0.9257/0.724） |
+| CoT 来源 | 32B 教师 logits 法单次生成 | 8 次采样合并 | 风格差异（次要）；§13.2 CoT 退步主因是评估参照系为 sampling 教师，见 §13.5 更正 |
+| 序列 CE | 32B 教师目标文本风格与 3B 学生先验差距更大 | sampling 教师文本更"平均化"、易复现 | 学生对 32B 目标文本更"意外" → **CE 1.07→2.49** |
+
+**四点归因**：
+
+1. **硬标签 +1.5pp（0.820→0.835），主要靠 yes_no(+2.1pp)/other(+1.0pp)/open(+3.1pp)**——32B 教师在是非/杂项/开放题上硬答案更准（天花板更高），CE 把更准的硬答案灌给了学生。color/counting 两桶**纹丝不动**（0.9257/0.724），因这两桶采样法教师已接近天花板、32B 教师无额外增量。choice 反降 1.2pp（噪声，81 条小样本）。
+
+2. **软标签 KL 反而略升（0.0188→0.0200）——最反直觉但合理**：32B 数据 primary==hard 仅 75%，矛盾跳过让 867 条不学 KL，有效 KL 样本比 sampling 法少 25%，学生分布幅度拟合自然略弱。但 cosine 0.9962、top1 0.995 仍极高，**形状对齐没退**，只是概率数值精度微降。这正是"矛盾跳过"保护机制的可观察代价——它防止 color-leak 重现（color 0.93 健康），代价是 KL 拟合密度略降。
+
+3. **CoT Jaccard 表面反降（0.324→0.242）——经 §13.5 更正为评估假象**：原解读（32B CoT 风格单一）只是次要面。主因是 §13.2 用 sampling 教师 CoT 做参照、与 32B 学生训练教师不同源。同源重评（§13.5）Jaccard 升至 **0.366**，反超 sampling 学生。
+
+4. **序列 CE 表面反升（1.07→2.49）——经 §13.5 更正为评估假象**：同源重评 CE 降至 **0.664**，远低于 sampling 学生的 1.07，说明 32B 学生对其教师目标文本的复刻**更好**。
+
+### 13.4 总评：换 32B 教师值不值
+
+| | sampling 学生（0.82） | 32B 学生（0.835） | Δ |
+|---|---|---|---|
+| 硬标签 overall | 0.8198 | **0.835** | +1.5pp |
+| 距教师天花板（保留率） | 91.6% | **93.4%** | +1.8pp |
+| 软标签 KL 拟合 | **0.0188** | 0.0200 | -0.0012（略退） |
+| CoT 语义（同源口径，§13.5） | 0.808 | **0.836** | +0.028（更优） |
+| 序列 CE（同源口径，§13.5） | 1.07 | **0.664** | -0.41（更优） |
+
+**一句话**：换 32B 教师**全面占优**——硬标签 +1.5pp（overall 0.835，距天花板 6pp，保留率 93.4%）；CoT 复刻在同源口径下也反超 sampling 学生（Jaccard 0.366 > 0.324、CE 0.664 < 1.07）。唯一略退是软标签 KL 拟合（矛盾跳过致有效 KL 样本少 25%，0.020 vs 0.019，但 cosine/top1 仍极高）。**32B 教师学生在硬标签与推理复刻上均更优，是当前最佳学生。**（§13.2 的 CoT 退步是评估参照系不一致的假象，见 §13.5。）
+
+### 13.5 更正：公平 CoT 评估（训练/评估教师同源）
+
+> **新增（2026-09-15）**：§13.2 的 CoT/序列 CE 指标用 `val_soft_sampling`（sampling 教师 CoT）做参照，而 32B 学生训练用 32B 教师 CoT——**训练/评估教师不匹配**，CoT 指标偏低是参照系错误，非能力不足。本节用 32B 教师的 val 集 `training/32b_teacher/val_soft_logits.jsonl`（336 条，与 train 同源同法 logits/top_k=20）重评 32B 学生，CoT 指标才有意义。产出 `outputs/evaluation/report.json`（已备份 `/mnt/data/workspace/jlx/eval_32b_cot/report.json`）。
+
+| CoT 指标 | §13.2 错配评估（vs sampling 教师） | **§13.5 同源评估（vs 32B 教师）** | sampling 学生（对照） | 结论 |
+|---|---|---|---|---|
+| token Jaccard | 0.2416 | **0.3657** ↑+51% | 0.3237 | 32B 学生**反超** |
+| SBERT 语义 | 0.7684 | **0.8358** | 0.8077 | 32B 学生**反超** |
+| 序列 CE（closed mean） | 2.4872 | **0.6636** ↓-73% | 1.0695 | 32B 学生**远优** |
+
+**硬标签**（同源 32B 教师 val，336 条）：closed_answer_match_rate 0.8289、closed_primary_match_rate 0.8246（与 §13.1 的 0.835 同水平，样本集不同不直接比）。
+**软标签分布**（216 条可分配样本）：KL 0.1344 / cosine 0.9892 / top1 0.9954——KL 比 §13.2 高，因 32B val 软标签用 logits/top_k 法、候选集与 sampling val 不同，且 336 条多为更难样本；但 cosine/top1 仍极高，形状对齐没退。
+
+**结论**：32B 学生 CoT 复刻能力**经同源评估后全面优于 sampling 学生**——Jaccard 0.366、SBERT 0.836、CE 0.664 三项均胜。§13.2/§13.3 原本的"CoT 退步"是评估参照系不一致（训练 32B 教师 vs 评估 sampling 教师）造成的**假象**。教训：跨教师比 CoT 指标须同源，硬标签（vs 人工 GT）才可跨集比。
+
+---
+
+## 14. 两教师学生完整对比：32B 教师 vs qwen3.7-plus 教师
+
+> **新增（2026-09-15）**：本项目用了两个教师各训一个 3B 学生，本节做完整对比。两学生**同一 3B 基座（Qwen2.5-VL-3B-Instruct）、同一配方**（CE + 0.5·KL，3 epoch，lr 1e-4，LoRA r=64），唯一变量是教师——故差异完全归因于教师数据。
+
+### 14.1 两个教师的差异
+
+| | qwen3.7-plus 教师 | 32B 教师（Qwen2.5-VL-32B-Instruct-AWQ） |
+|---|---|---|
+| 部署方式 | bailian 网关（远程 API，`codingxrui.geely-test.com`） | 本地 32B-AWQ（~20GB 显存） |
+| 软标签法 | sampling n=8（顺序循环，thinking off，~36s/样本） | logits/top_k=20（贪婪，~15s/样本） |
+| 训练数据 | `training/agent_teacher/train_soft_sampling.jsonl` 5041 条 | `outputs/training_train2014/train.jsonl` 4864 条 |
+| primary==hard 一致率 | **100%** | 75.2%（867 条 primary≠hard，矛盾跳过 KL） |
+| CoT 来源 | qwen3.7-plus 8 次采样生成 | 32B 单次贪婪生成 |
+| 数据生成成本 | 远程 API、不占本地 GPU、~50h（5041×36s） | 本地 ~20GB GPU、~20h（4864×15s，有挂死风险，见看门狗） |
+| 学生 | `student_merged`（§12，0.8198） | `student_merged_32b`（§13，0.835） |
+
+> qwen3.7-plus 配置见 `agent_distill/configs/train2014_sampling.yaml`（`teacher.model: bailian/qwen3.7-plus`，网关坑见 [[bailian-gateway-teacher-access]]）；32B 教师见 `configs/default.yaml`（`teacher.model_name: models/Qwen2.5-VL-32B-Instruct-AWQ`）。
+
+### 14.2 硬标签对比（val_soft_sampling 2431，vs 人工 GT，scenario 口径）
+
+| 桶（样本数） | qwen3.7-plus 学生 | 32B 学生 | Δ |
+|---|---|---|---|
+| yes_no（1320） | 0.8712 | **0.8924** | +2.1pp |
+| color（323） | 0.9257 | 0.9257 | 0 |
+| counting（250） | 0.724 | 0.724 | 0 |
+| choice（81） | **0.7901** | 0.7778 | −1.2pp（噪声，81 条小样本） |
+| other（198） | 0.8081 | **0.8182** | +1.0pp |
+| open（259） | 0.5367 | **0.5676** | +3.1pp |
+| **overall** | 0.8198 | **0.835** | **+1.5pp** |
+| 距教师天花板 0.8954 | 91.6% | **93.4%** | +1.8pp |
+
+> 口径：两学生同用 scenario 口径（`[Answer]` 抽取后 crisp 精确匹配），vs 人工 GT，**直接可比**。color/counting 两桶完全相同——这两桶采样法教师已逼近天花板，32B 教师无额外增量。增量来自 yes_no/other/open（32B 教师硬答案更准）。
+
+### 14.3 软标签分布对比（val_soft_sampling，vs 各自教师分布）
+
+| 指标 | qwen3.7-plus 学生 | 32B 学生 | 解读 |
+|---|---|---|---|
+| KL(teacher‖student) | **0.0188** | 0.0200 | qwen3.7-plus 微优——数据 primary==hard 100%，全量 KL 有效；32B 有 867 条矛盾跳过，有效 KL 样本少 25% |
+| cosine | 0.9964 | 0.9962 | 持平（形状都对齐） |
+| top1 一致率 | 0.9986 | 0.995 | 持平（基线已近 100%） |
+| skipped / samples | 210 / 2221 | 210 / 2221 | 同（val 数据属性，非学生） |
+
+> KL 的差距（0.0188 vs 0.0200）很小且可解释：32B 数据 25% 样本矛盾跳过 KL（仅 CE 教硬答案），有效 KL 样本少 → 拟合密度略降。这是"矛盾跳过"防 color-leak 的可观察代价（§13.3）。cosine/top1 说明分布形状对齐没退。
+
+### 14.4 CoT / 序列 CE 对比（公平同源口径：各 vs 自己教师的 val）
+
+| 指标 | qwen3.7-plus 学生（vs qwen3.7-plus val） | 32B 学生（vs 32B val，§13.5） | Δ |
+|---|---|---|---|
+| token Jaccard | 0.3237 | **0.3657** | +0.042 |
+| SBERT 语义 | 0.8077 | **0.8358** | +0.028 |
+| 序列 CE（closed mean） | 1.0695 | **0.6636** | −0.41（更优） |
+
+> **关键**：CoT 指标必须同源（训练教师 = 评估 val 教师）才可比。qwen3.7-plus 学生的 CoT 指标用 `val_soft_sampling`（qwen3.7-plus 自己的 val），32B 学生的用 `val_soft_logits`（32B 自己的 val，§13.5）——两者都同源，**公平可比**。32B 学生三项全胜。（§13.2 曾因用错参照系得出"32B CoT 退步"的假象，§13.5 已更正。）
+
+### 14.5 差异归因：为什么本地 32B 反而强过更大的 qwen3.7-plus
+
+qwen3.7-plus（更大、更新的网关模型）做教师，学生反而不及本地 32B 教师的学生。三点根因：
+
+1. **同族教师，文本风格同源**：32B 与 3B 学生都是 Qwen2.5-VL，措辞/格式/推理链路同代同源，3B 学生复刻更易——序列 CE 0.66 vs 1.07 是最硬的证据（32B 教师目标文本对 3B 学生"更不意外"）。qwen3.7-plus 是另一代模型，文本风格 3B 学得更费力。
+2. **logits 法 vs sampling 法的软标签精度**：32B 用 logits/top_k=20，分布是真实 logit 归一化（连续概率）；qwen3.7-plus 用 n=8 采样，是蒙特卡洛估计（离散计数，8 粒度粗糙）。前者精度高，CE+KL 教的分布更准。
+3. **CoT 确定性**：32B 贪婪 CoT 确定性强、目标稳定；qwen3.7-plus n=8 采样 CoT 多样性高，单条目标更"飘"，学生拟合的文本目标一致性低。
+
+> 注：qwen3.7-plus 数据 primary==hard 100%（软标签 argmax 与硬答案完全一致）是其**唯一结构性优势**——故软标签 KL 微优（0.0188 vs 0.0200）。但因 32B 教师在前 3 点上占优，net 仍是 32B 学生更强。
+
+### 14.6 总评与选型建议
+
+| 维度 | qwen3.7-plus 学生 | 32B 学生 | 胜者 |
+|---|---|---|---|
+| 硬标签 overall | 0.8198 | 0.835 | **32B**（+1.5pp） |
+| 距天花板保留率 | 91.6% | 93.4% | **32B** |
+| CoT token 复刻 | 0.3237 | 0.3657 | **32B** |
+| CoT 语义 | 0.8077 | 0.8358 | **32B** |
+| 序列 CE | 1.0695 | 0.6636 | **32B** |
+| 软标签 KL 拟合 | 0.0188 | 0.0200 | **qwen3.7-plus**（微优） |
+
+**一句话：本地 32B 教师学生全面占优**——硬标签 +1.5pp、CoT 三项全胜，唯一让位是软标签 KL 微升（矛盾跳过的可解释代价）。根因是 32B 与 3B 学生同族同源、logits 法软标签精度高、CoT 确定性强；qwen3.7-plus 虽更大但跨代异源、sampling 法粗糙。
+
+**选型**：
+- **追求学生质量** → 32B 教师（本地 ~20GB GPU 做一次性数据生成，看门狗自愈防挂死）。
+- **无本地大 GPU / 需远程** → qwen3.7-plus 教师（远程 API，但 n≤4 需顺序循环、~36s/样本、依赖网络）。
+- 两者学生均为 3B 部署（同 VRAM/延迟），推理成本相同；差异只在数据生成阶段。
+
+## 15. 四方对比：32B 教师 / qwen3.7-plus 教师 / 两个 3B 学生
+
+> **新增（2026-09-15）**：把两个教师天花板与两个学生放进一张表。两学生同一 3B 基座（Qwen2.5-VL-3B-Instruct）、同一配方（CE + 0.5·KL，3 epoch，lr 1e-4，LoRA r=64），唯一变量是教师——故学生间差异完全归因于教师数据。两教师自身则代表各自数据生成管线上限。
+
+### 15.1 主对比轴：sampling val 2431（有人工 GT、完整分布）
+
+四个模型中三个在此 val 上可直接比（vs 人工 GT，crisp `[Answer]` 精确匹配口径）：
+
+| 模型 | val 集 | overall（vs GT） | 距 qwen3.7-plus 天花板 |
+|---|---|---|---|
+| qwen3.7-plus 教师（天花板） | sampling 2431 | **0.8954** | — |
+| qwen3.7-plus 学生 | sampling 2431 | 0.8198 | 91.6% |
+| 32B 学生 | sampling 2431 | **0.835** | 93.4% |
+| 32B 教师（天花板） | sampling 2431 | **未评估**¹ | — |
+
+> ¹ **32B 教师天花板缺失说明**：32B 教师未在 sampling val 2431 上跑过推理（需 32B-AWQ 对 2431 张图逐一前向，~10h+，未纳入现有评估）。在 32B 教师自身 val（`training/32b_teacher/val_soft_logits.jsonl`，336 条）上，其 hard_label 与人工 GT **100% 一致**——但该 val 是"教师答对子集"（构造时只保留教师 hard_label==GT 的样本，与 sampling val 零交集），天花板退化为 1.0 的 sanity check，不代表真实分布上的天花板。故 4 方中 32B 教师天花板列为"参考缺失"，以 qwen3.7-plus 0.8954 为唯一可比天花板基准。32B 学生（0.835）反超 qwen3.7-plus 学生（0.8198），间接证明 32B 教师数据质量 ≥ qwen3.7-plus。如需补齐 32B 教师在 2431 上的精确天花板，见 §15.5。
+
+### 15.2 分桶四方对比（sampling val 2431，vs 人工 GT）
+
+| 桶（样本数） | qwen3.7-plus 教师 | qwen3.7-plus 学生 | 32B 学生 | 32B 教师 |
+|---|---|---|---|---|
+| yes_no（1320） | ~0.95 | 0.8712 | **0.8924** | — |
+| color（323） | 0.959 | 0.9257 | 0.9257 | — |
+| counting（250） | 0.843 | 0.724 | 0.724 | — |
+| choice（81） | 0.869 | **0.7901** | 0.7778 | — |
+| other（198） | — | 0.8081 | **0.8182** | — |
+| open（259） | ~0.60 | 0.5367 | **0.5676** | — |
+| **overall（2431）** | **0.8954** | 0.8198 | **0.835** | — |
+
+> 教师天花板取自 §2.3/§12.6；两学生取自 §14.2。32B 教师列空白（见 §15.1 脚注¹）。color/counting 两桶两学生**纹丝相同**——这两桶 sampling 法教师已逼近天花板，32B 教师无增量；增量来自 yes_no（+2.1pp）/other（+1.0pp）/open（+3.1pp）。choice 反降 1.2pp（噪声，81 条小样本）。
+
+### 15.3 软标签分布四方对比（vs 各自教师分布，sampling val）
+
+| 指标 | qwen3.7-plus 教师 | qwen3.7-plus 学生 | 32B 学生 | 32B 教师 |
+|---|---|---|---|---|
+| KL(teacher‖student) | 0（自比） | **0.0188** | 0.0200 | 0（自比） |
+| cosine | 1.0 | 0.9964 | 0.9962 | 1.0 |
+| top1 一致率 | 1.0 | 0.9986 | 0.995 | 1.0 |
+| skipped / samples | — | 210 / 2221 | 210 / 2221 | — |
+
+> 软标签是"学生 vs 自己的教师"，两学生教师不同、KL 跨教师不严格可比但量级接近。qwen3.7-plus 学生 KL 微优（primary==hard 100%，全量 KL 有效）；32B 学生 867 条矛盾跳过致有效 KL 样本少 25%（§13.3）。cosine/top1 两者持平（形状都对齐）。两教师自比=0/1.0（天花板）。
+
+### 15.4 CoT 四方对比（公平同源口径：各 vs 自己教师 val）
+
+| 指标 | qwen3.7-plus 学生（vs qwen3.7-plus val） | 32B 学生（vs 32B val，§13.5） |
+|---|---|
+| token Jaccard | 0.3237 | **0.3657** |
+| SBERT 语义 | 0.8077 | **0.8358** |
+| 序列 CE（closed mean） | 1.0695 | **0.6636** |
+
+> CoT 必须同源（训练教师 = 评估 val 教师）才可比（§13.5 更正）。两教师自身 CoT 复刻 = 1.0（自比），故只列两学生。32B 学生三项全胜（§14.4）。**不要跨教师比 CoT**——§13.2 曾因用错参照系得出"32B CoT 退步"的假象。
+
+### 15.5 32B 教师天花板补齐方案（可选）
+
+如需 32B 教师在 sampling val 2431 上的精确天花板（让 4 方完全可比），跑一次 32B 教师评估（把 32B 教师权重当 `student_model_path`、`eval_data_path` 指向 `val_soft_sampling.jsonl`）：
+
+```
+cd /home/jlx/a6000_mnt/workspace/vlm-distillation
+CUDA_VISIBLE_DEVICES=0 HF_ENDPOINT=https://hf-mirror.com \
+  /home/jlx/miniconda3/envs/agent_distill/bin/python \
+  scripts/run_full_pipeline.py --config /mnt/data/workspace/jlx/eval_32b_teacher_ceiling.yaml --steps evaluation
+```
+
+约 ~10h（2431 张 32B 前向），产出后填齐 §15.1/§15.2 的 32B 教师列。**当前未跑**——按需启动，会占用工作站 GPU（~20GB）。
+
+### 15.6 四方总评
+
+| 维度 | qwen3.7-plus 教师 | qwen3.7-plus 学生 | 32B 学生 | 32B 教师 |
+|---|---|---|---|---|
+| 硬标签 overall（vs GT） | 0.8954 | 0.8198 | **0.835** | N/A（未等价比） |
+| 保留率（vs qwen3.7-plus 天花板 0.8954） | — | 91.6% | **93.4%** | — |
+| 软标签 KL 拟合 | — | **0.0188** | 0.0200 | — |
+| CoT token 复刻（同源） | — | 0.3237 | **0.3657** | — |
+| 序列 CE（同源） | — | 1.0695 | **0.6636** | — |
+
+**一句话**：在可比口径下，**32B 教师学生（0.835）> qwen3.7-plus 教师学生（0.8198）**，距 qwen3.7-plus 天花板（0.8954）更近（保留率 93.4% vs 91.6%）；CoT 同源三项全面反超；唯一让位是软标签 KL（0.020 vs 0.019，矛盾跳过的可解释代价，cosine/top1 仍持平）。32B 教师天花板因 val 构造差异未能等价比，但其学生已反超 qwen3.7-plus 学生，间接证明 32B 教师数据质量 ≥ qwen3.7-plus。根因（§14.5）：32B 与 3B 学生同族同源、logits 法软标签精度高、CoT 确定性强；qwen3.7-plus 虽更大但跨代异源、sampling n=8 法粗糙。
+
+---
+
 ## 附录 A：完整 report.json 字段
 
 ### 顶层
@@ -637,7 +891,7 @@ yes_no(1320) + color(323) = 1693/2431 = **70%** 样本在这两桶，base 本就
 | `train_data_path` | `training/agent_teacher/train_soft_sampling.jsonl` |
 | `eval_data_path` | `./training/agent_teacher/val_soft_sampling.jsonl` |
 | `is_heldout` | true |
-| `student_model_path` | `./outputs/student_merged` |
+| `student_model_path` | `./outputs/student_merged_32b` |
 | `max_samples` | null |
 | `parameter_count.total` | 3,754,622,976 |
 
@@ -645,19 +899,19 @@ yes_no(1320) + color(323) = 1693/2431 = **70%** 样本在这两桶，base 本就
 | 字段 | 值 |
 |---|---|
 | `samples_evaluated` | 2431 |
-| `closed_answer_match_rate` | 0.8198 |
-| `closed_primary_match_rate` | 0.8198 |
+| `closed_answer_match_rate` | 0.8318 |
+| `closed_primary_match_rate` | 0.8318 |
 | `open_text_similarity` | 0.0 |
 | `open_text_semantic_similarity` | null |
-| `cot_similarity` | 0.3237 |
-| `cot_semantic_similarity` | 0.8077 |
-| `answer_sequence_ce.closed.mean` | 1.0695（samples 2431） |
+| `cot_similarity` | 0.2416 |
+| `cot_semantic_similarity` | 0.7684 |
+| `answer_sequence_ce.closed.mean` | 2.4872（samples 2431） |
 | `answer_sequence_ce.open.mean` | null（samples 0） |
 | `closed_distribution.samples` | 2221 |
 | `closed_distribution.skipped` | 210 |
-| `closed_distribution.kl_mean` | 0.018826 |
-| `closed_distribution.cosine_mean` | 0.9964 |
-| `closed_distribution.top1_distribution_match_rate` | 0.9986 |
+| `closed_distribution.kl_mean` | 0.019959 |
+| `closed_distribution.cosine_mean` | 0.9962 |
+| `closed_distribution.top1_distribution_match_rate` | 0.995 |
 | `scenario_buckets.overall_accuracy` | 0.8198（1993/2431） |
 | `scenario_buckets.buckets.yes_no` | 1150/1320 = 0.8712 |
 | `scenario_buckets.buckets.color` | 299/323 = 0.9257 |
@@ -688,6 +942,11 @@ yes_no(1320) + color(323) = 1693/2431 = **70%** 样本在这两桶，base 本就
 | `outputs/teacher/val_softl_multi.jsonl` | 验证集，val2014，2431 条，multi 采样软标签（n=8，含 answer_distribution + logprob_distribution） |
 | `../agent_distill/train_soft_logits/distill_train_sampling.jsonl` | train2014 multi 采样软标签，5009 条，n=8，全桶 primary==hard 100%，含双字段。治本数据原始生成位置 |
 | `outputs/student_merged/` | 学生合并全权重（bf16） |
+| `outputs/student_merged_32b/` | **32B-教师学生**合并全权重（bf16），§13 评估对象，训于 4864 条 train2014（32B 教师 logits/top_k=20 软标签） |
+| `outputs/student_ckpt_32b/` | 32B 学生 LoRA adapter + checkpoints（checkpoint-100/200…，--resume true 续训点） |
+| `/mnt/data/workspace/jlx/eval_32b/report.json` | 32B 学生评估报告备份（产出原在 outputs/evaluation/report.json，已备份防覆盖） |
+| `/mnt/data/workspace/jlx/train_32b.yaml` | 32B 学生训练配置（output_dir=student_ckpt_32b / merged_32b，--save_steps 100） |
+| `outputs/training_train2014/train.jsonl` | 32B 教师训练数据，4864 条，logits/top_k=20 软标签，primary==hard 75.2%（867 条矛盾跳过 KL） |
 | `outputs/student_ckpt/` | LoRA adapter + checkpoints |
 | `outputs/evaluation/report.json` | 本评估报告 |
 

@@ -1,0 +1,127 @@
+{
+  "train_data_path": "outputs/training/train.jsonl",
+  "eval_data_path": "./training/32b_teacher/val_soft_logits.jsonl",
+  "is_heldout": true,
+  "student_model_path": "./outputs/student_merged_32b",
+  "max_samples": null,
+  "dimensions": {
+    "distillation_quality": {
+      "dimension": "distillation_quality",
+      "samples_evaluated": 336,
+      "closed_answer_match_rate": 0.8289,
+      "closed_primary_match_rate": 0.8246,
+      "open_text_similarity": 0.3408,
+      "open_text_semantic_similarity": 0.8335,
+      "cot_similarity": 0.3657,
+      "cot_semantic_similarity": 0.8358,
+      "answer_sequence_ce": {
+        "closed": {
+          "mean": 0.6636,
+          "samples": 228
+        },
+        "open": {
+          "mean": 0.8173,
+          "samples": 108
+        },
+        "temperature": 1.0,
+        "note": "学生对教师目标文本的自回归 NLL（越低越好）；推理 T=1，无温度缩放；分闭集/开集"
+      },
+      "closed_distribution": {
+        "samples": 216,
+        "skipped": 12,
+        "kl_mean": 0.134388,
+        "cosine_mean": 0.9892,
+        "top1_distribution_match_rate": 0.9954,
+        "temperature": 1.0,
+        "note": "学生在答案 token 位置对候选集的分布 vs 教师 answer_distribution；KL(teacher||student) 越低越好；cosine 越高越好；top1 为候选集内 argmax 一致率；skipped=多token/冲突/定位失败"
+      },
+      "scenario_buckets": {
+        "overall_accuracy": 0.0,
+        "overall_total": 0,
+        "overall_correct": 0,
+        "buckets": {},
+        "note": "学生 vs 记录自带 ground_truth(人工GT)的绝对准确率，按 question_type 模板分桶；复用 distillation_quality 同一轮生成，无额外开销；原 driving_scenario 维度(独立生成+COCO查表)已并入此处"
+      },
+      "detail": [
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000119748.jpg",
+          "question_type": "color",
+          "bucket": "color",
+          "question": "What color light is lit on the traffic light?",
+          "teacher_answer": "red",
+          "student_answer": "red",
+          "teacher_output": "[Reasoning] The image shows a traffic light mounted on a pole. The traffic light has three circular sections, each representing a different color: red, yellow, and green. The top section of the traffic light is illuminated with a bright red light, indicating that it is the active signal. The other sections are not lit, confirming that the red light is the one currently active. This visual evidence directly points to the red light being lit.\n[Answer] red",
+          "student_output": "[Reasoning] The traffic light in the image shows a red light illuminated. This is evident from the bright red color of the light, which is clearly visible and distinct from the other colors typically present in a traffic light (green and yellow). The red light is positioned at the top, indicating that vehicles or pedestrians should stop. The surrounding environment, including the wet road and overcast sky, does not affect the color of the light itself but provides context for the setting.\n[Answer] red",
+          "teacher_soft_label": {
+            "red": 0.5975350737571716,
+            "orange": 0.09741667658090591,
+            "blue": 0.08885852992534637,
+            "black": 0.07023894041776657,
+            "yellow": 0.06227337196469307,
+            "white": 0.0576743558049202,
+            "brown": 0.026003099977970123
+          },
+          "student_soft_label": {
+            "red": 0.9631,
+            "orange": 0.0065,
+            "blue": 0.0137,
+            "black": 0.0057,
+            "yellow": 0.0057,
+            "white": 0.0045,
+            "brown": 0.0008
+          }
+        },
+        {
+          "image_path": "data/filter_coco/images/val2014/COCO_val2014_000000126657.jpg",
+          "question_type": "color",
+          "bucket": "color",
+          "question": "What color is that vehicle by the building?",
+          "teacher_answer": "red",
+          "student_answer": "blue",
+          "teacher_output": "[Reasoning] The image shows a group of motorcycles riding down a street in front of a large building. The motorcycle closest to the building is red and is positioned on the right side of the road. Its color is distinct and stands out against the neutral tones of the building and the road. The red color is clearly visible on the body of the motorcycle, making it identifiable as the vehicle by the building.\n[Answer] red",
+          "student_output": "[Reasoning] The image shows a street scene with several motorcycles in motion. The vehicles are clearly visible, and one of them is prominently featured in the foreground. This motorcycle has a blue body with chrome accents, including the exhaust pipes and other metallic details. The blue color is distinct and stands out against the background, which includes a building with a light-colored facade. The motorcycle's design and color are consistent throughout its visible parts, making it easy to identify.\n[Answer] blue",
+          "teacher_soft_label": {
+            "red": 0.5687038898468018,
+            "white": 0.08187086880207062,
+            "green": 0.07681918889284134,
+            "black": 0.07334781438112259,
+            "yellow": 0.06988096237182617,
+            "purple": 0.04482225328683853,
+            "pink": 0.04471316933631897,
+            "gray": 0.03984175622463226
+          },
+          "student_soft_label": {
+            "red": 0.8812,
+            "white": 0.0302,
+            "green": 0.0183,
+            "black": 0.0235,
+            "yellow": 0.0235,
+            "purple": 0.0049,
+            "pink": 0.0098,
+            "gray": 0.0086
+          }
+        }
+      ]
+    },
+    "deployment_efficiency": {
+      "dimension": "deployment_efficiency",
+      "parameter_count": {
+        "total": 3754622976,
+        "trainable": 3754622976
+      },
+      "total_parameters": 3754622976,
+      "trainable_parameters": 3754622976,
+      "model_dir_size_mb": 7176.67,
+      "peak_vram_gb": 7.254,
+      "avg_latency_seconds": 3.947,
+      "median_latency_seconds": 3.7485,
+      "throughput_samples_per_second": 0.2534,
+      "benchmark_samples": 50
+    }
+  },
+  "model_load_seconds": 78.89,
+  "parameter_count": {
+    "total": 3754622976,
+    "trainable": 3754622976
+  }
+}
